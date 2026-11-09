@@ -592,6 +592,8 @@ interface OrderBody {
   price?: number;        // 0 或不传 = 市价
   tif?: 'gtc' | 'ioc' | 'poc' | 'fok';
   reduceOnly?: boolean;
+  stop?: number;         // 可选，开仓顺手挂的止损价，0 或不传 = 不挂
+  target?: number;       // 可选，开仓顺手挂的止盈价，0 或不传 = 不挂
 }
 
 interface PlaceSpec {
@@ -734,6 +736,8 @@ router.post('/order', wrap(async (req, res) => {
   const contract = String(body.contract ?? '');
   if (!contract) throw new GateError(400, 'BAD_INPUT', '缺少 contract');
   const side: Direction = body.side === 'short' ? 'short' : 'long';
+  const stop = Number(body.stop ?? 0) || 0;
+  const target = Number(body.target ?? 0) || 0;
   const { prepared, order } = await placeOrder({
     contract,
     side,
@@ -742,9 +746,14 @@ router.post('/order', wrap(async (req, res) => {
     tif: body.tif,
     reduceOnly: Boolean(body.reduceOnly),
   });
+  // 开仓顺手挂保护。两个价都空着就是纯开仓，不碰现有的触发单。
+  const bracket = (stop > 0 || target > 0) && !body.reduceOnly
+    ? await attachAfterEntry(contract, side, stop, target)
+    : null;
   res.json({
     ok: true,
     order: orderReceipt(order),
+    bracket,
     checked: {
       notional: Math.round(prepared.notional * 100) / 100,
       multiplier: Number(prepared.info.quanto_multiplier),
@@ -876,17 +885,15 @@ function checkTriggerPrices(direction: Direction, mark: number, stop: number, ta
  * 就有两套止损，到价时几张单一起打，平出个反向仓来。
  * stop 和 target 都留空 = 只撤不挂，也就是不要保护。
  */
-router.post('/bracket', wrap(async (req, res) => {
-  requireArm(req);
-  const { contract: contractRaw, direction, stop, target } = req.body ?? {};
-  if (!contractRaw || !['long', 'short'].includes(String(direction))) {
-    throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
-  }
-  const contract = String(contractRaw);
-  const dir = direction as Direction;
+interface BracketResult {
+  created: { kind: string; id: string; triggerPrice: number }[];
+  canceled: string[];
+  errors: string[];
+  size: number;
+}
 
-  const stopRaw = Number(stop ?? 0);
-  const targetRaw = Number(target ?? 0);
+/** 按覆盖语义重挂这一边的止损止盈，开仓顺手挂的地方也走这里 */
+async function applyBracket(contract: string, dir: Direction, stopRaw: number, targetRaw: number): Promise<BracketResult> {
   const hasStop = Number.isFinite(stopRaw) && stopRaw > 0;
   const hasTarget = Number.isFinite(targetRaw) && targetRaw > 0;
 
@@ -952,7 +959,36 @@ router.post('/bracket', wrap(async (req, res) => {
   if (jobs.length === 0 && errors.length > 0) {
     throw new GateError(400, 'CANCEL_FAILED', errors.join(' | '));
   }
-  res.json({ ok: errors.length === 0, created, canceled, errors, size: mine?.size ?? 0 });
+  return { created, canceled, errors, size: mine?.size ?? 0 };
+}
+
+/**
+ * 开仓顺手挂保护。只有开了仓才挂得上，所以先读持仓再决定。
+ * 限价单还没成交时返回 pending，前端记下来，等持仓出现再补挂。
+ */
+async function attachAfterEntry(contract: string, dir: Direction, stop: number, target: number) {
+  for (let i = 0; i < 3; i++) {
+    const sides = await readSides(contract).catch(() => [] as Side[]);
+    if (sides.some((s) => s.direction === dir && s.size > 0)) {
+      try {
+        return { status: 'attached' as const, ...(await applyBracket(contract, dir, stop, target)) };
+      } catch (e) {
+        return { status: 'failed' as const, error: e instanceof GateError ? `${e.label} ${e.detail}` : String(e) };
+      }
+    }
+    if (i < 2) await new Promise((r) => setTimeout(r, 250));
+  }
+  return { status: 'pending' as const };
+}
+
+router.post('/bracket', wrap(async (req, res) => {
+  requireArm(req);
+  const { contract: contractRaw, direction, stop, target } = req.body ?? {};
+  if (!contractRaw || !['long', 'short'].includes(String(direction))) {
+    throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
+  }
+  const r = await applyBracket(String(contractRaw), direction as Direction, Number(stop ?? 0), Number(target ?? 0));
+  res.json({ ok: r.errors.length === 0, ...r });
 }));
 
 /**

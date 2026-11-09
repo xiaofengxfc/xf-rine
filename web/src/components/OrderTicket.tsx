@@ -16,14 +16,19 @@ interface Props {
   onRiskPctChange: (v: number) => void;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
   onRefresh: () => void;
+  /** 限价单还没成交、保护单挂不上时，把要挂的价交给页面记着 */
+  onQueueProtect: (p: { contract: string; direction: 'long' | 'short'; stop: number; target: number }) => void;
 }
 
 export default function OrderTicket({
   contract, bracket, applied, armed, token, account, liveTrading, keysConfigured, env,
-  riskPct, onRiskPctChange, onToast, onRefresh,
+  riskPct, onRiskPctChange, onToast, onRefresh, onQueueProtect,
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
   const [sizeStr, setSizeStr] = useState('');
+  const [protect, setProtect] = useState<'none' | 'manual'>('none');
+  const [stopStr, setStopStr] = useState('');
+  const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
   const [limitStr, setLimitStr] = useState('');
   const [leverage, setLeverage] = useState(10);
@@ -51,6 +56,8 @@ export default function OrderTicket({
   useEffect(() => {
     setSizeStr('');
     setPending(false);
+    setStopStr('');
+    setTargetStr('');
   }, [contract?.name]);
 
   const priceUsed = priceMode === 'limit' ? Number(limitStr) || 0 : last;
@@ -68,6 +75,11 @@ export default function OrderTicket({
     : 0;
   /** 按同样的杠杆和可用余额，这笔最多能做多少张 */
   const affordableNow = need > 0 ? Math.floor((size * avail) / need) : 0;
+
+  const stopNum = Number(stopStr) || 0;
+  const targetNum = Number(targetStr) || 0;
+  // 方案是分方向的，看多的方案不能填进卖出的单里
+  const planBracket = bracket && bracket.direction === side ? bracket : null;
 
   const liqEstimate = useMemo(() => {
     if (!priceUsed || leverage <= 0) return 0;
@@ -98,7 +110,11 @@ export default function OrderTicket({
                 ? `张数最多 ${sizeMax}`
                 : priceMode === 'limit' && !(priceUsed > 0)
                   ? '限价必须大于 0'
-                  : '';
+                  : protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= priceUsed : stopNum <= priceUsed)
+                    ? '止损价方向不对'
+                    : protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= priceUsed : targetNum >= priceUsed)
+                      ? '止盈价方向不对'
+                      : '';
 
   async function submit() {
     if (!contract || !token) return;
@@ -110,7 +126,13 @@ export default function OrderTicket({
       onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
     }
     try {
-      const r = await jsend<{ ok: boolean; order: { id: string; status: string; fillPrice: number }; checked: { notional: number } }>(
+      const wantProtect = protect === 'manual' && (stopNum > 0 || targetNum > 0);
+      type Attach =
+        | { status: 'attached'; created: { kind: string }[] }
+        | { status: 'pending' }
+        | { status: 'failed'; error: string }
+        | null;
+      const r = await jsend<{ ok: boolean; order: { id: string; status: string; fillPrice: number }; bracket: Attach; checked: { notional: number } }>(
         'POST', '/api/order',
         {
           contract: contract.name,
@@ -118,10 +140,21 @@ export default function OrderTicket({
           side,
           price: priceMode === 'limit' ? priceUsed : 0,
           tif: priceMode === 'market' ? 'ioc' : 'gtc',
+          stop: wantProtect ? stopNum : 0,
+          target: wantProtect ? targetNum : 0,
         },
         token,
       );
-      onToast('ok', `下单成功 #${r.order.id}`, `${r.order.status} · 名义 ${fmtUsd(r.checked.notional)} USDT${r.order.fillPrice ? ` · 成交价 ${r.order.fillPrice}` : ''}`);
+      const b = r.bracket;
+      onToast(
+        'ok',
+        `下单成功 #${r.order.id}`,
+        `${r.order.status} · 名义 ${fmtUsd(r.checked.notional)} USDT`
+        + `${r.order.fillPrice ? ` · 成交价 ${r.order.fillPrice}` : ''}`
+        + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
+      );
+      if (b?.status === 'failed') onToast('err', '保护单没挂上', b.error);
+      if (b?.status === 'pending') onQueueProtect({ contract: contract.name, direction: side, stop: stopNum, target: targetNum });
       setPending(false);
       setSizeStr('');
       onRefresh();
@@ -207,6 +240,53 @@ export default function OrderTicket({
           </div>
         )}
 
+        <div className="field" style={{ marginBottom: 6 }}>
+          <label>止盈止损（可以不设）</label>
+          <div className="seg" style={{ width: '100%' }}>
+            <button className={protect === 'none' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('none'); setPending(false); }}>不设</button>
+            <button className={protect === 'manual' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('manual'); setPending(false); }}>手动设</button>
+          </div>
+        </div>
+
+        {protect === 'manual' && (
+          <>
+            <div className="row2" style={{ marginBottom: 6 }}>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>止损价</label>
+                <input
+                  className="input sm"
+                  inputMode="decimal"
+                  placeholder="留空就不挂"
+                  value={stopStr}
+                  onChange={(e) => { setStopStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>止盈价</label>
+                <input
+                  className="input sm"
+                  inputMode="decimal"
+                  placeholder="留空就不挂"
+                  value={targetStr}
+                  onChange={(e) => { setTargetStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
+                />
+              </div>
+            </div>
+            <div className="edit-note">
+              {planBracket && (
+                <button
+                  className="chip"
+                  style={{ marginRight: 6 }}
+                  onClick={() => { setStopStr(String(planBracket.stop)); setTargetStr(String(planBracket.target)); setPending(false); }}
+                >
+                  填方案价
+                </button>
+              )}
+              成交之后才挂得上。限价单还没成交就先记着，等它成交页面自动补挂。
+            </div>
+          </>
+        )}
+
         <dl className="summary">
           <dt>现价</dt><dd>{fmtPrice(last, priceRound)}</dd>
           <dt>名义价值</dt><dd className={notional > 0 ? '' : 'dim'}>{notional > 0 ? fmtUsd(notional) : '—'} USDT</dd>
@@ -243,6 +323,14 @@ export default function OrderTicket({
               名义 <b>{fmtUsd(notional)}</b> USDT，{leverage}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
               {env === 'testnet' ? '模拟盘，扣的是测试网假钱。' : '这是真实资金。'}
             </p>
+            {protect === 'manual' && (stopNum > 0 || targetNum > 0) && (
+              <p className="dim" style={{ fontSize: 11 }}>
+                成交后挂保护：
+                {stopNum > 0 ? `止损 ${fmtPrice(stopNum, priceRound)}` : ''}
+                {stopNum > 0 && targetNum > 0 ? ' / ' : ''}
+                {targetNum > 0 ? `止盈 ${fmtPrice(targetNum, priceRound)}` : ''}
+              </p>
+            )}
             {marginShort > 0 && (
               <p className="warn">
                 保证金不够：连手续费要 {fmtUsd(need)} USDT，可用只有 {fmtUsd(avail)} USDT，差 {fmtUsd(marginShort)} USDT。

@@ -95,6 +95,9 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [side, setSide] = useState<'long' | 'short'>(prefs0.side);
   const [riskPct, setRiskPct] = useState(prefs0.riskPct);
+  /** 限价单带止盈止损下的单：等它成交、持仓出现，再把保护补上 */
+  const [protectQueue, setProtectQueue] = useState<{ id: number; contract: string; direction: 'long' | 'short'; stop: number; target: number; at: number }[]>([]);
+  const protectSeq = useRef(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number>(0);
@@ -210,6 +213,10 @@ export default function App() {
     }
   }, []);
 
+  const queueProtect = useCallback((p: { contract: string; direction: 'long' | 'short'; stop: number; target: number }) => {
+    setProtectQueue((list) => [...list, { ...p, id: ++protectSeq.current, at: Date.now() }]);
+  }, []);
+
   const loadPrivate = useCallback(async () => {
     if (!config?.keys.configured) return;
     try {
@@ -236,6 +243,23 @@ export default function App() {
     const t = window.setInterval(() => void loadPrivate(), 6_000);
     return () => window.clearInterval(t);
   }, [loadPrivate]);
+
+  // 限价单成交之后才挂得上保护。持仓一出现就补挂一次，挂完或者等太久就把这条丢掉。
+  useEffect(() => {
+    if (!armed || !token || protectQueue.length === 0) return;
+    for (const q of protectQueue) {
+      const open = positions.some((p) => p.contract === q.contract && p.direction === q.direction && p.size > 0);
+      const stale = Date.now() - q.at > 30 * 60_000;
+      if (!open && !stale) continue;
+      setProtectQueue((list) => list.filter((x) => x.id !== q.id));
+      if (!open) continue;
+      // 这一边已经有保护单了就别覆盖用户后来手动挂的那套
+      if (priceOrders.some((o) => o.contract === q.contract && o.direction === q.direction)) continue;
+      void jsend('POST', '/api/bracket', { contract: q.contract, direction: q.direction, stop: q.stop, target: q.target }, token)
+        .then(() => { push('ok', '保护单已补挂', `${q.contract} · ${q.direction === 'long' ? '多' : '空'}`); void loadPrivate(); })
+        .catch((e) => push('err', '补挂保护失败', (e as Error).message));
+    }
+  }, [armed, token, positions, priceOrders, protectQueue, push, loadPrivate]);
 
   useEffect(() => {
     void loadNews(contract);
@@ -410,6 +434,7 @@ export default function App() {
             onRiskPctChange={setRiskPct}
             onToast={push}
             onRefresh={loadPrivate}
+            onQueueProtect={queueProtect}
           />
 
           <PositionsCard
