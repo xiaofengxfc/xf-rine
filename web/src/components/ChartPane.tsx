@@ -86,12 +86,14 @@ interface Props {
   positions: Position[];
   resetKey: string;
   loading: boolean;
+  /** 拖到最左边时向上再要一页更早的 K 线 */
+  onNeedOlder?: () => void;
   onIntervalChange: (i: string) => void;
   onManualLevels: (prices: number[]) => void;
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, patterns, bracket, positions, resetKey, loading, onIntervalChange, onManualLevels,
+  contract, interval, bars, levels, patterns, bracket, positions, resetKey, loading, onNeedOlder, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -107,6 +109,9 @@ export default function ChartPane({
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
   const lastTimeRef = useRef<number | null>(null);
+  /** 图上最左边那根的时间和总根数，用来识别「往前补了一段历史」 */
+  const firstTimeRef = useRef<number | null>(null);
+  const countRef = useRef(0);
   const [tool, setTool] = useState<DrawingKind | null>(null);
   const [legend, setLegend] = useState<{ o: number; h: number; l: number; c: number; v: number; t: number } | null>(null);
 
@@ -311,12 +316,41 @@ export default function ChartPane({
         color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
       })));
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
+      firstTimeRef.current = clean[0]?.time ?? null;
+      countRef.current = clean.length;
       // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
       const from = Math.max(0, clean.length - 160);
       chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + 6 });
     };
 
     try {
+      // 往前补了历史。整段 setData 就够了，视口不用管（见下面）
+      const cleanBars = normalize(bars);
+      const prevFirst = firstTimeRef.current;
+      const prevCount = countRef.current;
+      if (
+        lastKeyRef.current === resetKey
+        && prevFirst != null
+        && cleanBars.length > prevCount
+        && cleanBars[0]!.time < prevFirst
+      ) {
+        price.setData(cleanBars.map((b) => ({
+          time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
+        })));
+        vol.setData(cleanBars.map((b) => ({
+          time: b.time as UTCTimestamp,
+          value: b.volume,
+          color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+        })));
+        lastTimeRef.current = cleanBars[cleanBars.length - 1]?.time ?? null;
+        firstTimeRef.current = cleanBars[0]?.time ?? null;
+        countRef.current = cleanBars.length;
+        // 这里故意不平移视口。lightweight-charts 的 setData 是按时间对齐的：
+        // 前面插入 500 根之后，它自己就把视口挪到了同样那些 K 线上。
+        // 再按「补进来的根数」平移一次会多跳 500 根，直接飞到数据外面去。
+        return;
+      }
+
       const firstLoad = lastKeyRef.current !== resetKey;
       if (firstLoad) {
         lastKeyRef.current = resetKey;
@@ -353,6 +387,24 @@ export default function ChartPane({
     }
   }, [bars, resetKey, storageKey]);
 
+  // ---- 往回拖到底时，向上要一页更早的 K 线 ----
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !onNeedOlder) return;
+    const ts = chart.timeScale();
+    const handler = () => {
+      // 图还没画上这一份数据时（挂载瞬间、刚切币种），range 会是 {0,0} 之类，
+      // 那不是用户拖到了最左，别把它当成要历史。
+      if (countRef.current === 0 || lastKeyRef.current !== resetKey) return;
+      const r = ts.getVisibleLogicalRange();
+      if (!r) return;
+      // from < 6 意味着最左边那几根已经贴到边缘了，该补了
+      if (r.from < 6) onNeedOlder();
+    };
+    ts.subscribeVisibleLogicalRangeChange(handler);
+    return () => ts.unsubscribeVisibleLogicalRangeChange(handler);
+  }, [onNeedOlder, resetKey]);
+
   // ---- 自动识别出的支撑 / 阻力 ----
   useEffect(() => {
     const price = priceRef.current;
@@ -363,56 +415,103 @@ export default function ChartPane({
     levelLinesRef.current = [];
     bracketLinesRef.current = [];
 
-    // 止盈价本身就是那条阻力位，两条线画在同一价格上只会把右侧轴标签叠在一起
-    const taken = bracket ? [bracket.entry, bracket.stop, bracket.target] : [];
-    const clashes = (a: number, b: number) => Math.abs(a - b) / (b || 1) < 0.0006;
+    // 线可以多，字不能挤。每条线都留着，但右侧轴标签和标题按优先级抢位子：
+    // 同一段价位上只让一条说话，剩下的只画线不写字。
+    const all = barsRef.current;
+    const last = all[all.length - 1]?.close ?? 0;
+    // 阈值必须按「当前看得见的那一段」算，不能按固定根数：
+    // 缩放到只看几十根时价格跨度小，按固定根数算出来的间距会把标签全放过。
+    const chart = chartRef.current;
+    const vis = chart?.timeScale().getVisibleLogicalRange();
+    const from = vis ? Math.max(0, Math.floor(vis.from)) : Math.max(0, all.length - 180);
+    const to = vis ? Math.min(all.length - 1, Math.ceil(vis.to)) : all.length - 1;
+    const win = all.slice(from, to + 1);
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (const b of win) { if (b.high > hi) hi = b.high; if (b.low < lo) lo = b.low; }
+    const span = Number.isFinite(hi) && Number.isFinite(lo) ? hi - lo : 0;
+    // 3.5% 的可视价格跨度，换算成像素大约是一个轴标签的高度
+    const minGap = span > 0 ? span * 0.035 : 0;
+    const slots: number[] = [];
 
-    levelLinesRef.current = levels
-      .filter((lv) => !taken.some((p) => clashes(lv.price, p)))
-      .map((lv) => price.createPriceLine({
-        price: lv.price,
-        color: lv.role === 'support' ? 'rgba(46,211,160,0.55)' : 'rgba(255,95,109,0.55)',
-        lineWidth: 1,
-        lineStyle: lv.strength >= 55 ? LineStyle.Solid : LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `${lv.role === 'support' ? '支撑' : '阻力'} ${Math.round(lv.strength)}`,
-      }));
+    interface Item {
+      price: number;
+      /** 越小越先占位 */
+      rank: number;
+      color: string;
+      width: 1 | 2;
+      style: LineStyle;
+      title: string;
+      /** 想不想显示标签 */
+      wants: boolean;
+    }
 
-    const marks: IPriceLine[] = [];
+    const items: Item[] = [];
 
-    // 计划入场必须画出来。它不是现价线 —— 现价线跟着价格跑，
-    // 价格一走开你就看不出自己原本打算在哪进了。
     if (bracket) {
-      marks.push(
-        price.createPriceLine({
-          price: bracket.entry, color: ENTRY, lineWidth: 1, lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true, title: '入场',
-        }),
-        price.createPriceLine({
-          price: bracket.stop, color: DOWN, lineWidth: 2, lineStyle: LineStyle.Solid,
-          axisLabelVisible: true, title: '止损',
-        }),
-        price.createPriceLine({
-          price: bracket.target, color: UP, lineWidth: 2, lineStyle: LineStyle.Solid,
-          axisLabelVisible: true, title: '止盈',
-        }),
+      // 计划入场不是现价线：现价线跟着价格跑，价格一走开就看不出原本打算在哪进了
+      items.push(
+        { price: bracket.stop, rank: 0, color: DOWN, width: 2, style: LineStyle.Solid, title: '止损', wants: true },
+        { price: bracket.target, rank: 0, color: UP, width: 2, style: LineStyle.Solid, title: '止盈', wants: true },
+        { price: bracket.entry, rank: 2, color: ENTRY, width: 1, style: LineStyle.Dashed, title: '入场', wants: true },
       );
     }
 
-    // 真成交后的成本线。和上面的「计划」不是一回事，所以用实线加粗区分开
     for (const p of positions) {
       if (!p.entryPrice || !p.size) continue;
-      marks.push(price.createPriceLine({
+      items.push({
         price: p.entryPrice,
+        rank: 1,
         color: HOLDING,
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        axisLabelVisible: true,
+        width: 2,
+        style: LineStyle.Solid,
         title: positions.length > 1 ? (p.direction === 'long' ? '多单均价' : '空单均价') : '持仓均价',
-      }));
+        wants: true,
+      });
     }
 
-    bracketLinesRef.current = marks;
+    // 档位按离现价远近排，近的先说话
+    const byNear = [...levels].sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
+    byNear.forEach((lv, i) => {
+      const strong = lv.strength >= 55;
+      items.push({
+        price: lv.price,
+        rank: 3 + i * 0.01,
+        color: lv.role === 'support' ? 'rgba(46,211,160,0.55)' : 'rgba(255,95,109,0.55)',
+        width: 1,
+        style: strong ? LineStyle.Solid : LineStyle.Dashed,
+        title: `${lv.role === 'support' ? '支撑' : '阻力'} ${Math.round(lv.strength)}`,
+        // 强度不够的档位本来就不该喊，只留一条虚线
+        wants: strong,
+      });
+    });
+
+    items.sort((a, b) => a.rank - b.rank);
+
+    const board: IPriceLine[] = [];
+    for (const it of items) {
+      let label = false;
+      if (it.wants) {
+        const crowded = minGap > 0 && slots.some((q) => Math.abs(q - it.price) < minGap);
+        if (!crowded) {
+          label = true;
+          slots.push(it.price);
+        }
+      }
+      const line = price.createPriceLine({
+        price: it.price,
+        color: it.color,
+        lineWidth: it.width,
+        lineStyle: it.style,
+        axisLabelVisible: label,
+        title: label ? it.title : '',
+      });
+      board.push(line);
+    }
+
+    // 分两个 ref 只是为了记录要清理的线，这里一起收
+    levelLinesRef.current = [];
+    bracketLinesRef.current = board;
   }, [levels, bracket, positions]);
 
   // ---- 工具切换 ----

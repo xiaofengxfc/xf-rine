@@ -24,8 +24,6 @@ export interface Config {
   key: string;
   secret: string;
   liveTrading: boolean;
-  maxLeverage: number;
-  maxContracts: number;
   port: number;
   ai: AiConfig;
 }
@@ -62,8 +60,6 @@ function readConfig(): Config {
     key: readKey(env),
     secret: readSecret(env),
     liveTrading: (process.env.LIVE_TRADING ?? 'false').trim().toLowerCase() === 'true',
-    maxLeverage: num(process.env.MAX_LEVERAGE, 20),
-    maxContracts: num(process.env.MAX_CONTRACTS_PER_ORDER, 0),
     port: num(process.env.PORT, 8787),
     ai: {
       baseUrl: (process.env.AI_BASE_URL ?? AI_DEFAULT_BASE).trim(),

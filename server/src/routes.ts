@@ -112,19 +112,32 @@ router.get('/contracts/:name', wrap(async (req, res) => {
 
 interface GateCandle { t: number; o: string; h: string; l: string; c: string; v: number; sum: string }
 
-async function loadCandles(contract: string, interval: string, limit: number, fresh = false): Promise<Bar[]> {
-  const key = `${contract}:${interval}:${limit}`;
+async function loadCandles(
+  contract: string,
+  interval: string,
+  limit: number,
+  fresh = false,
+  /** 只要早于这个时间的 K 线（秒）。不传就是取最新的 limit 根。 */
+  before?: number,
+): Promise<Bar[]> {
+  const key = `${contract}:${interval}:${limit}:${before ?? 0}`;
   const hit = barCache.get(key);
   if (!fresh && hit && Date.now() - hit.at < 4000) return hit.bars;
-  const raw = await gatePublic<GateCandle[]>('/futures/usdt/candlesticks', { contract, interval, limit });
-  const bars: Bar[] = raw.map((c) => ({
-    time: Number(c.t),
-    open: Number(c.o),
-    high: Number(c.h),
-    low: Number(c.l),
-    close: Number(c.c),
-    volume: Number(c.v),
-  }));
+  const params: Record<string, string | number> = { contract, interval, limit };
+  if (before) params.to = before;
+  const raw = await gatePublic<GateCandle[]>('/futures/usdt/candlesticks', params);
+  const bars: Bar[] = raw
+    .map((c) => ({
+      time: Number(c.t),
+      open: Number(c.o),
+      high: Number(c.h),
+      low: Number(c.l),
+      close: Number(c.c),
+      volume: Number(c.v),
+    }))
+    // Gate 的 to 是闭区间，边界那根会重复出现，这里切掉
+    .filter((b) => !before || b.time < before)
+    .sort((a, b) => a.time - b.time);
   barCache.set(key, { at: Date.now(), bars });
   return bars;
 }
@@ -133,8 +146,11 @@ router.get('/candles', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '1m';
   const limit = Math.min(1000, Math.max(50, Number(req.query.limit ?? 500)));
-  const bars = await loadCandles(contract, interval, limit);
-  res.json({ contract, interval, bars });
+  const beforeRaw = Number(req.query.before);
+  const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
+  const bars = await loadCandles(contract, interval, limit, false, before);
+  // 返不满一页就说明到头了，前端不用再往前要
+  res.json({ contract, interval, bars, hasMore: bars.length >= limit });
 }));
 
 router.get('/levels', wrap(async (req, res) => {
@@ -282,7 +298,6 @@ router.get('/config', (_req, res) => {
     keys: keyHint(),
     keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
-    limits: { maxLeverage: config.maxLeverage, maxContracts: config.maxContracts },
     ai: {
       configured: aiKeyHint().configured,
       baseUrl: config.ai.baseUrl,
@@ -368,7 +383,6 @@ router.get('/diag', wrap(async (_req, res) => {
     restBaseUrl: restBaseUrl(),
     keys: keyHint(),
     liveTrading: config.liveTrading,
-    limits: { maxLeverage: config.maxLeverage },
   };
   try {
     requireKeys();
@@ -515,7 +529,6 @@ router.post('/leverage', wrap(async (req, res) => {
   const { contract, leverage } = req.body ?? {};
   const lev = Math.round(Number(leverage));
   if (!contract || !Number.isFinite(lev)) throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 leverage');
-  if (lev > config.maxLeverage) throw new GateError(403, 'LEVERAGE_CAP', `杠杆超过服务端上限 ${config.maxLeverage}`);
   const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
   if (lev < Number(c.leverage_min) || lev > Number(c.leverage_max)) {
     throw new GateError(400, 'LEVERAGE_RANGE', `该合约杠杆范围 ${c.leverage_min} - ${c.leverage_max}`);
@@ -551,9 +564,6 @@ router.post('/order', wrap(async (req, res) => {
 
   if (Math.abs(sizeRaw) < c.order_size_min) throw new GateError(400, 'SIZE_MIN', `最小下单 ${c.order_size_min} 张`);
   if (Math.abs(sizeRaw) > c.order_size_max) throw new GateError(400, 'SIZE_MAX', `最大下单 ${c.order_size_max} 张`);
-  if (config.maxContracts > 0 && Math.abs(sizeRaw) > config.maxContracts) {
-    throw new GateError(403, 'SIZE_CAP', `超过服务端单笔张数上限 ${config.maxContracts} 张`);
-  }
 
   // 名义价值只做回执，不再限制大小
   const notional = notionalOf(sizeRaw, price, multiplier);

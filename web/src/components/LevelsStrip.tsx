@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { fmtPct, fmtPrice } from '../lib/format.ts';
 import type { Level } from '../lib/api.ts';
 
@@ -12,9 +13,77 @@ interface Props {
 export default function LevelsStrip({ levels, manual, price, priceRound, atr }: Props) {
   const manualSet = new Set(manual.map((p) => p.toFixed(6)));
   const manualOnly = manual.filter((p) => !levels.some((l) => Math.abs(l.price - p) < atr * 0.3));
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState(false);
+
+  // 这条带子放不下时会横向溢出，但滚动条是藏着的 —— 光靠默认行为鼠标根本滚不动。
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const measure = () => setOverflow(el.scrollWidth > el.clientWidth + 2);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [levels, manual]);
+
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+
+    // 纵向滚轮转成横向：这是鼠标用户唯一顺手的滚法
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return;
+      const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      if (!delta) return;
+      el.scrollLeft += delta;
+      e.preventDefault();
+    };
+
+    // 按住拖动。卡片本身没有点击行为，所以从哪儿按都能拖
+    let down = false;
+    let startX = 0;
+    let startLeft = 0;
+    let moved = false;
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || el.scrollWidth <= el.clientWidth) return;
+      down = true;
+      moved = false;
+      startX = e.clientX;
+      startLeft = el.scrollLeft;
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!down) return;
+      const dx = e.clientX - startX;
+      if (!moved && Math.abs(dx) > 3) {
+        moved = true;
+        el.classList.add('dragging');
+      }
+      if (moved) {
+        el.scrollLeft = startLeft - dx;
+        e.preventDefault();
+      }
+    };
+    const onUp = () => {
+      if (!down) return;
+      down = false;
+      el.classList.remove('dragging');
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
 
   return (
-    <div className="levels-strip">
+    <div className={`levels-strip${overflow ? ' scrollable' : ''}`} ref={stripRef}>
       <div className="lv" style={{ color: 'var(--text-2)', minWidth: 96 }}>
         <div className="r1"><span className="px" style={{ fontSize: 11 }}>ATR</span></div>
         <div className="meta"><span>{fmtPrice(atr, priceRound)}</span></div>

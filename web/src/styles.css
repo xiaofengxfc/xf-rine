@@ -286,9 +286,20 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   display: flex;
   gap: 7px;
   overflow-x: auto;
-  scrollbar-width: none;
+  overflow-y: hidden;
+  /* 滚动条留着但压薄，一根都没有的话完全看不出这里能滚 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
 }
-.levels-strip::-webkit-scrollbar { display: none; }
+.levels-strip::-webkit-scrollbar { height: 4px; }
+.levels-strip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+.levels-strip::-webkit-scrollbar-track { background: transparent; }
+.levels-strip.scrollable { cursor: grab; }
+.levels-strip.dragging { cursor: grabbing; user-select: none; }
+/* 放不下时两端渐隐，暗示还有内容 */
+.levels-strip.scrollable {
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
 
 .lv {
   position: relative;
@@ -650,6 +661,27 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .modal header h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; }
 .modal .body { padding: 14px 15px 16px; }
+
+/* 设置页分页：两套密钥各占一页，别挤在一起 */
+.set-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--line-soft);
+  border-bottom: 1px solid var(--line);
+}
+.set-tabs button {
+  padding: 9px 4px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--bg-1);
+  border: 0;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.set-tabs button:hover { color: var(--text-0); background: var(--bg-2); }
+.set-tabs button.on { color: var(--text-0); background: var(--bg-3); box-shadow: inset 0 -2px 0 var(--accent); }
 .modal footer { padding: 0 15px 15px; display: grid; gap: 8px; }
 
 .hint { font-size: 10.5px; color: var(--text-2); line-height: 1.6; margin: 0; }

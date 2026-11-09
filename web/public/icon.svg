@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="巡风">
+  <title>巡风</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#151b25"/>
+      <stop offset="1" stop-color="#080a0e"/>
+    </linearGradient>
+    <linearGradient id="up" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#17a074"/>
+      <stop offset="1" stop-color="#3ce4ae"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="7" y="7" width="498" height="498" rx="110" fill="none" stroke="#28313f" stroke-width="4"/>
+  <line x1="186" y1="126" x2="186" y2="386" stroke="#2ed3a0" stroke-width="30" stroke-linecap="round"/>
+  <rect x="132" y="184" width="108" height="146" rx="22" fill="url(#up)"/>
+  <path d="M292 184 C 366 184 376 138 446 138" fill="none" stroke="#e9ecf2" stroke-width="28" stroke-linecap="round" opacity="0.92"/>
+  <path d="M300 300 C 358 300 370 256 424 256" fill="none" stroke="#4c8dff" stroke-width="28" stroke-linecap="round" opacity="0.95"/>
+</svg>

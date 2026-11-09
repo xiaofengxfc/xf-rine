@@ -64,6 +64,11 @@ export default function App() {
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
+  /** 历史 K 线：正在拉 / 已经到头，避免拖到边缘时反复请求 */
+  const olderBusyRef = useRef(false);
+  const noMoreOlderRef = useRef(false);
+  const marketRef = useRef(market);
+  useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
 
   const marketKey = `${contract}:${interval}`;
@@ -73,6 +78,36 @@ export default function App() {
   const info = fresh ? market.info : null;
   const bars = fresh ? market.bars : EMPTY_BARS;
   const levels = fresh ? market.levels : null;
+
+  /** 往左拖到底时补一页历史。失败就静默，用户再拖一次会重试。 */
+  const loadOlder = useCallback(async () => {
+    if (olderBusyRef.current || noMoreOlderRef.current) return;
+    const cur = marketRef.current;
+    if (!cur.bars.length || cur.key === '') return;
+    olderBusyRef.current = true;
+    try {
+      const [name, tf] = cur.key.split(':') as [string, string];
+      const before = cur.bars[0]!.time;
+      const r = await jget<{ bars: Bar[] }>(
+        `/api/candles?contract=${name}&interval=${tf}&limit=500&before=${before}`,
+      );
+      if (r.bars.length === 0) { noMoreOlderRef.current = true; return; }
+      setMarket((prev) => {
+        if (prev.key !== cur.key) return prev;
+        const seen = new Set(prev.bars.map((b) => b.time));
+        const add = r.bars.filter((b) => !seen.has(b.time));
+        if (add.length === 0) { noMoreOlderRef.current = true; return prev; }
+        const merged = [...add, ...prev.bars].sort((a, b) => a.time - b.time);
+        // 内存里的历史别无限长，3000 根足够看几天
+        if (merged.length > 3000) noMoreOlderRef.current = true;
+        return { ...prev, bars: merged.slice(-3000) };
+      });
+    } catch {
+      /* 静默失败，拖回去会再试 */
+    } finally {
+      olderBusyRef.current = false;
+    }
+  }, []);
 
   const push = useCallback((kind: 'ok' | 'err', title: string, detail?: string) => {
     const id = toastSeq++;
@@ -93,6 +128,7 @@ export default function App() {
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
     const seq = ++marketSeqRef.current;
+    noMoreOlderRef.current = false;
     setLoading(true);
     try {
       const [c, k, lv] = await Promise.all([
@@ -277,6 +313,7 @@ export default function App() {
             positions={positions.filter((p) => p.contract === contract)}
             resetKey={`${contract}:${interval}`}
             loading={loading}
+            onNeedOlder={loadOlder}
             onIntervalChange={setInterval}
             onManualLevels={onManualLevels}
           />
