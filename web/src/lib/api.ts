@@ -153,7 +153,7 @@ export interface AppConfig {
   restBaseUrl: string;
   keys: { configured: boolean; hint: string };
   liveTrading: boolean;
-  limits: { maxOrderNotional: number; maxLeverage: number; maxContracts: number };
+  limits: { maxLeverage: number; maxContracts: number };
   ai: AiSettings;
 }
 

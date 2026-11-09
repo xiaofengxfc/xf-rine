@@ -268,7 +268,7 @@ router.get('/config', (_req, res) => {
     restBaseUrl: restBaseUrl(),
     keys: keyHint(),
     liveTrading: config.liveTrading,
-    limits: { maxOrderNotional: config.maxOrderNotional, maxLeverage: config.maxLeverage, maxContracts: config.maxContracts },
+    limits: { maxLeverage: config.maxLeverage, maxContracts: config.maxContracts },
     ai: {
       configured: aiKeyHint().configured,
       baseUrl: config.ai.baseUrl,
@@ -318,7 +318,7 @@ router.get('/diag', wrap(async (_req, res) => {
     restBaseUrl: restBaseUrl(),
     keys: keyHint(),
     liveTrading: config.liveTrading,
-    limits: { maxOrderNotional: config.maxOrderNotional, maxLeverage: config.maxLeverage },
+    limits: { maxLeverage: config.maxLeverage },
   };
   try {
     requireKeys();
@@ -505,10 +505,8 @@ router.post('/order', wrap(async (req, res) => {
     throw new GateError(403, 'SIZE_CAP', `超过服务端单笔张数上限 ${config.maxContracts} 张`);
   }
 
+  // 名义价值只做回执，不再限制大小
   const notional = notionalOf(sizeRaw, price, multiplier);
-  if (notional > config.maxOrderNotional) {
-    throw new GateError(403, 'NOTIONAL_CAP', `名义价值 ${notional.toFixed(2)} USDT 超过服务端上限 ${config.maxOrderNotional}`);
-  }
 
   // 价格偏离保护：限价单价格不能离现价太远，防手滑
   if (!isMarket) {

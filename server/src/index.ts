@@ -42,7 +42,7 @@ server.listen(config.port, '127.0.0.1', () => {
   console.log('  环境      ' + envLabel() + '  ' + restBaseUrl());
   console.log('  密钥      ' + (k.configured ? '已配置 ' + k.hint : '未配置（只能看盘，不能下单）'));
   console.log('  下单      ' + (config.liveTrading ? '已开启' + (config.env === 'live' ? ' —— 用的是真钱，谨慎' : '（模拟盘假钱）') : '关闭（只读）'));
-  console.log('  风控上限  单笔 ' + config.maxOrderNotional + ' USDT / 杠杆 ' + config.maxLeverage + 'x');
+  console.log('  风控上限  杠杆 ' + config.maxLeverage + 'x');
   console.log('');
 });
 

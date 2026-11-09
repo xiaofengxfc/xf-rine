@@ -7,7 +7,7 @@
  *   3. 模型回什么都要能降级：解析失败就把原文摆出来，不假装成功。
  */
 
-import { config, aiEndpoint, type AiConfig } from './config.js';
+import { config, aiEndpoint, aiModelsEndpoint, type AiConfig } from './config.js';
 import type { Bracket } from './levels.js';
 
 export class AiError extends Error {
@@ -20,6 +20,58 @@ export class AiError extends Error {
     this.label = label;
     this.detail = detail;
   }
+}
+
+/**
+ * 列出这个接口支持的模型，让用户从下拉里选，不用去猜名字。
+ *
+ * 中转站不实现 /models 是常态（有的直接 404，有的返回空列表），
+ * 所以这里失败不算严重错误 —— 调用方要能平静地退回到手填。
+ */
+export async function listModels(ai: AiConfig = config.ai): Promise<string[]> {
+  if (!ai.apiKey) throw new AiError(400, 'AI_KEY_MISSING', '还没填 API 密钥');
+
+  const url = aiModelsEndpoint(ai.baseUrl);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal });
+  } catch (e) {
+    const err = e as Error;
+    if (err.name === 'AbortError') throw new AiError(504, 'AI_TIMEOUT', '拉模型列表超时，中转站可能不稳');
+    throw new AiError(502, 'AI_NETWORK', `连不上 ${url}：${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    const snippet = text.slice(0, 200);
+    if (res.status === 401 || res.status === 403) {
+      throw new AiError(res.status, 'AI_KEY_INVALID', `密钥被拒绝（${snippet}）`);
+    }
+    if (res.status === 404) {
+      throw new AiError(404, 'AI_MODELS_UNSUPPORTED', '这个站点没有 /models 接口，直接手填模型名');
+    }
+    throw new AiError(502, `AI_HTTP_${res.status}`, snippet || '接口返回了错误');
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new AiError(502, 'AI_MODELS_UNSUPPORTED', '这个站点返回的不是 JSON，直接手填模型名');
+  }
+  const raw = Array.isArray(parsed?.data) ? parsed.data : Array.isArray(parsed) ? parsed : [];
+  const ids: string[] = [];
+  for (const m of raw) {
+    const id = typeof m === 'string' ? m : m?.id;
+    if (typeof id === 'string' && id.trim()) ids.push(id.trim());
+  }
+  const uniq = [...new Set(ids)].sort();
+  if (uniq.length === 0) throw new AiError(404, 'AI_MODELS_UNSUPPORTED', '站点没有返回模型列表，直接手填模型名');
+  return uniq;
 }
 
 /** 交给模型的全部材料。前端看不到这个结构，它只在服务端流动。 */

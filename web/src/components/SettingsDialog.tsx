@@ -213,7 +213,7 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         </div>
         <footer>
           <div className="hint">
-            风控硬上限：单笔 {config?.limits.maxOrderNotional ?? '—'} USDT · 杠杆 ≤ {config?.limits.maxLeverage ?? '—'}x
+            风控硬上限：杠杆 ≤ {config?.limits.maxLeverage ?? '—'}x
             {config && config.limits.maxContracts > 0 ? ` · 单笔 ≤ ${config.limits.maxContracts} 张` : ''}
             （改上限请编辑 server/.env）
           </div>
