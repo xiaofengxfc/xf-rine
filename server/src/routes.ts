@@ -53,7 +53,23 @@ function fail(res: Response, err: unknown): void {
 }
 
 const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
-  (req: Request, res: Response) => { fn(req, res).catch((e) => fail(res, e)); };
+  (req: Request, res: Response) => { fn(req, res).catch((e) => fail(res, translate(e))); };
+
+/**
+ * 测试网只上架了几十个合约，主网有一千多个。界面上列的是主网行情，
+ * 所以随手点一个测试网没有的币，交易所只会回一句 CONTRACT_NOT_FOUND ——
+ * 这句话对用户没有任何意义。在 fail 之前翻译成人话。
+ */
+function translate(e: unknown): unknown {
+  if (!(e instanceof GateError) || e.label !== 'CONTRACT_NOT_FOUND') return e;
+  if (config.env !== 'testnet') return e;
+  return new GateError(
+    400,
+    'NOT_IN_TESTNET',
+    '这个合约在模拟盘没有上市。测试网只上架了几十个合约（主网有一千多个），'
+    + '换成主流币，或者到设置页切到实盘再下单。',
+  );
+}
 
 // ---------- 合约与行情 ----------
 
@@ -89,8 +105,13 @@ router.get('/contracts', wrap(async (_req, res) => {
 
 router.get('/contracts/:name', wrap(async (req, res) => {
   const name = String(req.params.name);
-  const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
+  const [c, tradable] = await Promise.all([
+    gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`),
+    tradableNames(),
+  ]);
   res.json({
+    // 当前环境（尤其模拟盘）能不能交易它
+    tradable: tradable === null ? true : tradable.has(c.name),
     name: c.name,
     multiplier: Number(c.quanto_multiplier),
     sizeMin: c.order_size_min,
@@ -747,8 +768,34 @@ interface GateTicker {
   volume_24h_quote: string; funding_rate: string; quanto_multiplier: string; total_size: string;
 }
 
+// ---------- 当前环境能交易哪些合约 ----------
+
+let tradableCache: { env: string; at: number; names: Set<string> | null } = { env: '', at: 0, names: null };
+
+/**
+ * 当前环境可交易的合约名单。实盘就是主网全量（返回 null 表示不做限制）；
+ * 测试网要去测试网自己的公开接口拿 —— 它只上架了几十个。
+ */
+async function tradableNames(): Promise<Set<string> | null> {
+  if (config.env !== 'testnet') return null;
+  if (tradableCache.env === config.env && Date.now() - tradableCache.at < 5 * 60_000) return tradableCache.names;
+  try {
+    const res = await fetch(restBaseUrl() + '/api/v4/futures/usdt/contracts', { headers: { Accept: 'application/json' } });
+    if (!res.ok) return tradableCache.names;
+    const list = (await res.json()) as { name?: string; status?: string }[];
+    const names = new Set(list.filter((c) => c.name && c.status !== 'delisted').map((c) => String(c.name)));
+    tradableCache = { env: config.env, at: Date.now(), names };
+    return names;
+  } catch {
+    return tradableCache.names; // 拿不到就别拦，让交易所自己报错
+  }
+}
+
 router.get('/tickers', wrap(async (_req, res) => {
-  const list = await gatePublic<GateTicker[]>('/futures/usdt/tickers');
+  const [list, tradable] = await Promise.all([
+    gatePublic<GateTicker[]>('/futures/usdt/tickers'),
+    tradableNames(),
+  ]);
   const rows = list
     .filter((t) => Number(t.last) > 0)
     .map((t) => ({
@@ -760,6 +807,8 @@ router.get('/tickers', wrap(async (_req, res) => {
       fundingRate: Number(t.funding_rate),
       multiplier: Number(t.quanto_multiplier),
       openInterest: Number(t.total_size),
+      // 测试网里没上架的合约标出来，别让人点了半天才发现下不了单
+      tradable: tradable === null ? true : tradable.has(t.contract),
     }));
   res.json(rows.sort((a, b) => b.volume24hUsd - a.volume24hUsd));
 }));

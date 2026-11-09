@@ -75,19 +75,21 @@ export default function OrderTicket({
 
   const blocked = !contract
     ? '没有选中合约'
-    : !keysConfigured
-      ? '未配置 API 密钥'
-      : !liveTrading
-        ? '服务端 LIVE_TRADING=false，下单被禁用'
-        : !armed
-          ? '先点右上角解锁交易'
-          : size < sizeMin
-            ? `张数至少 ${sizeMin}`
-            : sizeMax > 0 && size > sizeMax
-              ? `张数最多 ${sizeMax}`
-              : priceMode === 'limit' && !(priceUsed > 0)
-                ? '限价必须大于 0'
-                : '';
+    : contract.tradable === false
+      ? '模拟盘没有这个合约'
+      : !keysConfigured
+        ? '未配置 API 密钥'
+        : !liveTrading
+          ? '服务端 LIVE_TRADING=false，下单被禁用'
+          : !armed
+            ? '先点右上角解锁交易'
+            : size < sizeMin
+              ? `张数至少 ${sizeMin}`
+              : sizeMax > 0 && size > sizeMax
+                ? `张数最多 ${sizeMax}`
+                : priceMode === 'limit' && !(priceUsed > 0)
+                  ? '限价必须大于 0'
+                  : '';
 
   async function submit() {
     if (!contract || !token) return;
@@ -128,6 +130,12 @@ export default function OrderTicket({
         <span className="dim" style={{ fontSize: 10 }}>1 张 = {mult || '—'} 币</span>
       </div>
       <div className="card-body">
+        {contract?.tradable === false && (
+          <div className="warn-box">
+            模拟盘没有这个合约，下单会被交易所拒绝。测试网只上架了几十个合约 —— 换一个主流币，或者到设置页切到实盘。
+          </div>
+        )}
+
         <div className="side-toggle">
           <button className={`long ${side === 'long' ? 'on' : ''}`} onClick={() => { setSide('long'); setPending(false); }}>买入开多</button>
           <button className={`short ${side === 'short' ? 'on' : ''}`} onClick={() => { setSide('short'); setPending(false); }}>卖出开空</button>

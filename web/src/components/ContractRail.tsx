@@ -6,6 +6,8 @@ interface Props {
   tickers: Ticker[];
   current: string;
   onSelect: (name: string) => void;
+  /** 模拟盘才需要标「哪个能下单」；实盘全是能交易的，标了反而吵 */
+  showTradable?: boolean;
 }
 
 type Tab = 'all' | 'up' | 'down';
@@ -31,7 +33,7 @@ function saveRail(v: { q: string; tab: Tab; scroll: number }): void {
   try { localStorage.setItem(RAIL_KEY, JSON.stringify(v)); } catch { /* 存不了就算了 */ }
 }
 
-export default function ContractRail({ tickers, current, onSelect }: Props) {
+export default function ContractRail({ tickers, current, onSelect, showTradable = false }: Props) {
   const rail0 = useRef(readRail()).current;
   const [q, setQ] = useState(rail0.q);
   const [tab, setTab] = useState<Tab>(rail0.tab);
@@ -91,8 +93,9 @@ export default function ContractRail({ tickers, current, onSelect }: Props) {
         {rows.map((t) => (
           <button
             key={t.contract}
-            className={`sym ${t.contract === current ? 'on' : ''}`}
+            className={`sym ${t.contract === current ? 'on' : ''}${showTradable && t.tradable ? ' ok' : ''}`}
             onClick={() => onSelect(t.contract)}
+            title={t.tradable === false ? '模拟盘没有这个合约：图能看，单下不了' : undefined}
           >
             <span className="n">
               {t.contract.replace('_USDT', '')}<em> /USDT</em>

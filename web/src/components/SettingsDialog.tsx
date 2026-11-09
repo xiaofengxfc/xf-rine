@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { jget, jsend, type AppConfig } from '../lib/api.ts';
 
 interface Props {
@@ -49,6 +49,8 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const [switching, setSwitching] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [pickOpen, setPickOpen] = useState(false);
+  const pickRef = useRef<HTMLDivElement>(null);
   const [diag, setDiag] = useState<Diag | null>(null);
   const [busy, setBusy] = useState(false);
   const [aiBase, setAiBase] = useState(config?.ai.baseUrl ?? '');
@@ -130,6 +132,21 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
     } finally { setTesting(false); }
   }
 
+  // 下拉开着的时候，点别处或按 Esc 收起来
+  useEffect(() => {
+    if (!pickOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (pickRef.current && !pickRef.current.contains(e.target as Node)) setPickOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPickOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [pickOpen]);
+
   async function loadModels() {
     setLoadingModels(true);
     try {
@@ -139,7 +156,7 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
       });
       setModels(r.models);
       if (!aiModel.trim() && r.models[0]) setAiModel(r.models[0]);
-      onToast('ok', '拿到 ' + r.models.length + ' 个模型', '点模型名输入框就能选');
+      onToast('ok', '拿到 ' + r.models.length + ' 个模型', '点模型名右边的 ▾ 就能选');
     } catch (e) {
       const err = e as Error & { label?: string };
       // 拉不到不是错误状态，很多中转站根本没这个接口 —— 照样能手填
@@ -284,19 +301,39 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
 
               <div className="field">
                 <label>模型名</label>
-                <input
-                  className="input"
-                  value={aiModel}
-                  onChange={(e) => setAiModel(e.target.value)}
-                  placeholder="gpt-4o-mini"
-                  spellCheck={false}
-                  list={models.length > 0 ? 'ai-model-list' : undefined}
-                />
-                {models.length > 0 && (
-                  <datalist id="ai-model-list">
-                    {models.map((m) => <option key={m} value={m} />)}
-                  </datalist>
-                )}
+                <div className="model-pick" ref={pickRef}>
+                  <input
+                    className="input"
+                    value={aiModel}
+                    onChange={(e) => setAiModel(e.target.value)}
+                    onFocus={() => { if (models.length > 0) setPickOpen(true); }}
+                    placeholder="gpt-4o-mini"
+                    spellCheck={false}
+                  />
+                  {models.length > 0 && (
+                    <button
+                      className="model-arrow"
+                      onClick={() => setPickOpen((v) => !v)}
+                      title={`${models.length} 个模型，点开选`}
+                      aria-label="选择模型"
+                    >
+                      ▾
+                    </button>
+                  )}
+                  {pickOpen && models.length > 0 && (
+                    <div className="model-list" role="listbox">
+                      {models.map((m) => (
+                        <button
+                          key={m}
+                          className={`model-item${m === aiModel ? ' on' : ''}`}
+                          onClick={() => { setAiModel(m); setPickOpen(false); }}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <button className="btn ghost" style={{ marginTop: 6, width: '100%' }} onClick={loadModels} disabled={busy || loadingModels}>
                   {loadingModels ? '拉取中…' : models.length > 0 ? `已拉到 ${models.length} 个 · 重新拉取` : '从接口拉取模型列表'}
                 </button>

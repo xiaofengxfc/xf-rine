@@ -55,6 +55,8 @@ export interface ContractInfo {
   makerFee: number;
   orderPriceDeviate?: number;
   status?: string;
+  /** 当前环境能不能交易它 */
+  tradable?: boolean;
 }
 
 export interface Ticker {
@@ -64,6 +66,8 @@ export interface Ticker {
   change24h: number;
   volume24hUsd: number;
   fundingRate: number;
+  /** 当前环境能不能交易它。模拟盘只上架了几十个合约，其余只能看 */
+  tradable?: boolean;
 }
 
 export interface Bar {

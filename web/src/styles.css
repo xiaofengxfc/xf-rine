@@ -201,7 +201,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .sym-list { overflow-y: auto; flex: 1; min-height: 0; padding: 4px 6px 12px; }
 
-.sym {
+/* 注意全部限定在 .sym-list 里：.sym 这个名字顶栏的合约名也在用
+   （.ticker-head .sym），不限定的话 grid / padding / hover 会漏过去 */
+.sym-list .sym {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0 8px;
@@ -210,13 +212,14 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   width: 100%;
   text-align: left;
   align-items: center;
+  position: relative;
 }
-.sym:hover { background: var(--bg-3); }
-.sym.on { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
-.sym .n { font-size: 12px; letter-spacing: 0.01em; }
-.sym .n em { font-style: normal; color: var(--text-2); font-size: 10.5px; }
-.sym .p { font-family: var(--mono); font-size: 11.5px; text-align: right; }
-.sym .c { font-family: var(--mono); font-size: 10.5px; text-align: right; }
+.sym-list .sym:hover { background: var(--bg-3); }
+.sym-list .sym.on { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
+.sym-list .sym .n { font-size: 12px; letter-spacing: 0.01em; }
+.sym-list .sym .n em { font-style: normal; color: var(--text-2); font-size: 10.5px; }
+.sym-list .sym .p { font-family: var(--mono); font-size: 11.5px; text-align: right; }
+.sym-list .sym .c { font-family: var(--mono); font-size: 10.5px; text-align: right; }
 
 /* ---------- 中间 图表 ---------- */
 
@@ -314,6 +317,20 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   transition: border-color 0.14s, transform 0.14s;
 }
 /* 只是划过时给点反馈，不做上浮 —— 上浮会让人以为能点 */
+/* 模拟盘能下单的合约打个绿点。反着来（把不能下单的淡掉）不行 ——
+   测试网 1081 个里只有 53 个能交易，整列会看起来像坏了。 */
+.sym-list .sym.ok::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 50%;
+  background: var(--up);
+}
+
 .lv:hover { border-color: var(--bg-4); }
 .lv .bar {
   position: absolute; left: 0; bottom: 0; height: 2px;
@@ -466,6 +483,66 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 
 .ai-note { font-size: 10.5px; line-height: 1.5; color: var(--text-1); }
+
+/* 模型名下拉 */
+.model-pick { position: relative; }
+.model-arrow {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.model-arrow:hover { background: var(--bg-4); color: var(--text-0); }
+.model-list {
+  position: absolute;
+  z-index: 60;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--bg-4);
+  border-radius: 6px;
+  background: var(--bg-1, #14171c);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.model-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.model-item:hover { background: var(--bg-3); color: var(--text-0); }
+.model-item.on { background: var(--bg-3); color: var(--accent); }
+
+/* 下单面板里的硬性提示（比如模拟盘没有这个合约） */
+.warn-box {
+  margin-bottom: 9px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--warn);
+  background: var(--bg-2);
+  border-radius: 0 4px 4px 0;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--warn);
+}
 .ai-raw {
   margin: 8px 0 0;
   padding: 8px;

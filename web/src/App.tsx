@@ -345,7 +345,12 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
         />
 
-        <ContractRail tickers={tickers} current={contract} onSelect={setContract} />
+        <ContractRail
+          tickers={tickers}
+          current={contract}
+          onSelect={setContract}
+          showTradable={config?.env === 'testnet'}
+        />
 
         <main className="center">
           <ChartPane
