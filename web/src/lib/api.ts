@@ -132,6 +132,19 @@ export interface AppConfig {
   limits: { maxOrderNotional: number; maxLeverage: number; maxContracts: number };
 }
 
+export interface NewsItem {
+  title: string; url: string; source: string; publishedAt: number;
+  score: number; sentiment: number; matched: string[];
+}
+
+export interface FeedStat { name: string; ok: boolean; count: number; error?: string }
+
+export interface NewsDigest {
+  contract: string; base: string; fetchedAt: number;
+  items: NewsItem[]; feeds: FeedStat[];
+  sentiment: number; stance: 'bullish' | 'neutral' | 'bearish'; note: string;
+}
+
 export interface LiveBar {
   time: number; open: number; high: number; low: number; close: number; volume: number; closed: boolean;
 }

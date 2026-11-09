@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
   type Account, type AppConfig, type Bar, type Bracket, type ContractInfo,
-  type LevelsResponse, type LiveBar, type OpenOrder, type Position, type PriceOrder, type Ticker,
+  type LevelsResponse, type LiveBar, type NewsDigest, type OpenOrder, type Position, type PriceOrder, type Ticker,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
 import ChartPane from './components/ChartPane.tsx';
@@ -12,6 +12,7 @@ import LevelsStrip from './components/LevelsStrip.tsx';
 import BracketsCard from './components/BracketsCard.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
 import PositionsCard from './components/PositionsCard.tsx';
+import NewsCard from './components/NewsCard.tsx';
 import SettingsDialog from './components/SettingsDialog.tsx';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
@@ -38,6 +39,8 @@ export default function App() {
   const [interval, setInterval] = useState('15m');
   const [tickers, setTickers] = useState<Ticker[]>([]);
   const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
+  const [news, setNews] = useState<NewsDigest | null>(null);
+  const [newsLoading, setNewsLoading] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -59,6 +62,7 @@ export default function App() {
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
+  const newsSeqRef = useRef(0);
 
   const marketKey = `${contract}:${interval}`;
   // 只有归属当前币种和周期的数据才交给界面。切币那一帧旧数据还在 state 里，
@@ -112,6 +116,17 @@ export default function App() {
     } catch { /* 静默 */ }
   }, []);
 
+  const loadNews = useCallback(async (name: string) => {
+    const seq = ++newsSeqRef.current;
+    setNewsLoading(true);
+    try {
+      const d = await jget<NewsDigest>(`/api/news?contract=${name}&limit=6`);
+      if (seq === newsSeqRef.current) setNews(d);
+    } catch { /* 新闻抓不到不影响看盘 */ } finally {
+      if (seq === newsSeqRef.current) setNewsLoading(false);
+    }
+  }, []);
+
   const loadPrivate = useCallback(async () => {
     if (!config?.keys.configured) return;
     try {
@@ -138,6 +153,13 @@ export default function App() {
     const t = window.setInterval(() => void loadPrivate(), 6_000);
     return () => window.clearInterval(t);
   }, [loadPrivate]);
+
+  useEffect(() => {
+    void loadNews(contract);
+    // 服务端缓存 12 分钟，这里 5 分钟问一次，命中缓存就是几毫秒的事
+    const t = window.setInterval(() => void loadNews(contract), 5 * 60_000);
+    return () => window.clearInterval(t);
+  }, [contract, loadNews]);
 
   // ---------- 行情 WebSocket ----------
 
@@ -311,6 +333,12 @@ export default function App() {
             token={token}
             onToast={push}
             onRefresh={loadPrivate}
+          />
+
+          <NewsCard
+            digest={news && news.contract === contract ? news : null}
+            contract={contract}
+            loading={newsLoading}
           />
         </aside>
       </div>

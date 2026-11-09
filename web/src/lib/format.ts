@@ -23,3 +23,16 @@ export const fmtTime = (unix: number): string =>
   new Date(unix * 1000).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 export const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+/** 相对时间，新闻列表里用。超过一天直接给日期。 */
+export const fmtAgo = (epochMs: number): string => {
+  if (!Number.isFinite(epochMs)) return '—';
+  const mins = Math.floor((Date.now() - epochMs) / 60_000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} 天前`;
+  return new Date(epochMs).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+};

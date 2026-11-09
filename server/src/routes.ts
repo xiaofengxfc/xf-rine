@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { config, keyHint, writeEnv, restBaseUrl, envLabel, keySlot } from './config.js';
 import { gatePublic, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { detectLevels, planBracket, type Bar, type Direction } from './levels.js';
+import { newsDigest } from './news.js';
 import { randomUUID } from 'node:crypto';
 
 export const router = Router();
@@ -143,6 +144,14 @@ router.get('/levels', wrap(async (req, res) => {
       short: planBracket(setForPlan, 'short', { minRR }),
     },
   });
+}));
+
+// ---------- 新闻雷达 ----------
+
+router.get('/news', wrap(async (req, res) => {
+  const contract = String(req.query.contract ?? 'BTC_USDT').toUpperCase();
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit ?? 8)));
+  res.json(await newsDigest(contract, limit));
 }));
 
 // ---------- 配置与体检 ----------
