@@ -293,7 +293,7 @@ export default function ChartPane({
         lineWidth: 1,
         lineStyle: lv.strength >= 55 ? LineStyle.Solid : LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `${lv.role === 'support' ? 'S' : 'R'}${Math.round(lv.strength)}`,
+        title: `${lv.role === 'support' ? '支撑' : '阻力'} ${Math.round(lv.strength)}`,
       }));
 
     if (!bracket) return;
@@ -301,11 +301,11 @@ export default function ChartPane({
     bracketLinesRef.current = [
       price.createPriceLine({
         price: bracket.stop, color: DOWN, lineWidth: 2, lineStyle: LineStyle.Solid,
-        axisLabelVisible: true, title: 'SL',
+        axisLabelVisible: true, title: '止损',
       }),
       price.createPriceLine({
         price: bracket.target, color: UP, lineWidth: 2, lineStyle: LineStyle.Solid,
-        axisLabelVisible: true, title: 'TP',
+        axisLabelVisible: true, title: '止盈',
       }),
     ];
   }, [levels, bracket]);

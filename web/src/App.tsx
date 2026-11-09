@@ -16,15 +16,28 @@ import SettingsDialog from './components/SettingsDialog.tsx';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
 
+/**
+ * 一份行情快照，跟着「币种:周期」走。
+ * 切币种时旧请求可能晚回来，只有 key 对得上才允许写进状态，
+ * 否则图表、档位、下单面板会串成上一个币种的数据。
+ */
+interface MarketSnap {
+  key: string;
+  info: ContractInfo | null;
+  bars: Bar[];
+  levels: LevelsResponse | null;
+}
+
+const EMPTY_BARS: Bar[] = [];
+const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
+
 let toastSeq = 1;
 
 export default function App() {
   const [contract, setContract] = useState('BTC_USDT');
   const [interval, setInterval] = useState('15m');
   const [tickers, setTickers] = useState<Ticker[]>([]);
-  const [info, setInfo] = useState<ContractInfo | null>(null);
-  const [bars, setBars] = useState<Bar[]>([]);
-  const [levels, setLevels] = useState<LevelsResponse | null>(null);
+  const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -44,6 +57,16 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number>(0);
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
+  /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
+  const marketSeqRef = useRef(0);
+
+  const marketKey = `${contract}:${interval}`;
+  // 只有归属当前币种和周期的数据才交给界面。切币那一帧旧数据还在 state 里，
+  // 这一层直接挡掉，图表和右侧面板就不可能显示上一个币种的价格。
+  const fresh = market.key === marketKey;
+  const info = fresh ? market.info : null;
+  const bars = fresh ? market.bars : EMPTY_BARS;
+  const levels = fresh ? market.levels : null;
 
   const push = useCallback((kind: 'ok' | 'err', title: string, detail?: string) => {
     const id = toastSeq++;
@@ -62,6 +85,8 @@ export default function App() {
   }, []);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
+    const key = `${name}:${tf}`;
+    const seq = ++marketSeqRef.current;
     setLoading(true);
     try {
       const [c, k, lv] = await Promise.all([
@@ -69,18 +94,22 @@ export default function App() {
         jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=500`),
         jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
       ]);
-      setInfo(c);
-      setBars(k.bars);
-      setLevels(lv);
+      // 期间又切过币种，这份数据已经不是当前要看的东西了
+      if (seq !== marketSeqRef.current) return;
+      setMarket({ key, info: c, bars: k.bars, levels: lv });
     } catch (e) {
-      push('err', '行情加载失败', (e as Error).message);
+      if (seq === marketSeqRef.current) push('err', '行情加载失败', (e as Error).message);
     } finally {
-      setLoading(false);
+      if (seq === marketSeqRef.current) setLoading(false);
     }
   }, [push]);
 
   const loadLevelsOnly = useCallback(async (name: string, tf: string) => {
-    try { setLevels(await jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`)); } catch { /* 静默 */ }
+    const key = `${name}:${tf}`;
+    try {
+      const lv = await jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`);
+      setMarket((prev) => (prev.key === key ? { ...prev, levels: lv } : prev));
+    } catch { /* 静默 */ }
   }, []);
 
   const loadPrivate = useCallback(async () => {
@@ -132,15 +161,17 @@ export default function App() {
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg.type === 'candle' && msg.bar && msg.contract === contract) {
           const b = msg.bar;
-          setBars((prev) => {
-            if (prev.length === 0) return prev;
-            const next = prev.slice();
+          // 行情里收到的这根属于哪个 key，就只有那个 key 的快照能收下它
+          const key = `${contract}:${interval}`;
+          setMarket((prev) => {
+            if (prev.key !== key || prev.bars.length === 0) return prev;
+            const next = prev.bars.slice();
             const last = next[next.length - 1]!;
             const bar: Bar = { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume };
             if (last.time === b.time) next[next.length - 1] = bar;
             else if (b.time > last.time) next.push(bar);
             else return prev;
-            return next;
+            return { ...prev, bars: next };
           });
           if (b.closed) {
             lastBarRef.current = { at: Date.now(), closed: true };
