@@ -252,9 +252,12 @@ export async function newsDigest(contract: string, limit = 8): Promise<NewsDiges
     : 0;
 
   const stance: NewsDigest['stance'] = sentiment >= 0.15 ? 'bullish' : sentiment <= -0.15 ? 'bearish' : 'neutral';
-  const note = items.length === 0
-    ? `没有找到与 ${base} 相关的新闻。冷门合约本来就没有媒体覆盖，这是正常的。`
-    : `最近 72 小时内 ${items.length} 条相关报道，情绪加权 ${sentiment.toFixed(2)}。`;
+  const okFeeds = feeds.filter((f) => f.ok).length;
+  const note = okFeeds === 0
+    ? '五个新闻源一个都没抓到，先检查这台机器能不能访问外网站点。'
+    : items.length === 0
+      ? `没有找到与 ${base} 相关的新闻。冷门合约本来就没有媒体覆盖，这是正常的。`
+      : `最近 72 小时内 ${items.length} 条相关报道，情绪加权 ${sentiment.toFixed(2)}。`;
 
   return {
     contract,

@@ -49,9 +49,16 @@ export default function NewsCard({ digest, contract, loading }: Props) {
             {digest.items.length === 0 ? (
               <>
                 <div className="empty" style={{ padding: '10px 0 4px' }}>{digest.note}</div>
-                <div className="news-note dim">
-                  {base} 这类合约媒体很少覆盖，卡片空着是真实情况，不是抓取失败。
-                </div>
+                {okFeeds > 0 && (
+                  <div className="news-note dim">
+                    {base} 这类合约媒体很少覆盖，卡片空着是真实情况，不是抓取失败。
+                  </div>
+                )}
+                {okFeeds === 0 && digest.feeds.length > 0 && (
+                  <div className="news-note dim">
+                    {digest.feeds.map((f) => `${f.name}（${f.error ?? '失败'}）`).join('、')}
+                  </div>
+                )}
               </>
             ) : (
               <>
