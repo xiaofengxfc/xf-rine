@@ -17,6 +17,20 @@ import type { Bar, Bracket, Level } from '../lib/api.ts';
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
 
+/**
+ * 把 K 线整理成 lightweight-charts 能接受的形状：时间严格递增，重复时间只留最后一根。
+ * setData 和 update 都要求时间有序，乱序会直接抛异常。
+ */
+function normalize(bars: Bar[]): Bar[] {
+  const out: Bar[] = [];
+  for (const b of [...bars].sort((x, y) => x.time - y.time)) {
+    const prev = out[out.length - 1];
+    if (prev && prev.time === b.time) out[out.length - 1] = b;
+    else out.push(b);
+  }
+  return out;
+}
+
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
 
 const TOOLS: { kind: DrawingKind; label: string; title: string }[] = [
@@ -55,6 +69,8 @@ export default function ChartPane({
   const bracketLinesRef = useRef<IPriceLine[]>([]);
   const barsRef = useRef<Bar[]>(bars);
   const lastKeyRef = useRef<string>('');
+  /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
+  const lastTimeRef = useRef<number | null>(null);
   const [tool, setTool] = useState<DrawingKind | null>(null);
   const [legend, setLegend] = useState<{ o: number; h: number; l: number; c: number; v: number; t: number } | null>(null);
 
@@ -179,6 +195,7 @@ export default function ChartPane({
       dmRef.current = null;
       levelLinesRef.current = [];
       bracketLinesRef.current = [];
+      lastTimeRef.current = null;
     };
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -193,36 +210,64 @@ export default function ChartPane({
     if (!chart || !price || !vol || !dm) return;
     if (bars.length === 0) return;
 
-    const firstLoad = lastKeyRef.current !== resetKey;
-    if (firstLoad) {
-      lastKeyRef.current = resetKey;
-      price.setData(bars.map((b) => ({
+    const writePrice = (b: Bar) => price.update({
+      time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
+    });
+    const writeVol = (b: Bar) => vol.update({
+      time: b.time as UTCTimestamp,
+      value: b.volume,
+      color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+    });
+    const fullLoad = () => {
+      const clean = normalize(bars);
+      price.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
       })));
-      vol.setData(bars.map((b) => ({
+      vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
         value: b.volume,
         color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
       })));
+      lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
-      const from = Math.max(0, bars.length - 160);
-      chart.timeScale().setVisibleLogicalRange({ from, to: bars.length + 6 });
-      try {
-        const saved = localStorage.getItem(storageKey);
-        if (saved) dm.importJSON(saved);
-      } catch { /* 数据坏了就当没有 */ }
-      return;
-    }
+      const from = Math.max(0, clean.length - 160);
+      chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + 6 });
+    };
 
-    // 增量：只刷新最后两根（当前未走完的一根 + 刚收掉的一根）
-    const tail = bars.slice(-2);
-    for (const b of tail) {
-      price.update({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close });
-      vol.update({
-        time: b.time as UTCTimestamp,
-        value: b.volume,
-        color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
-      });
+    try {
+      const firstLoad = lastKeyRef.current !== resetKey;
+      if (firstLoad) {
+        lastKeyRef.current = resetKey;
+        lastTimeRef.current = null;
+        fullLoad();
+        try {
+          const saved = localStorage.getItem(storageKey);
+          if (saved) dm.importJSON(saved);
+        } catch { /* 数据坏了就当没有 */ }
+        return;
+      }
+
+      // 拿到的是一份比图上更旧的快照（REST 有缓存，可能落后于 WebSocket 推来的那根），
+      // 增量写不进去，整段重设。
+      const newest = bars[bars.length - 1]!;
+      const applied = lastTimeRef.current;
+      if (applied != null && newest.time < applied) {
+        fullLoad();
+        return;
+      }
+
+      // 增量：只刷新最后两根。update() 只接受「不比图上最后一根更早」的时间，
+      // 早于它就会抛 Cannot update oldest data —— 这个异常会把整个 React 树卸掉。
+      for (const b of bars.slice(-2)) {
+        if (applied != null && b.time < applied) continue;
+        writePrice(b);
+        writeVol(b);
+        lastTimeRef.current = b.time;
+      }
+    } catch (err) {
+      // 任何写图表的异常都不能冒泡到 React，否则整页变黑
+      console.warn('[chart] 写入 K 线失败，改为整段重设', err);
+      try { fullLoad(); } catch { /* 实在不行就保持现状 */ }
     }
   }, [bars, resetKey, storageKey]);
 
