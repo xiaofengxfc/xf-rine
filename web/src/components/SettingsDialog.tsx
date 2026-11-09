@@ -26,22 +26,49 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const [env, setEnv] = useState<'testnet' | 'live'>(config?.env ?? 'testnet');
   const [diag, setDiag] = useState<Diag | null>(null);
   const [busy, setBusy] = useState(false);
+  const [aiBase, setAiBase] = useState(config?.ai.baseUrl ?? '');
+  const [aiModel, setAiModel] = useState(config?.ai.model ?? '');
+  const [aiKey, setAiKey] = useState('');
+  const [clearAiKey, setClearAiKey] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   async function save() {
     setBusy(true);
     try {
-      await jsend('POST', '/api/config/keys', {
+      const payload: Record<string, unknown> = {
         key: key.trim() || undefined,
         secret: secret.trim() || undefined,
         liveTrading: live,
         env,
-      });
-      onToast('ok', '已写入 server/.env', '密钥和环境热加载，不用重启');
-      setKey(''); setSecret('');
+      };
+      if (aiBase.trim()) payload.aiBaseUrl = aiBase.trim();
+      if (aiModel.trim()) payload.aiModel = aiModel.trim();
+      // 密钥留空表示不改；点过「清除」才真的写空
+      if (aiKey.trim()) payload.aiApiKey = aiKey.trim();
+      else if (clearAiKey) payload.aiApiKey = '';
+
+      await jsend('POST', '/api/config/keys', payload);
+      onToast('ok', '已写入 server/.env', '配置热加载，不用重启');
+      setKey(''); setSecret(''); setAiKey(''); setClearAiKey(false);
       onSaved();
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     } finally { setBusy(false); }
+  }
+
+  async function testAi() {
+    setTesting(true);
+    try {
+      const r = await jsend<{ ok: boolean; model: string; ms: number; endpoint: string }>('POST', '/api/ai/test', {
+        baseUrl: aiBase.trim() || undefined,
+        apiKey: aiKey.trim() || undefined,
+        model: aiModel.trim() || undefined,
+      });
+      onToast('ok', 'AI 接口连通', `${r.endpoint} · ${r.model} · ${r.ms}ms`);
+    } catch (e) {
+      const err = e as Error & { label?: string };
+      onToast('err', 'AI 接口不通', `${err.label ?? ''} ${err.message}`.trim());
+    } finally { setTesting(false); }
   }
 
   async function runDiag() {
@@ -109,6 +136,62 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
           <div className="hint" style={{ marginBottom: 12 }}>
             密钥只写进 <code>server/.env</code>，只有服务端读；页面拿到的永远只有尾号四位。
             到 Gate「API 管理」建密钥时勾选 <b>合约交易 · 读写</b> 就够，<b>不要开提现权限</b>。
+          </div>
+
+          <div style={{ borderTop: '1px solid var(--line)', paddingTop: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, letterSpacing: '0.1em', color: 'var(--text-2)', marginBottom: 9 }}>
+              AI 分析模型
+            </div>
+            <div className="hint" style={{ marginBottom: 9 }}>
+              任何 OpenAI 兼容接口都能用：官方地址、中转站、本地 Ollama 都可以。
+              地址填到 <code>/v1</code> 就行，服务端会自己补后面的路径；填完整路径也认。
+              当前状态：{config?.ai.configured ? <>已配置 <code>{config.ai.hint}</code></> : '未配置'}
+            </div>
+
+            <div className="field">
+              <label>接口地址</label>
+              <input
+                className="input"
+                value={aiBase}
+                onChange={(e) => setAiBase(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+                spellCheck={false}
+              />
+            </div>
+            <div className="field">
+              <label>模型名</label>
+              <input
+                className="input"
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+                placeholder="gpt-4o-mini"
+                spellCheck={false}
+              />
+            </div>
+            <div className="field">
+              <label>API 密钥</label>
+              <input
+                className="input"
+                type="password"
+                value={aiKey}
+                onChange={(e) => { setAiKey(e.target.value); setClearAiKey(false); }}
+                placeholder={clearAiKey ? '保存后会被清除' : '留空则不修改'}
+                spellCheck={false}
+              />
+            </div>
+
+            <div className="row2">
+              <button className="btn ghost" onClick={testAi} disabled={busy || testing}>
+                {testing ? '测试中…' : '测试连接'}
+              </button>
+              <button
+                className="btn ghost"
+                onClick={() => { setAiKey(''); setClearAiKey(true); }}
+                disabled={busy || !config?.ai.configured}
+              >
+                清除密钥
+              </button>
+            </div>
           </div>
 
           {diag && (

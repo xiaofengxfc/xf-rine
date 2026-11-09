@@ -123,6 +123,29 @@ export interface PriceOrder {
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
 
+export interface AiSettings {
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  hint: string;
+  endpoint?: string;
+}
+
+export interface AiAnalysis {
+  contract: string;
+  interval: string;
+  verdict: 'long' | 'short' | 'wait';
+  confidence: number;
+  reasons: string[];
+  conflicts: string[];
+  riskNote: string;
+  model: string;
+  at: number;
+  cached: boolean;
+  raw?: string;
+  usage?: { promptTokens: number; completionTokens: number };
+}
+
 export interface AppConfig {
   env: 'testnet' | 'live';
   envLabel: string;
@@ -130,6 +153,7 @@ export interface AppConfig {
   keys: { configured: boolean; hint: string };
   liveTrading: boolean;
   limits: { maxOrderNotional: number; maxLeverage: number; maxContracts: number };
+  ai: AiSettings;
 }
 
 export interface NewsItem {

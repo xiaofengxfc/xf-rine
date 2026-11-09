@@ -13,6 +13,12 @@ function num(v: string | undefined, fallback: number): number {
 
 export type GateEnv = 'testnet' | 'live';
 
+export interface AiConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface Config {
   env: GateEnv;
   key: string;
@@ -22,6 +28,7 @@ export interface Config {
   maxLeverage: number;
   maxContracts: number;
   port: number;
+  ai: AiConfig;
 }
 
 /** 每个环境一套密钥，切环境不用重填。GATE_KEY/GATE_SECRET 作为兜底的老写法保留。 */
@@ -29,6 +36,9 @@ export function keySlot(env: GateEnv): { key: string; secret: string } {
   const suffix = env === 'testnet' ? 'TESTNET' : 'LIVE';
   return { key: `GATE_${suffix}_KEY`, secret: `GATE_${suffix}_SECRET` };
 }
+
+export const AI_DEFAULT_BASE = 'https://api.openai.com/v1';
+export const AI_DEFAULT_MODEL = 'gpt-4o-mini';
 
 function readConfig(): Config {
   const env: GateEnv = (process.env.GATE_ENV ?? 'live').trim().toLowerCase() === 'testnet' ? 'testnet' : 'live';
@@ -42,6 +52,11 @@ function readConfig(): Config {
     maxLeverage: num(process.env.MAX_LEVERAGE, 20),
     maxContracts: num(process.env.MAX_CONTRACTS_PER_ORDER, 0),
     port: num(process.env.PORT, 8787),
+    ai: {
+      baseUrl: (process.env.AI_BASE_URL ?? AI_DEFAULT_BASE).trim(),
+      apiKey: (process.env.AI_API_KEY ?? '').trim(),
+      model: (process.env.AI_MODEL ?? '').trim() || AI_DEFAULT_MODEL,
+    },
   };
 }
 
@@ -87,6 +102,28 @@ export function envLabel(): string {
 /** 页面只能看到尾号，密钥永不出网 */
 export function keyHint(): { configured: boolean; hint: string } {
   const k = config.key;
+  if (!k) return { configured: false, hint: '' };
+  return { configured: true, hint: k.length <= 8 ? '••••' : `${'•'.repeat(4)}${k.slice(-4)}` };
+}
+
+/**
+ * 把用户填的地址补成完整的 chat/completions 端点。
+ *
+ * 中转站写法五花八门，三种都认：
+ *   https://x.com/v1              → https://x.com/v1/chat/completions
+ *   https://x.com                 → https://x.com/v1/chat/completions
+ *   https://x.com/v1/chat/completions → 原样用
+ */
+export function aiEndpoint(baseUrl: string = config.ai.baseUrl): string {
+  const base = (baseUrl || AI_DEFAULT_BASE).trim().replace(/\/+$/, '');
+  if (/\/chat\/completions$/.test(base)) return base;
+  if (/\/v\d+[a-z0-9]*$/.test(base)) return `${base}/chat/completions`;
+  return `${base}/v1/chat/completions`;
+}
+
+/** AI 密钥同样只回显尾号 */
+export function aiKeyHint(): { configured: boolean; hint: string } {
+  const k = config.ai.apiKey;
   if (!k) return { configured: false, hint: '' };
   return { configured: true, hint: k.length <= 8 ? '••••' : `${'•'.repeat(4)}${k.slice(-4)}` };
 }

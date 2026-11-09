@@ -13,6 +13,7 @@ import BracketsCard from './components/BracketsCard.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
 import PositionsCard from './components/PositionsCard.tsx';
 import NewsCard from './components/NewsCard.tsx';
+import AiCard from './components/AiCard.tsx';
 import SettingsDialog from './components/SettingsDialog.tsx';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
@@ -339,6 +340,15 @@ export default function App() {
             digest={news && news.contract === contract ? news : null}
             contract={contract}
             loading={newsLoading}
+          />
+
+          <AiCard
+            contract={contract}
+            interval={interval}
+            configured={config?.ai.configured ?? false}
+            liveTrading={config?.liveTrading ?? false}
+            env={config?.env ?? 'live'}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         </aside>
       </div>

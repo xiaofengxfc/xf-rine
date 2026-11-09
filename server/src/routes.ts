@@ -1,8 +1,9 @@
 import { Router, type Request, type Response } from 'express';
-import { config, keyHint, writeEnv, restBaseUrl, envLabel, keySlot } from './config.js';
+import { config, keyHint, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint } from './config.js';
 import { gatePublic, gatePrivate, GateError, requireKeys } from './gate/rest.js';
-import { detectLevels, planBracket, type Bar, type Direction } from './levels.js';
+import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
 import { newsDigest } from './news.js';
+import { analyze, testConnection, AiError, type AiSnapshot } from './ai.js';
 import { randomUUID } from 'node:crypto';
 
 export const router = Router();
@@ -25,6 +26,10 @@ function notionalOf(sizeContracts: number, price: number, multiplier: number): n
 }
 
 function fail(res: Response, err: unknown): void {
+  if (err instanceof AiError) {
+    res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.detail });
+    return;
+  }
   if (err instanceof GateError) {
     res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.detail, status: err.status });
     return;
@@ -154,6 +159,99 @@ router.get('/news', wrap(async (req, res) => {
   res.json(await newsDigest(contract, limit));
 }));
 
+// ---------- AI 分析 ----------
+
+/** 价格留 6 位有效数字就够了，原始浮点白烧 token 还容易被读错 */
+const px = (v: number): number => (Number.isFinite(v) ? Number(v.toPrecision(6)) : 0);
+
+const roundBracket = (b: Bracket | null): Bracket | null =>
+  b ? { ...b, entry: px(b.entry), stop: px(b.stop), target: px(b.target), riskReward: Number(b.riskReward.toFixed(2)) } : null;
+
+async function buildSnapshot(contract: string, interval: string): Promise<AiSnapshot> {
+  const bars = await loadCandles(contract, interval, 300);
+  const closed = bars.slice(0, -1);
+  const set = detectLevels(closed, {});
+  const live = bars[bars.length - 1]?.close ?? set.last;
+  const planSet = { ...set, last: live };
+  const news = await newsDigest(contract, 6).catch(() => null);
+
+  let barHigh = live;
+  let barLow = live;
+  for (const b of closed) {
+    if (b.high > barHigh) barHigh = b.high;
+    if (b.low < barLow) barLow = b.low;
+  }
+  const t0 = closed[0]?.time ?? 0;
+  const t1 = closed[closed.length - 1]?.time ?? 0;
+
+  // 24 小时涨跌幅直接从手里的 K 线算，不额外请求一次 ticker
+  const spanSec = t1 - t0;
+  const perBar = closed.length > 1 ? spanSec / (closed.length - 1) : 0;
+  const back = perBar > 0 ? Math.min(closed.length - 1, Math.round(86_400 / perBar)) : 0;
+  const ref24 = closed[closed.length - 1 - back]?.close ?? live;
+  const change24h = ref24 > 0 ? ((live - ref24) / ref24) * 100 : 0;
+
+  return {
+    contract,
+    interval,
+    last: px(live),
+    atr: px(set.atr),
+    rangeHigh: px(set.rangeHigh),
+    rangeLow: px(set.rangeLow),
+    barsUsed: closed.length,
+    spanHours: Number((t1 > t0 ? (t1 - t0) / 3600 : 0).toFixed(1)),
+    barHigh: px(barHigh),
+    barLow: px(barLow),
+    change24h: Number(change24h.toFixed(2)),
+    levels: set.levels.map((l) => ({
+      price: px(l.price),
+      // 模型读中文材料，角色也给它中文
+      role: l.role === 'support' ? '支撑' : '阻力',
+      strength: Math.round(l.strength),
+      touches: l.touches,
+      failures: l.failures,
+      distancePct: Number(l.distancePct.toFixed(2)),
+    })),
+    brackets: {
+      long: roundBracket(planBracket(planSet, 'long', { minRR: 1.5 })),
+      short: roundBracket(planBracket(planSet, 'short', { minRR: 1.5 })),
+    },
+    news: {
+      stance: news?.stance ?? 'neutral',
+      sentiment: news?.sentiment ?? 0,
+      headlines: (news?.items ?? []).map((i) => i.title),
+    },
+  };
+}
+
+router.post('/ai/analyze', wrap(async (req, res) => {
+  const contract = String(req.body?.contract ?? 'BTC_USDT').toUpperCase();
+  const interval = INTERVALS.has(String(req.body?.interval)) ? String(req.body.interval) : '15m';
+  const snapshot = await buildSnapshot(contract, interval);
+  res.json(await analyze(snapshot, { refresh: req.body?.refresh === true }));
+}));
+
+router.post('/ai/test', wrap(async (req, res) => {
+  const ip = req.socket.remoteAddress ?? '';
+  if (!/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(ip)) {
+    throw new GateError(403, 'LOCAL_ONLY', '测试连接只允许本机访问');
+  }
+  const body = req.body ?? {};
+  const override = {
+    baseUrl: typeof body.baseUrl === 'string' && body.baseUrl.trim() ? body.baseUrl.trim() : config.ai.baseUrl,
+    apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : config.ai.apiKey,
+    model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : config.ai.model,
+  };
+  res.json(await testConnection(override));
+}));
+
+router.get('/ai/snapshot', wrap(async (req, res) => {
+  // 给「凭什么这么说」留证据：不调模型，只把喂给模型的材料原样返回
+  const contract = String(req.query.contract ?? 'BTC_USDT').toUpperCase();
+  const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
+  res.json(await buildSnapshot(contract, interval));
+}));
+
 // ---------- 配置与体检 ----------
 
 router.get('/config', (_req, res) => {
@@ -164,6 +262,13 @@ router.get('/config', (_req, res) => {
     keys: keyHint(),
     liveTrading: config.liveTrading,
     limits: { maxOrderNotional: config.maxOrderNotional, maxLeverage: config.maxLeverage, maxContracts: config.maxContracts },
+    ai: {
+      configured: aiKeyHint().configured,
+      baseUrl: config.ai.baseUrl,
+      model: config.ai.model,
+      hint: aiKeyHint().hint,
+      endpoint: aiEndpoint(),
+    },
     armed: false,
   });
 });
@@ -182,9 +287,21 @@ router.post('/config/keys', wrap(async (req, res) => {
   if (typeof secret === 'string' && secret.trim()) patch[slot.secret] = secret.trim();
   if (typeof liveTrading === 'boolean') patch.LIVE_TRADING = liveTrading ? 'true' : 'false';
   if (env === 'testnet' || env === 'live') patch.GATE_ENV = env;
+  // AI 三个字段各管各的：传了就写，字符串为空表示清除，不传就不动
+  const { aiBaseUrl, aiApiKey, aiModel } = req.body ?? {};
+  if (typeof aiBaseUrl === 'string' && aiBaseUrl.trim()) patch.AI_BASE_URL = aiBaseUrl.trim();
+  if (typeof aiApiKey === 'string') patch.AI_API_KEY = aiApiKey.trim();
+  if (typeof aiModel === 'string' && aiModel.trim()) patch.AI_MODEL = aiModel.trim();
   if (Object.keys(patch).length === 0) throw new GateError(400, 'EMPTY', '没有要写入的字段');
   writeEnv(patch);
-  res.json({ ok: true, env: config.env, envLabel: envLabel(), keys: keyHint(), liveTrading: config.liveTrading });
+  res.json({
+    ok: true,
+    env: config.env,
+    envLabel: envLabel(),
+    keys: keyHint(),
+    liveTrading: config.liveTrading,
+    ai: { configured: aiKeyHint().configured, baseUrl: config.ai.baseUrl, model: config.ai.model, hint: aiKeyHint().hint },
+  });
 }));
 
 router.get('/diag', wrap(async (_req, res) => {
