@@ -38,31 +38,44 @@ const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
+interface Prefs {
+  contract: string;
+  interval: string;
+  side: 'long' | 'short';
+  riskPct: number;
+}
+
+const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', side: 'long', riskPct: 1 };
+
 /**
- * 记住上次看的币种和周期。刷新一次就跳回 BTC/15m 很烦，
- * 但这只是偏好，读坏了就当没存过，绝不能让页面因此起不来。
+ * 记住上次在看什么：币种、周期、看多还是看空、风险百分比。
+ * 刷新一次就跳回 BTC/15m/看多很烦，但这只是偏好，
+ * 读坏了就当没存过，绝不能让页面因此起不来。
  */
-function readPrefs(): { contract: string; interval: string } {
+function readPrefs(): Prefs {
   try {
     const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
-    const c = typeof raw.contract === 'string' && /^[A-Z0-9_]{2,24}$/.test(raw.contract) ? raw.contract : DEFAULT_CONTRACT;
-    const i = typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : '15m';
-    return { contract: c, interval: i };
+    return {
+      contract: typeof raw.contract === 'string' && /^[A-Z0-9_]{2,24}$/.test(raw.contract) ? raw.contract : DEFAULT_PREFS.contract,
+      interval: typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : DEFAULT_PREFS.interval,
+      side: raw.side === 'short' ? 'short' : 'long',
+      riskPct: typeof raw.riskPct === 'number' && raw.riskPct > 0 && raw.riskPct <= 100 ? raw.riskPct : DEFAULT_PREFS.riskPct,
+    };
   } catch {
-    return { contract: DEFAULT_CONTRACT, interval: '15m' };
+    return { ...DEFAULT_PREFS };
   }
 }
 
-function savePrefs(contract: string, interval: string): void {
-  try { localStorage.setItem(PREFS_KEY, JSON.stringify({ contract, interval })); } catch { /* 存不了就算了 */ }
+function savePrefs(p: Prefs): void {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* 存不了就算了 */ }
 }
 
 let toastSeq = 1;
 
 export default function App() {
-  const prefs = useRef(readPrefs());
-  const [contract, setContract] = useState(prefs.current.contract);
-  const [interval, setInterval] = useState(prefs.current.interval);
+  const prefs0 = useRef(readPrefs()).current;
+  const [contract, setContract] = useState(prefs0.contract);
+  const [interval, setInterval] = useState(prefs0.interval);
   const [tickers, setTickers] = useState<Ticker[]>([]);
   const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
   const [news, setNews] = useState<NewsDigest | null>(null);
@@ -80,8 +93,8 @@ export default function App() {
   const [manualLevels, setManualLevels] = useState<number[]>([]);
   const [applied, setApplied] = useState<{ bracket: Bracket; at: number } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [side, setSide] = useState<'long' | 'short'>('long');
-  const [riskPct, setRiskPct] = useState(1);
+  const [side, setSide] = useState<'long' | 'short'>(prefs0.side);
+  const [riskPct, setRiskPct] = useState(prefs0.riskPct);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number>(0);
@@ -154,8 +167,8 @@ export default function App() {
     } catch { /* 静默 */ }
   }, []);
 
-  // 选过的币种和周期记下来，刷新后接着看同一个
-  useEffect(() => { savePrefs(contract, interval); }, [contract, interval]);
+  // 选过的东西记下来，刷新后接着看同一个
+  useEffect(() => { savePrefs({ contract, interval, side, riskPct }); }, [contract, interval, side, riskPct]);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
