@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   createChart,
+  createSeriesMarkers,
   CandlestickSeries,
   HistogramSeries,
   ColorType,
@@ -9,13 +10,36 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
+  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Bar, Bracket, Level } from '../lib/api.ts';
+import type { Bar, Bracket, Level, Pattern } from '../lib/api.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
+const NEUTRAL = '#8b98a5';
+
+/**
+ * 把形态转成图上的标记。
+ * 只标记当前这份数据里真实存在的时间点 —— 切币种那一瞬间旧形态可能还没清掉，
+ * 给不存在的 K 线挂标记没有任何意义。
+ */
+function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
+  const times = new Set(bars.map((b) => b.time));
+  return [...list]
+    .filter((p) => times.has(p.time))
+    .sort((a, b) => a.time - b.time)
+    .map((p) => ({
+      time: p.time as Time,
+      position: p.direction === 'bullish' ? 'belowBar' : 'aboveBar',
+      color: p.direction === 'bullish' ? UP : p.direction === 'bearish' ? DOWN : NEUTRAL,
+      shape: p.direction === 'bullish' ? 'arrowUp' : p.direction === 'bearish' ? 'arrowDown' : 'circle',
+      text: p.name,
+    }));
+}
 
 /**
  * 把 K 线整理成 lightweight-charts 能接受的形状：时间严格递增，重复时间只留最后一根。
@@ -50,6 +74,7 @@ interface Props {
   interval: string;
   bars: Bar[];
   levels: Level[];
+  patterns: Pattern[];
   bracket: Bracket | null;
   resetKey: string;
   loading: boolean;
@@ -58,7 +83,7 @@ interface Props {
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, bracket, resetKey, loading, onIntervalChange, onManualLevels,
+  contract, interval, bars, levels, patterns, bracket, resetKey, loading, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -67,6 +92,8 @@ export default function ChartPane({
   const dmRef = useRef<DrawingManager | null>(null);
   const levelLinesRef = useRef<IPriceLine[]>([]);
   const bracketLinesRef = useRef<IPriceLine[]>([]);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const patternsRef = useRef<Pattern[]>(patterns);
   const barsRef = useRef<Bar[]>(bars);
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
@@ -76,6 +103,7 @@ export default function ChartPane({
 
   const storageKey = `xf-rine:drawings:${contract}:${interval}`;
   barsRef.current = bars;
+  patternsRef.current = patterns;
 
   // ---- 建图 ----
   useEffect(() => {
@@ -128,6 +156,9 @@ export default function ChartPane({
       priceLineStyle: LineStyle.Dotted,
       lastValueVisible: true,
     });
+
+    // 形态标记：切币种会重建整张图，所以建图时用 ref 里的最新形态补一次
+    markersRef.current = createSeriesMarkers(price, buildMarkers(patternsRef.current, barsRef.current));
 
     const vol = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
@@ -193,6 +224,7 @@ export default function ChartPane({
       priceRef.current = null;
       volRef.current = null;
       dmRef.current = null;
+      markersRef.current = null;
       levelLinesRef.current = [];
       bracketLinesRef.current = [];
       lastTimeRef.current = null;
@@ -200,6 +232,21 @@ export default function ChartPane({
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
+
+  // ---- 形态标记 ----
+  const patternSig = patterns.map((p) => `${p.kind}@${p.time}`).join('|');
+  useEffect(() => {
+    const plugin = markersRef.current;
+    if (!plugin) return;
+    try {
+      plugin.setMarkers(buildMarkers(patternsRef.current, barsRef.current));
+    } catch (err) {
+      // 标记画不出来不影响看盘，别让它把整个界面带下去
+      console.warn('[chart] 写入形态标记失败', err);
+    }
+    // 只在形态本身变了时重画，K 线每来一根都重算没意义
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patternSig, storageKey]);
 
   // ---- K 线数据 ----
   useEffect(() => {

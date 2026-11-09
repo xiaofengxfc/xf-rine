@@ -103,6 +103,7 @@ export interface LevelsResponse {
   nearestSupport: Level | null;
   nearestResistance: Level | null;
   brackets: { long: Bracket | null; short: Bracket | null };
+  patterns: Pattern[];
 }
 
 export interface Position {
@@ -167,6 +168,16 @@ export interface NewsDigest {
   contract: string; base: string; fetchedAt: number;
   items: NewsItem[]; feeds: FeedStat[];
   sentiment: number; stance: 'bullish' | 'neutral' | 'bearish'; note: string;
+}
+
+export interface Pattern {
+  kind: string;
+  name: string;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  time: number;
+  index: number;
+  strength: number;
+  note: string;
 }
 
 export interface LiveBar {

@@ -3,6 +3,7 @@ import { config, keyHint, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, a
 import { gatePublic, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
 import { newsDigest } from './news.js';
+import { detectPatterns } from './patterns.js';
 import { analyze, testConnection, AiError, type AiSnapshot } from './ai.js';
 import { randomUUID } from 'node:crypto';
 
@@ -144,6 +145,7 @@ router.get('/levels', wrap(async (req, res) => {
     interval,
     barsUsed: closed.length,
     ...setForPlan,
+    patterns: detectPatterns(closed, { window: 30, limit: 6 }),
     brackets: {
       long: planBracket(setForPlan, 'long', { minRR }),
       short: planBracket(setForPlan, 'short', { minRR }),
@@ -216,6 +218,11 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
       long: roundBracket(planBracket(planSet, 'long', { minRR: 1.5 })),
       short: roundBracket(planBracket(planSet, 'short', { minRR: 1.5 })),
     },
+    patterns: detectPatterns(closed, { window: 12, limit: 4 }).map((p) => ({
+      name: p.name,
+      direction: p.direction,
+      note: p.note,
+    })),
     news: {
       stance: news?.stance ?? 'neutral',
       sentiment: news?.sentiment ?? 0,

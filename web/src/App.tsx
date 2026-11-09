@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
   type Account, type AppConfig, type Bar, type Bracket, type ContractInfo,
-  type LevelsResponse, type LiveBar, type NewsDigest, type OpenOrder, type Position, type PriceOrder, type Ticker,
+  type LevelsResponse, type LiveBar, type NewsDigest, type OpenOrder, type Pattern, type Position, type PriceOrder, type Ticker,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
 import ChartPane from './components/ChartPane.tsx';
@@ -31,6 +31,7 @@ interface MarketSnap {
 }
 
 const EMPTY_BARS: Bar[] = [];
+const EMPTY_PATTERNS: Pattern[] = [];
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
 
 let toastSeq = 1;
@@ -271,6 +272,7 @@ export default function App() {
             interval={interval}
             bars={bars}
             levels={levels?.levels ?? []}
+            patterns={fresh ? (levels?.patterns ?? EMPTY_PATTERNS) : EMPTY_PATTERNS}
             bracket={bracketForSide}
             resetKey={`${contract}:${interval}`}
             loading={loading}
