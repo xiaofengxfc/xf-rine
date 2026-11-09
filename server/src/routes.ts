@@ -1,16 +1,29 @@
 import { Router, type Request, type Response } from 'express';
-import { config, keyHint, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint } from './config.js';
+import { config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint, type GateEnv } from './config.js';
 import { gatePublic, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
-import { analyze, testConnection, AiError, type AiSnapshot } from './ai.js';
+import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
 import { randomUUID } from 'node:crypto';
 
 export const router = Router();
 
 const barCache = new Map<string, { at: number; bars: Bar[] }>();
 const INTERVALS = new Set(['10s', '1m', '5m', '15m', '30m', '1h', '4h', '8h', '1d', '7d']);
+
+/** 会带出密钥或者会动真钱的接口，只认本机回环地址 */
+function requireLocal(req: Request, what: string): void {
+  const ip = req.socket.remoteAddress ?? '';
+  if (!/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(ip)) {
+    throw new GateError(403, 'LOCAL_ONLY', `${what}只允许本机访问`);
+  }
+}
+
+/** 两个环境各自的密钥状态，设置页要一次看到两套 */
+function keysByEnv(): Record<GateEnv, { configured: boolean; hint: string }> {
+  return { testnet: keyHintFor('testnet'), live: keyHintFor('live') };
+}
 
 // ---------- 下单前的二次确认令牌 ----------
 const armTokens = new Map<string, number>();
@@ -267,6 +280,7 @@ router.get('/config', (_req, res) => {
     envLabel: envLabel(),
     restBaseUrl: restBaseUrl(),
     keys: keyHint(),
+    keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
     limits: { maxLeverage: config.maxLeverage, maxContracts: config.maxContracts },
     ai: {
@@ -280,20 +294,19 @@ router.get('/config', (_req, res) => {
   });
 });
 
+/**
+ * 写密钥。slotEnv 指定写进哪一格：模拟盘和实盘各存各的，互不覆盖。
+ * 这里只管密钥，绝不碰 GATE_ENV —— 填另一套密钥不该顺手把程序切到真钱上。
+ */
 router.post('/config/keys', wrap(async (req, res) => {
-  const ip = req.socket.remoteAddress ?? '';
-  if (!/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(ip)) {
-    throw new GateError(403, 'LOCAL_ONLY', '写密钥只允许本机访问');
-  }
-  const { key, secret, liveTrading, env } = req.body ?? {};
-  const targetEnv = env === 'testnet' || env === 'live' ? env : config.env;
+  requireLocal(req, '写密钥');
+  const { key, secret, liveTrading, slotEnv } = req.body ?? {};
+  const targetEnv: GateEnv = slotEnv === 'testnet' || slotEnv === 'live' ? slotEnv : config.env;
   const slot = keySlot(targetEnv);
   const patch: Record<string, string> = {};
-  // 密钥写进目标环境自己那一格，切环境不需要重填
   if (typeof key === 'string' && key.trim()) patch[slot.key] = key.trim();
   if (typeof secret === 'string' && secret.trim()) patch[slot.secret] = secret.trim();
   if (typeof liveTrading === 'boolean') patch.LIVE_TRADING = liveTrading ? 'true' : 'false';
-  if (env === 'testnet' || env === 'live') patch.GATE_ENV = env;
   // AI 三个字段各管各的：传了就写，字符串为空表示清除，不传就不动
   const { aiBaseUrl, aiApiKey, aiModel } = req.body ?? {};
   if (typeof aiBaseUrl === 'string' && aiBaseUrl.trim()) patch.AI_BASE_URL = aiBaseUrl.trim();
@@ -306,9 +319,46 @@ router.post('/config/keys', wrap(async (req, res) => {
     env: config.env,
     envLabel: envLabel(),
     keys: keyHint(),
+    keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
     ai: { configured: aiKeyHint().configured, baseUrl: config.ai.baseUrl, model: config.ai.model, hint: aiKeyHint().hint },
   });
+}));
+
+/**
+ * 切环境。和写密钥分开，因为这是会改变「钱从哪个账户出」的动作。
+ * 一律顺手关掉下单开关：切到实盘意味着换成真钱，绝不能把开关一起带过去。
+ */
+router.post('/config/env', wrap(async (req, res) => {
+  requireLocal(req, '切环境');
+  const { env } = req.body ?? {};
+  if (env !== 'testnet' && env !== 'live') throw new GateError(400, 'BAD_ENV', 'env 只能是 testnet 或 live');
+  writeEnv({ GATE_ENV: env, LIVE_TRADING: 'false' });
+  res.json({
+    ok: true,
+    env: config.env,
+    envLabel: envLabel(),
+    restBaseUrl: restBaseUrl(),
+    keys: keyHint(),
+    keysByEnv: keysByEnv(),
+    liveTrading: config.liveTrading,
+  });
+}));
+
+/**
+ * 拉接口支持的模型列表，省得用户去猜名字。
+ * 地址和密钥可以现场传（还没保存也要能拉），不传就用已保存的。
+ */
+router.post('/ai/models', wrap(async (req, res) => {
+  requireLocal(req, '拉模型列表');
+  const body = req.body ?? {};
+  const override = {
+    baseUrl: typeof body.baseUrl === 'string' && body.baseUrl.trim() ? body.baseUrl.trim() : config.ai.baseUrl,
+    apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : config.ai.apiKey,
+    model: config.ai.model,
+  };
+  const models = await listModels(override);
+  res.json({ models, current: config.ai.model, endpoint: aiEndpoint(override.baseUrl) });
 }));
 
 router.get('/diag', wrap(async (_req, res) => {

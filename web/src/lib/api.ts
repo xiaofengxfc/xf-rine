@@ -152,6 +152,7 @@ export interface AppConfig {
   envLabel: string;
   restBaseUrl: string;
   keys: { configured: boolean; hint: string };
+  keysByEnv: Record<'testnet' | 'live', { configured: boolean; hint: string }>;
   liveTrading: boolean;
   limits: { maxLeverage: number; maxContracts: number };
   ai: AiSettings;

@@ -18,11 +18,15 @@ import {
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
 import { rsi } from '../lib/indicators.ts';
-import type { Bar, Bracket, Level, Pattern } from '../lib/api.ts';
+import type { Bar, Bracket, Level, Pattern, Position } from '../lib/api.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
 const NEUTRAL = '#8b98a5';
+/** 计划入场：虚线，和跟着价格跑的最新价线区分开 */
+const ENTRY = '#7aa2ff';
+/** 真实持仓成本 */
+const HOLDING = '#ffcf4d';
 
 /**
  * 把形态转成图上的标记。
@@ -78,6 +82,8 @@ interface Props {
   levels: Level[];
   patterns: Pattern[];
   bracket: Bracket | null;
+  /** 当前合约的真实持仓，用来在图上标出成本线（双向模式可能多空各一条） */
+  positions: Position[];
   resetKey: string;
   loading: boolean;
   onIntervalChange: (i: string) => void;
@@ -85,7 +91,7 @@ interface Props {
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, patterns, bracket, resetKey, loading, onIntervalChange, onManualLevels,
+  contract, interval, bars, levels, patterns, bracket, positions, resetKey, loading, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -358,7 +364,7 @@ export default function ChartPane({
     bracketLinesRef.current = [];
 
     // 止盈价本身就是那条阻力位，两条线画在同一价格上只会把右侧轴标签叠在一起
-    const taken = bracket ? [bracket.stop, bracket.target] : [];
+    const taken = bracket ? [bracket.entry, bracket.stop, bracket.target] : [];
     const clashes = (a: number, b: number) => Math.abs(a - b) / (b || 1) < 0.0006;
 
     levelLinesRef.current = levels
@@ -372,19 +378,42 @@ export default function ChartPane({
         title: `${lv.role === 'support' ? '支撑' : '阻力'} ${Math.round(lv.strength)}`,
       }));
 
-    if (!bracket) return;
-    // 入场价就是现价，图上已经有一条原生最新价线，再画一条只是把轴标签叠乱
-    bracketLinesRef.current = [
-      price.createPriceLine({
-        price: bracket.stop, color: DOWN, lineWidth: 2, lineStyle: LineStyle.Solid,
-        axisLabelVisible: true, title: '止损',
-      }),
-      price.createPriceLine({
-        price: bracket.target, color: UP, lineWidth: 2, lineStyle: LineStyle.Solid,
-        axisLabelVisible: true, title: '止盈',
-      }),
-    ];
-  }, [levels, bracket]);
+    const marks: IPriceLine[] = [];
+
+    // 计划入场必须画出来。它不是现价线 —— 现价线跟着价格跑，
+    // 价格一走开你就看不出自己原本打算在哪进了。
+    if (bracket) {
+      marks.push(
+        price.createPriceLine({
+          price: bracket.entry, color: ENTRY, lineWidth: 1, lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true, title: '入场',
+        }),
+        price.createPriceLine({
+          price: bracket.stop, color: DOWN, lineWidth: 2, lineStyle: LineStyle.Solid,
+          axisLabelVisible: true, title: '止损',
+        }),
+        price.createPriceLine({
+          price: bracket.target, color: UP, lineWidth: 2, lineStyle: LineStyle.Solid,
+          axisLabelVisible: true, title: '止盈',
+        }),
+      );
+    }
+
+    // 真成交后的成本线。和上面的「计划」不是一回事，所以用实线加粗区分开
+    for (const p of positions) {
+      if (!p.entryPrice || !p.size) continue;
+      marks.push(price.createPriceLine({
+        price: p.entryPrice,
+        color: HOLDING,
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: positions.length > 1 ? (p.direction === 'long' ? '多单均价' : '空单均价') : '持仓均价',
+      }));
+    }
+
+    bracketLinesRef.current = marks;
+  }, [levels, bracket, positions]);
 
   // ---- 工具切换 ----
   useEffect(() => {

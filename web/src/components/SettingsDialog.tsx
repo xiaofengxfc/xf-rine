@@ -20,10 +20,15 @@ interface Diag {
 }
 
 export default function SettingsDialog({ config, onClose, onSaved, onToast }: Props) {
-  const [key, setKey] = useState('');
-  const [secret, setSecret] = useState('');
+  // 两套密钥各存各的，互不覆盖：填实盘的不该把模拟盘那格冲掉
+  const [testKey, setTestKey] = useState('');
+  const [testSecret, setTestSecret] = useState('');
+  const [liveKey, setLiveKey] = useState('');
+  const [liveSecret, setLiveSecret] = useState('');
   const [live, setLive] = useState(config?.liveTrading ?? false);
-  const [env, setEnv] = useState<'testnet' | 'live'>(config?.env ?? 'testnet');
+  const [switching, setSwitching] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [diag, setDiag] = useState<Diag | null>(null);
   const [busy, setBusy] = useState(false);
   const [aiBase, setAiBase] = useState(config?.ai.baseUrl ?? '');
@@ -35,25 +40,71 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   async function save() {
     setBusy(true);
     try {
-      const payload: Record<string, unknown> = {
-        key: key.trim() || undefined,
-        secret: secret.trim() || undefined,
-        liveTrading: live,
-        env,
-      };
-      if (aiBase.trim()) payload.aiBaseUrl = aiBase.trim();
-      if (aiModel.trim()) payload.aiModel = aiModel.trim();
-      // 密钥留空表示不改；点过「清除」才真的写空
-      if (aiKey.trim()) payload.aiApiKey = aiKey.trim();
-      else if (clearAiKey) payload.aiApiKey = '';
+      const cur = config?.env ?? 'testnet';
+      const other = cur === 'testnet' ? 'live' : 'testnet';
+      const curKey = cur === 'testnet' ? testKey : liveKey;
+      const curSecret = cur === 'testnet' ? testSecret : liveSecret;
+      const otherKey = other === 'testnet' ? testKey : liveKey;
+      const otherSecret = other === 'testnet' ? testSecret : liveSecret;
 
-      await jsend('POST', '/api/config/keys', payload);
-      onToast('ok', '已写入 server/.env', '配置热加载，不用重启');
-      setKey(''); setSecret(''); setAiKey(''); setClearAiKey(false);
+      const aiPayload: Record<string, unknown> = {};
+      if (aiBase.trim()) aiPayload.aiBaseUrl = aiBase.trim();
+      if (aiModel.trim()) aiPayload.aiModel = aiModel.trim();
+      // 密钥留空表示不改；点过「清除」才真的写空
+      if (aiKey.trim()) aiPayload.aiApiKey = aiKey.trim();
+      else if (clearAiKey) aiPayload.aiApiKey = '';
+
+      // 第一笔带上当前环境的密钥和全局开关，第二笔只写另一格（填了才发）
+      const first: Record<string, unknown> = { slotEnv: cur, liveTrading: live, ...aiPayload };
+      if (curKey.trim()) first.key = curKey.trim();
+      if (curSecret.trim()) first.secret = curSecret.trim();
+      await jsend('POST', '/api/config/keys', first);
+
+      if (otherKey.trim() || otherSecret.trim()) {
+        const second: Record<string, unknown> = { slotEnv: other };
+        if (otherKey.trim()) second.key = otherKey.trim();
+        if (otherSecret.trim()) second.secret = otherSecret.trim();
+        await jsend('POST', '/api/config/keys', second);
+      }
+
+      onToast('ok', '已写入 server/.env', '立即生效，不用重启');
+      setTestKey(''); setTestSecret(''); setLiveKey(''); setLiveSecret('');
+      setAiKey(''); setClearAiKey(false);
       onSaved();
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     } finally { setBusy(false); }
+  }
+
+  /** 切环境是个独立动作：它决定钱从哪个账户出，不该夹在「保存密钥」里 */
+  async function switchEnv(next: 'testnet' | 'live') {
+    if (next === config?.env) return;
+    setSwitching(true);
+    try {
+      const r = await jsend<{ env: string; envLabel: string; liveTrading: boolean }>('POST', '/api/config/env', { env: next });
+      setLive(r.liveTrading);
+      onToast('ok', '已切换到' + r.envLabel, '下单开关已自动关闭，要交易得重新打开');
+      onSaved();
+    } catch (e) {
+      onToast('err', '切换失败', (e as Error).message);
+    } finally { setSwitching(false); }
+  }
+
+  async function loadModels() {
+    setLoadingModels(true);
+    try {
+      const r = await jsend<{ models: string[] }>('POST', '/api/ai/models', {
+        baseUrl: aiBase.trim() || undefined,
+        apiKey: aiKey.trim() || undefined,
+      });
+      setModels(r.models);
+      if (!aiModel.trim() && r.models[0]) setAiModel(r.models[0]);
+      onToast('ok', '拿到 ' + r.models.length + ' 个模型', '点模型名旁边的输入框就能选');
+    } catch (e) {
+      const err = e as Error & { label?: string };
+      // 拉不到不是错误状态，很多中转站根本没这个接口 —— 照样能手填
+      onToast('err', '拉不到模型列表', `${err.label ?? ''} ${err.message}`.trim() + '（直接填名字也可以）');
+    } finally { setLoadingModels(false); }
   }
 
   async function testAi() {
@@ -92,35 +143,42 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         </header>
         <div className="body">
           <div className="field">
-            <label>环境</label>
+            <label>当前环境</label>
             <div className="seg" style={{ width: '100%' }}>
-              <button className={env === 'testnet' ? 'on' : ''} onClick={() => setEnv('testnet')} style={{ flex: 1 }}>模拟盘</button>
+              <button className={config?.env === 'testnet' ? 'on' : ''} onClick={() => switchEnv('testnet')} disabled={switching} style={{ flex: 1 }}>模拟盘</button>
               <button
-                className={env === 'live' ? 'on' : ''}
-                onClick={() => { setEnv('live'); setLive(false); }}
-                style={{ flex: 1, color: env === 'live' ? 'var(--down)' : undefined }}
+                className={config?.env === 'live' ? 'on' : ''}
+                onClick={() => switchEnv('live')}
+                disabled={switching}
+                style={{ flex: 1, color: config?.env === 'live' ? 'var(--down)' : undefined }}
               >实盘</button>
             </div>
             <div className="hint" style={{ marginTop: 6 }}>
-              模拟盘打 <code>api-testnet.gateapi.io</code>，下单用的是测试网假钱，密钥也要用测试网密钥。
-              实盘打 <code>api.gateio.ws</code>，动真钱。行情两种环境都连主网。
+              模拟盘打 <code>api-testnet.gateapi.io</code>（假钱），实盘打 <code>api.gateio.ws</code>（真钱）。
+              切换立即生效，并且会顺手关掉下单开关。行情两种环境都连主网。
             </div>
           </div>
 
           <div className="field">
-            <label>当前密钥</label>
-            <div className="hint" style={{ fontFamily: 'var(--mono)' }}>
-              {config?.keys.configured ? `已配置 ${config.keys.hint}` : '未配置 —— 只能看盘'}
+            <label>模拟盘密钥</label>
+            <div className="hint" style={{ fontFamily: 'var(--mono)', marginBottom: 6 }}>
+              {config?.keysByEnv.testnet.configured
+                ? `已配置 ${config.keysByEnv.testnet.hint}`
+                : '未配置'}
             </div>
+            <input className="input" value={testKey} onChange={(e) => setTestKey(e.target.value)} placeholder="GATE_TESTNET_KEY，留空不改" spellCheck={false} />
+            <input className="input" type="password" value={testSecret} onChange={(e) => setTestSecret(e.target.value)} placeholder="GATE_TESTNET_SECRET，留空不改" spellCheck={false} style={{ marginTop: 6 }} />
           </div>
 
           <div className="field">
-            <label>GATE_KEY</label>
-            <input className="input" value={key} onChange={(e) => setKey(e.target.value)} placeholder="留空则不修改" spellCheck={false} />
-          </div>
-          <div className="field">
-            <label>GATE_SECRET</label>
-            <input className="input" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="留空则不修改" spellCheck={false} />
+            <label>实盘密钥</label>
+            <div className="hint" style={{ fontFamily: 'var(--mono)', marginBottom: 6 }}>
+              {config?.keysByEnv.live.configured
+                ? `已配置 ${config.keysByEnv.live.hint}`
+                : '未配置'}
+            </div>
+            <input className="input" value={liveKey} onChange={(e) => setLiveKey(e.target.value)} placeholder="GATE_LIVE_KEY，留空不改" spellCheck={false} />
+            <input className="input" type="password" value={liveSecret} onChange={(e) => setLiveSecret(e.target.value)} placeholder="GATE_LIVE_SECRET，留空不改" spellCheck={false} style={{ marginTop: 6 }} />
           </div>
 
           <label className="toggle" style={{ marginBottom: 12 }}>
@@ -166,7 +224,24 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
                 onChange={(e) => setAiModel(e.target.value)}
                 placeholder="gpt-4o-mini"
                 spellCheck={false}
+                list={models.length > 0 ? 'ai-model-list' : undefined}
               />
+              {models.length > 0 && (
+                <datalist id="ai-model-list">
+                  {models.map((m) => <option key={m} value={m} />)}
+                </datalist>
+              )}
+              <button
+                className="btn ghost"
+                style={{ marginTop: 6, width: '100%' }}
+                onClick={loadModels}
+                disabled={busy || loadingModels}
+              >
+                {loadingModels ? '拉取中…' : models.length > 0 ? `已拉到 ${models.length} 个 · 重新拉取` : '从接口拉取模型列表'}
+              </button>
+              <div className="hint" style={{ marginTop: 4 }}>
+                拉取用的是上面填的地址和密钥，没保存也能拉。站点不支持这个接口的话直接填名字。
+              </div>
             </div>
             <div className="field">
               <label>API 密钥</label>
