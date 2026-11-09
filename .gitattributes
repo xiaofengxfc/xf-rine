@@ -1,0 +1,2 @@
+# .bat 必须是 CRLF 行尾：只有 LF 的批处理会被 cmd 解析成乱码（标签、括号块、goto 全失效）
+*.bat text eol=crlf
