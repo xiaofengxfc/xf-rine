@@ -34,11 +34,35 @@ const EMPTY_BARS: Bar[] = [];
 const EMPTY_PATTERNS: Pattern[] = [];
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
 
+const PREFS_KEY = 'xf-rine:prefs';
+const DEFAULT_CONTRACT = 'BTC_USDT';
+const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+
+/**
+ * 记住上次看的币种和周期。刷新一次就跳回 BTC/15m 很烦，
+ * 但这只是偏好，读坏了就当没存过，绝不能让页面因此起不来。
+ */
+function readPrefs(): { contract: string; interval: string } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
+    const c = typeof raw.contract === 'string' && /^[A-Z0-9_]{2,24}$/.test(raw.contract) ? raw.contract : DEFAULT_CONTRACT;
+    const i = typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : '15m';
+    return { contract: c, interval: i };
+  } catch {
+    return { contract: DEFAULT_CONTRACT, interval: '15m' };
+  }
+}
+
+function savePrefs(contract: string, interval: string): void {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify({ contract, interval })); } catch { /* 存不了就算了 */ }
+}
+
 let toastSeq = 1;
 
 export default function App() {
-  const [contract, setContract] = useState('BTC_USDT');
-  const [interval, setInterval] = useState('15m');
+  const prefs = useRef(readPrefs());
+  const [contract, setContract] = useState(prefs.current.contract);
+  const [interval, setInterval] = useState(prefs.current.interval);
   const [tickers, setTickers] = useState<Ticker[]>([]);
   const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
   const [news, setNews] = useState<NewsDigest | null>(null);
@@ -122,8 +146,16 @@ export default function App() {
   }, []);
 
   const loadTickers = useCallback(async () => {
-    try { setTickers(await jget<Ticker[]>('/api/tickers')); } catch { /* 静默 */ }
+    try {
+      const list = await jget<Ticker[]>('/api/tickers');
+      setTickers(list);
+      // 上次存的币种可能已经下架，别让页面一直卡在一个不存在的合约上
+      if (list.length > 0) setContract((c) => (list.some((t) => t.contract === c) ? c : DEFAULT_CONTRACT));
+    } catch { /* 静默 */ }
   }, []);
+
+  // 选过的币种和周期记下来，刷新后接着看同一个
+  useEffect(() => { savePrefs(contract, interval); }, [contract, interval]);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;

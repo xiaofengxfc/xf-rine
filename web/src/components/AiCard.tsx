@@ -22,29 +22,51 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ label: string; detail: string } | null>(null);
   const seqRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (refresh: boolean) => {
     if (!configured) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     const seq = ++seqRef.current;
     setLoading(true);
     setError(null);
     try {
-      const d = await jsend<AiAnalysis>('POST', '/api/ai/analyze', { contract, interval, refresh });
+      const d = await jsend<AiAnalysis>('POST', '/api/ai/analyze', { contract, interval, refresh }, undefined, ac.signal);
       if (seq === seqRef.current) setData(d);
     } catch (e) {
       if (seq !== seqRef.current) return;
+      // 用户自己按的停止，不算错误，也不该弹红字
+      if (e instanceof DOMException && e.name === 'AbortError') return;
       setError(e instanceof ApiError ? { label: e.label, detail: e.message } : { label: 'ERROR', detail: String(e) });
       setData(null);
     } finally {
       if (seq === seqRef.current) setLoading(false);
+      if (abortRef.current === ac) abortRef.current = null;
     }
   }, [contract, interval, configured]);
 
-  // 切币种或周期时自动分析一次；之后不轮询，模型调用是要花钱的
-  useEffect(() => { void load(false); }, [load]);
+  /** 停止：取消这次请求，并让还没回来的响应作废 */
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    seqRef.current++;
+    setLoading(false);
+  }, []);
 
-  // 切走了就把上一个币的结论清掉，别让旧结论挂在新图上
+  // 卸载时别把请求挂着
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  // 切走了就把上一个币的结论清掉，别让旧结论挂在新图上。
+  // 光清界面不够：上一次分析可能还在路上，回来时会按旧的 contract 把结论写进来，
+  // 那时候图上已经是另一个币了。所以这里连同请求一起作废。
   useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    seqRef.current++;
+    setLoading(false);
+    setError(null);
     setData((prev) => (prev && (prev.contract !== contract || prev.interval !== interval) ? null : prev));
   }, [contract, interval]);
 
@@ -82,7 +104,25 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
           </>
         )}
 
-        {configured && !error && loading && !data && <div className="empty" style={{ padding: '10px 0' }}>正在分析…</div>}
+        {configured && !error && loading && !data && (
+          <>
+            <div className="empty" style={{ padding: '10px 0' }}>正在分析…</div>
+            <button className="btn ghost" style={{ padding: '6px 0', marginTop: 8 }} onClick={stop}>
+              停止分析
+            </button>
+          </>
+        )}
+
+        {configured && !error && !loading && !data && (
+          <>
+            <div className="ai-note" style={{ marginBottom: 8 }}>
+              点下面才开始。会把这个币的技术面和新闻一起发给模型，一次调用有成本，所以不自动跑。
+            </div>
+            <button className="btn accent" style={{ padding: '7px 0', width: '100%' }} onClick={() => void load(false)}>
+              开始分析
+            </button>
+          </>
+        )}
 
         {configured && !error && data && v && (
           <>
@@ -94,9 +134,11 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
                 </div>
                 <span className="ai-conf-num">{Math.round(data.confidence * 100)}%</span>
               </div>
-              <button className="ai-refresh" onClick={() => void load(true)} disabled={loading} title="重新分析（不走缓存）">
-                {loading ? '…' : '↻'}
-              </button>
+              {loading ? (
+                <button className="ai-refresh" onClick={stop} title="停止这次分析">停止</button>
+              ) : (
+                <button className="ai-refresh" onClick={() => void load(true)} title="重新分析（不走缓存）">↻</button>
+              )}
             </div>
 
             {data.reasons.length > 0 && (

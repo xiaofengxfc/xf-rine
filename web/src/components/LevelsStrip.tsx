@@ -93,7 +93,8 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
       {levels.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没有识别出够强的位，换个周期或调低最小强度</div>}
 
       {levels.map((lv) => (
-        <button
+        // 这张卡上没有任何操作，就别用 button —— 能点、点下去却什么都不发生，比不给反馈更糟
+        <div
           key={`${lv.role}-${lv.price}`}
           className={`lv ${lv.role === 'support' ? 'sup' : 'res'}`}
           title={`触及 ${lv.touches} 次 · 假突破 ${lv.failures} 次 · 成交量占比 ${(lv.volumeRatio * 100).toFixed(0)}% · 区间 ${fmtPrice(lv.zoneLow, priceRound)} - ${fmtPrice(lv.zoneHigh, priceRound)}`}
@@ -111,7 +112,7 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
             <span>假破 {lv.failures}</span>
           </div>
           <i className="bar" style={{ width: `${lv.strength}%` }} />
-        </button>
+        </div>
       ))}
 
       {manualOnly.length > 0 && manualOnly.map((p) => (

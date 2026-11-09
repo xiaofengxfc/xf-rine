@@ -23,11 +23,18 @@ export function jget<T>(url: string): Promise<T> {
   return fetch(url, { headers: { Accept: 'application/json' } }).then(parse<T>);
 }
 
-export function jsend<T>(method: 'POST' | 'DELETE', url: string, body?: unknown, token?: string): Promise<T> {
+export function jsend<T>(
+  method: 'POST' | 'DELETE',
+  url: string,
+  body?: unknown,
+  token?: string,
+  /** 用来中途取消（AI 分析点「停止」时用） */
+  signal?: AbortSignal,
+): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['x-arm-token'] = token;
-  return fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }).then(parse<T>);
+  return fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal }).then(parse<T>);
 }
 
 // ---------- 类型 ----------

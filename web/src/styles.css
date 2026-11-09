@@ -313,7 +313,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   overflow: hidden;
   transition: border-color 0.14s, transform 0.14s;
 }
-.lv:hover { border-color: var(--bg-4); transform: translateY(-1px); }
+/* 只是划过时给点反馈，不做上浮 —— 上浮会让人以为能点 */
+.lv:hover { border-color: var(--bg-4); }
 .lv .bar {
   position: absolute; left: 0; bottom: 0; height: 2px;
   background: currentColor; opacity: 0.55;

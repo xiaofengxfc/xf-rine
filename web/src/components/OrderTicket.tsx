@@ -33,8 +33,11 @@ export default function OrderTicket({
   const mult = contract?.multiplier ?? 0;
   const last = contract?.price ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
-  const sizeMin = contract?.sizeMin ?? 1;
+  // Gate 有些合约把 order_size_min 报成 0（意思是没单独要求），
+  // 但张数只能是正整数，照抄 0 会让「最小」按钮填个 0 进去，校验也拦不住。
+  const sizeMin = Math.max(1, Math.ceil(contract?.sizeMin ?? 1));
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
+  const sizeMax = Math.floor(contract?.sizeMax ?? 0);
 
   // 从「自动档位」套用过来：填方向 + 限价
   useEffect(() => {
@@ -80,9 +83,11 @@ export default function OrderTicket({
           ? '先点右上角解锁交易'
           : size < sizeMin
             ? `张数至少 ${sizeMin}`
-            : priceMode === 'limit' && !(priceUsed > 0)
-              ? '限价必须大于 0'
-              : '';
+            : sizeMax > 0 && size > sizeMax
+              ? `张数最多 ${sizeMax}`
+              : priceMode === 'limit' && !(priceUsed > 0)
+                ? '限价必须大于 0'
+                : '';
 
   async function submit() {
     if (!contract || !token) return;

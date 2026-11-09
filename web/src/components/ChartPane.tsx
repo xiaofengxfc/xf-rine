@@ -113,6 +113,8 @@ export default function ChartPane({
   const [legend, setLegend] = useState<{ o: number; h: number; l: number; c: number; v: number; t: number } | null>(null);
 
   const storageKey = `xf-rine:drawings:${contract}:${interval}`;
+  // 视口也按币种和周期各记一份，刷新后接着看同一段
+  const viewKey = `xf-rine:view:${contract}:${interval}`;
   barsRef.current = bars;
   patternsRef.current = patterns;
 
@@ -289,9 +291,25 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
-      // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
-      const from = Math.max(0, clean.length - 160);
-      chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + 6 });
+      // 优先恢复上次看到的那一段；没有记录才给默认值
+      let restored = false;
+      try {
+        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as { from?: number; to?: number } | null;
+        if (saved && Number.isFinite(saved.from) && Number.isFinite(saved.to) && (saved.to as number) > (saved.from as number)) {
+          const span = (saved.to as number) - (saved.from as number);
+          let f = saved.from as number;
+          // 这次只加载了 500 根，上次可能拖到了更早的历史里，别把视口留在数据外面
+          if (f > clean.length - 2) f = Math.max(0, clean.length - span - 6);
+          chart.timeScale().setVisibleLogicalRange({ from: f, to: f + span });
+          restored = true;
+        }
+      } catch { /* 记录坏了就用默认值 */ }
+
+      if (!restored) {
+        // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
+        const from = Math.max(0, clean.length - 160);
+        chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + 6 });
+      }
     };
 
     try {
@@ -363,18 +381,29 @@ export default function ChartPane({
     const chart = chartRef.current;
     if (!chart || !onNeedOlder) return;
     const ts = chart.timeScale();
+    let saveTimer = 0;
     const handler = () => {
       // 图还没画上这一份数据时（挂载瞬间、刚切币种），range 会是 {0,0} 之类，
       // 那不是用户拖到了最左，别把它当成要历史。
       if (countRef.current === 0 || lastKeyRef.current !== resetKey) return;
       const r = ts.getVisibleLogicalRange();
       if (!r) return;
+
+      // 拖动时这个回调很密，攒一下再写
+      window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => {
+        try { localStorage.setItem(viewKey, JSON.stringify({ from: r.from, to: r.to })); } catch { /* 存不了就算了 */ }
+      }, 400);
+
       // from < 6 意味着最左边那几根已经贴到边缘了，该补了
       if (r.from < 6) onNeedOlder();
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
-    return () => ts.unsubscribeVisibleLogicalRangeChange(handler);
-  }, [onNeedOlder, resetKey]);
+    return () => {
+      window.clearTimeout(saveTimer);
+      ts.unsubscribeVisibleLogicalRangeChange(handler);
+    };
+  }, [onNeedOlder, resetKey, viewKey]);
 
   // ---- 自动识别出的支撑 / 阻力 ----
   useEffect(() => {
