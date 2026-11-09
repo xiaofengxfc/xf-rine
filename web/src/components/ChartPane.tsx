@@ -4,6 +4,7 @@ import {
   createSeriesMarkers,
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
   ColorType,
   CrosshairMode,
   LineStyle,
@@ -16,6 +17,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
+import { rsi } from '../lib/indicators.ts';
 import type { Bar, Bracket, Level, Pattern } from '../lib/api.ts';
 
 const UP = '#2ed3a0';
@@ -92,6 +94,7 @@ export default function ChartPane({
   const dmRef = useRef<DrawingManager | null>(null);
   const levelLinesRef = useRef<IPriceLine[]>([]);
   const bracketLinesRef = useRef<IPriceLine[]>([]);
+  const rsiRef = useRef<ISeriesApi<'Line'> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const patternsRef = useRef<Pattern[]>(patterns);
   const barsRef = useRef<Bar[]>(bars);
@@ -160,6 +163,18 @@ export default function ChartPane({
     // 形态标记：切币种会重建整张图，所以建图时用 ref 里的最新形态补一次
     markersRef.current = createSeriesMarkers(price, buildMarkers(patternsRef.current, barsRef.current));
 
+    // RSI 单独一个面板。不给固定高度的话两个面板会各占一半，主图被压得没法看
+    const rsiLine = chart.addSeries(LineSeries, {
+      color: '#7aa2ff',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
+    }, 1);
+    rsiLine.createPriceLine({ price: 70, color: 'rgba(255,95,109,0.45)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
+    rsiLine.createPriceLine({ price: 30, color: 'rgba(46,211,160,0.45)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
+    chart.panes()[1]?.setHeight(96);
+
     const vol = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: 'vol',
@@ -214,11 +229,13 @@ export default function ChartPane({
     priceRef.current = price;
     volRef.current = vol;
     dmRef.current = dm;
+    rsiRef.current = rsiLine;
 
     return () => {
       for (const u of unsubs) u();
       window.clearTimeout(saveTimer);
       dm.destroy();
+      rsiRef.current = null;
       chart.remove();
       chartRef.current = null;
       priceRef.current = null;
@@ -232,6 +249,18 @@ export default function ChartPane({
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
+
+  // ---- RSI ----
+  useEffect(() => {
+    const series = rsiRef.current;
+    if (!series) return;
+    try {
+      series.setData(rsi(normalize(bars), 14).map((p) => ({ time: p.time as Time, value: p.value })));
+    } catch (e) {
+      // 指标画不出来不影响下单，别让异常把界面带走
+      console.warn('[chart] 写入 RSI 失败', e);
+    }
+  }, [bars, storageKey]);
 
   // ---- 形态标记 ----
   const patternSig = patterns.map((p) => `${p.kind}@${p.time}`).join('|');

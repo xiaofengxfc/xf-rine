@@ -14,6 +14,7 @@
 - 图上画线，画完自动存浏览器本地。
 - 抓当前币种的新闻，按相关度和时间排出来，再算一个情绪分。
 - 认出锤子线、吞没、射击之星这类 K 线形态，直接标在图上。
+- 图下面挂一条 RSI，70 和 30 两条参考线。
 - 把技术面和新闻面一起交给大模型，给一个偏多、偏空或观望的判断，并指出矛盾在哪。
 
 ## 需要什么
@@ -138,6 +139,19 @@ pnpm -F server exec tsx scripts/check-patterns.ts ETH_USDT 15m
 
 它会把每条的原始 OHLC、上下影占比、前面的 K 线一起打出来，便于逐条核对是不是真的那么回事。
 
+## 为什么指标是自己算的
+
+试过 `lightweight-charts-indicators`（1869 个指标，含 45 种形态，MIT）。API 很干净，接进去也能跑，但实测代价是：
+
+| | 引库 | 自己写 RSI |
+|---|---|---|
+| 产物 | 11,884 KB（gzip 3,508 KB） | 680 KB（gzip 215 KB） |
+| 构建耗时 | 23.2 秒 | 1.65 秒 |
+
+原因是它的 `indicatorRegistry` 在模块顶层把 1869 个指标全部实例化，tree-shaking 无从下手。为了一条 RSI 线让整个包大 17 倍不划算，所以 RSI 自己写（`web/src/lib/indicators.ts`，二十行，Wilder 平滑，和 TradingView 默认口径一致）。
+
+如果以后真的要一批指标（MACD、布林带、一堆社区指标），再把它装回来是合理的 —— 到那时 11 MB 换 1869 个指标就不亏了。
+
 ## 新闻雷达怎么来的
 
 代码在 `server/src/news.ts`。不依赖任何第三方服务，也不需要 API key。
@@ -188,6 +202,7 @@ web/             React + Vite + lightweight-charts
   src/components/ChartPane.tsx   图表、画图工具、价位线
   src/components/NewsCard.tsx    新闻雷达卡片
   src/components/AiCard.tsx      AI 分析卡片
+  src/lib/indicators.ts          RSI（自己算，不引指标库）
 ```
 
 ## 体检命令
