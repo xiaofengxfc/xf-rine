@@ -1,0 +1,15 @@
+{
+  "name": "xf-rine",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"pnpm -F server dev\" \"pnpm -F web dev\"",
+    "build": "pnpm -F web build",
+    "start": "pnpm -F server start",
+    "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

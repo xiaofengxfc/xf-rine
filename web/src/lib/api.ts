@@ -1,0 +1,137 @@
+export class ApiError extends Error {
+  label: string;
+  status: number;
+  constructor(label: string, detail: string, status: number) {
+    super(detail || label);
+    this.label = label;
+    this.status = status;
+  }
+}
+
+async function parse<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* not json */ }
+  if (!res.ok) {
+    const b = body as { error?: string; detail?: string } | null;
+    throw new ApiError(b?.error ?? `HTTP_${res.status}`, b?.detail ?? text.slice(0, 300), res.status);
+  }
+  return body as T;
+}
+
+export function jget<T>(url: string): Promise<T> {
+  return fetch(url, { headers: { Accept: 'application/json' } }).then(parse<T>);
+}
+
+export function jsend<T>(method: 'POST' | 'DELETE', url: string, body?: unknown, token?: string): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (token) headers['x-arm-token'] = token;
+  return fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }).then(parse<T>);
+}
+
+// ---------- 类型 ----------
+
+export interface ContractInfo {
+  name: string;
+  multiplier: number;
+  sizeMin: number;
+  sizeMax: number;
+  priceRound: number;
+  leverageMin?: number;
+  leverageMax: number;
+  price: number;
+  markPrice: number;
+  fundingRate: number;
+  fundingInterval: number;
+  takerFee: number;
+  makerFee: number;
+  orderPriceDeviate?: number;
+  status?: string;
+}
+
+export interface Ticker {
+  contract: string;
+  last: number;
+  mark: number;
+  change24h: number;
+  volume24hUsd: number;
+  fundingRate: number;
+}
+
+export interface Bar {
+  time: number; open: number; high: number; low: number; close: number; volume: number;
+}
+
+export interface Level {
+  price: number;
+  role: 'support' | 'resistance';
+  strength: number;
+  touches: number;
+  failures: number;
+  volumeRatio: number;
+  distancePct: number;
+  lastTouch: number;
+  zoneLow: number;
+  zoneHigh: number;
+}
+
+export interface Bracket {
+  direction: 'long' | 'short';
+  entry: number;
+  stop: number;
+  target: number;
+  riskReward: number;
+  stopSource: string;
+  targetSource: string;
+  stopDistancePct: number;
+  targetDistancePct: number;
+  riskPct: number;
+  acceptable: boolean;
+  minRR: number;
+}
+
+export interface LevelsResponse {
+  contract: string;
+  interval: string;
+  barsUsed: number;
+  levels: Level[];
+  atr: number;
+  last: number;
+  rangeHigh: number;
+  rangeLow: number;
+  nearestSupport: Level | null;
+  nearestResistance: Level | null;
+  brackets: { long: Bracket | null; short: Bracket | null };
+}
+
+export interface Position {
+  contract: string; size: number; direction: 'long' | 'short'; leverage: number;
+  entryPrice: number; markPrice: number; liqPrice: number; unrealisedPnl: number;
+  value: number; mode: string;
+}
+
+export interface OpenOrder {
+  id: string; contract: string; size: number; left: number; price: number; fillPrice: number;
+  status: string; reduceOnly: boolean; createTime: number; tif: string;
+}
+
+export interface PriceOrder {
+  id: string; contract: string; direction: '' | 'long' | 'short';
+  triggerPrice: number; triggerRule: number; size: number;
+}
+
+export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
+
+export interface AppConfig {
+  env: 'testnet' | 'live';
+  envLabel: string;
+  restBaseUrl: string;
+  keys: { configured: boolean; hint: string };
+  liveTrading: boolean;
+  limits: { maxOrderNotional: number; maxLeverage: number; maxContracts: number };
+}
+
+export interface LiveBar {
+  time: number; open: number; high: number; low: number; close: number; volume: number; closed: boolean;
+}
