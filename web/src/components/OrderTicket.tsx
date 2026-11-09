@@ -58,7 +58,16 @@ export default function OrderTicket({
   const notional = size * mult * priceUsed;
   const margin = leverage > 0 ? notional / leverage : 0;
   const avail = account?.available ?? 0;
-  const maxAffordable = mult > 0 && priceUsed > 0 ? Math.floor((avail * leverage) / (mult * priceUsed)) : 0;
+  // 交易所按「保证金 + 手续费 ≤ 可用」放行。满仓如果只算保证金，
+  // 差的正好是那几块钱手续费，点满仓必然被拒。
+  const feeRate = Math.max(contract?.takerFee ?? 0, 0);
+  const need = margin + notional * feeRate;
+  const marginShort = need > avail ? need - avail : 0;
+  const maxAffordable = mult > 0 && priceUsed > 0 && leverage > 0
+    ? Math.floor(avail / (1 / leverage + feeRate) / (mult * priceUsed))
+    : 0;
+  /** 按同样的杠杆和可用余额，这笔最多能做多少张 */
+  const affordableNow = need > 0 ? Math.floor((size * avail) / need) : 0;
 
   const liqEstimate = useMemo(() => {
     if (!priceUsed || leverage <= 0) return 0;
@@ -201,8 +210,11 @@ export default function OrderTicket({
         <dl className="summary">
           <dt>现价</dt><dd>{fmtPrice(last, priceRound)}</dd>
           <dt>名义价值</dt><dd className={notional > 0 ? '' : 'dim'}>{notional > 0 ? fmtUsd(notional) : '—'} USDT</dd>
-          <dt>占用保证金</dt><dd>{margin > 0 ? fmtUsd(margin) : '—'} USDT</dd>
+          <dt>占用保证金</dt><dd className={marginShort > 0 ? 'down' : ''}>{margin > 0 ? fmtUsd(margin) : '—'} USDT</dd>
           <dt>可用</dt><dd>{fmtUsd(avail)} USDT</dd>
+          {marginShort > 0 && (
+            <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
+          )}
           <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
           {bracket && (
             <>
@@ -231,6 +243,12 @@ export default function OrderTicket({
               名义 <b>{fmtUsd(notional)}</b> USDT，{leverage}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
               {env === 'testnet' ? '模拟盘，扣的是测试网假钱。' : '这是真实资金。'}
             </p>
+            {marginShort > 0 && (
+              <p className="warn">
+                保证金不够：连手续费要 {fmtUsd(need)} USDT，可用只有 {fmtUsd(avail)} USDT，差 {fmtUsd(marginShort)} USDT。
+                按同样的杠杆最多做 {affordableNow} 张，或者把杠杆调高。
+              </p>
+            )}
             <div className="acts">
               <button className="btn ghost" onClick={() => setPending(false)} disabled={busy}>取消</button>
               <button className={`btn ${side}`} onClick={submit} disabled={busy}>
