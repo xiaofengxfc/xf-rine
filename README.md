@@ -14,7 +14,7 @@
 - 图上画线，画完自动存浏览器本地。
 - 抓当前币种的新闻，按相关度和时间排出来，再算一个情绪分。
 - 认出锤子线、吞没、射击之星这类 K 线形态，直接标在图上。
-- 图下面挂一条 RSI，70 和 30 两条参考线。
+
 - 图上标出计划入场价，以及真实持仓的成本均价。
 - 往回拖到最左边会自动补更早的 K 线，一次 500 根，视口不跳。
 - 把技术面和新闻面一起交给大模型，给一个偏多、偏空或观望的判断，并指出矛盾在哪。
@@ -155,6 +155,8 @@ pnpm -F server exec tsx scripts/check-patterns.ts ETH_USDT 15m
 
 原因是它的 `indicatorRegistry` 在模块顶层把 1869 个指标全部实例化，tree-shaking 无从下手。为了一条 RSI 线让整个包大 17 倍不划算，所以 RSI 自己写（`web/src/lib/indicators.ts`，二十行，Wilder 平滑，和 TradingView 默认口径一致）。
 
+RSI 现在不在图上显示，代码和这个结论都留着 —— 想让它回来，在 `ChartPane.tsx` 里加回一个面板就行。
+
 如果以后真的要一批指标（MACD、布林带、一堆社区指标），再把它装回来是合理的 —— 到那时 11 MB 换 1869 个指标就不亏了。
 
 ## 新闻雷达怎么来的
@@ -209,7 +211,7 @@ web/             React + Vite + lightweight-charts
   src/components/ChartPane.tsx   图表、画图工具、价位线
   src/components/NewsCard.tsx    新闻雷达卡片
   src/components/AiCard.tsx      AI 分析卡片
-  src/lib/indicators.ts          RSI（自己算，不引指标库）
+  src/lib/indicators.ts          RSI（自己算，不引指标库；当前不在图上显示）
 ```
 
 ## 体检命令
