@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
-import { protectionPrices, planWrongSide, type ProtectMode } from '../lib/protection.ts';
+import { protectionPrices, protectionRows, planWrongSide, type ProtectMode } from '../lib/protection.ts';
 
 interface Props {
   contract: ContractInfo | null;
@@ -27,7 +27,7 @@ export default function OrderTicket({
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
   const [sizeStr, setSizeStr] = useState('');
-  const [protect, setProtect] = useState<ProtectMode>('none');
+  const [protect, setProtect] = useState<ProtectMode>('plan');
   const [stopStr, setStopStr] = useState('');
   const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
@@ -84,10 +84,13 @@ export default function OrderTicket({
   const planBracket = bracket && bracket.direction === side ? bracket : null;
 
   // 三种保护来源最终都落成这两个价：留 0 表示这一边不挂
-  const { stop: effStop, target: effTarget } = protectionPrices(protect, planBracket, stopNum, targetNum);
-  const wantProtect = effStop > 0 || effTarget > 0;
-  // 方案价是按方案入场价算的，现价可能已经跑过去了，那一侧就挂不上
+  const wanted = protectionPrices(protect, planBracket, stopNum, targetNum);
+  // 方案价按方案入场价算，现价可能已经跑过去了，那一侧的触发单一挂上就成交。
+  // 这种情况只剔掉跑过头的那一边：另一边往往还是对的，一起丢掉等于白算。
   const planWrong = planWrongSide(side, planBracket, priceUsed);
+  const effStop = protect === 'plan' && planWrong.stop ? 0 : wanted.stop;
+  const effTarget = protect === 'plan' && planWrong.target ? 0 : wanted.target;
+  const wantProtect = effStop > 0 || effTarget > 0;
 
   const liqEstimate = useMemo(() => {
     if (!priceUsed || leverage <= 0) return 0;
@@ -118,11 +121,11 @@ export default function OrderTicket({
     if (protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= priceUsed : targetNum >= priceUsed)) {
       return '止盈价方向不对';
     }
-    if (protect === 'plan' && !planBracket) return '这个方向还没有方案价';
-    if (protect === 'plan' && planWrong.stop) return '方案止损已跑到现价另一边，改手动设';
-    if (protect === 'plan' && planWrong.target) return '方案止盈已跑到现价另一边，改手动设';
     return '';
   })();
+
+  // 摘要下方那一小截：只列这一单真会挂上去的保护
+  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed);
 
   async function submit() {
     if (!contract || !token) return;
@@ -267,12 +270,22 @@ export default function OrderTicket({
         {protect === 'plan' && (
           planBracket ? (
             <>
-              <div className="edit-note" style={{ marginBottom: planBracket.acceptable ? 8 : 4 }}>
-                用下面「方案止损 / 方案止盈」那两个价，盈亏比 {planBracket.riskReward.toFixed(2)}。
-                成交之后才挂得上；限价单还没成交就先记着，等它成交页面自动补挂。
+              <div className="edit-note" style={{ marginBottom: 6 }}>
+                成交后按下面的方案价挂，盈亏比 {planBracket.riskReward.toFixed(2)}。
+                限价单还没成交就先记着，等它成交页面自动补挂。
               </div>
+              {planWrong.stop && (
+                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
+                  现价已经跑过方案止损，这一边这次不挂：触发单方向反了，挂上就成交。
+                </div>
+              )}
+              {planWrong.target && (
+                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
+                  现价已经跑过方案止盈，这一边这次不挂：触发单方向反了，挂上就成交。
+                </div>
+              )}
               {!planBracket.acceptable && (
-                <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
+                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
                   这套方案盈亏比低于 {planBracket.minRR}，这一侧的结构不支持，最好别开。
                 </div>
               )}
@@ -320,6 +333,11 @@ export default function OrderTicket({
               )}
               成交之后才挂得上。限价单还没成交就先记着，等它成交页面自动补挂。
             </div>
+            {!wantProtect && (
+              <div className="edit-note" style={{ color: 'var(--warn)' }}>
+                两个价都空着，这一单不带保护。
+              </div>
+            )}
           </>
         )}
 
@@ -332,20 +350,19 @@ export default function OrderTicket({
             <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
           )}
           <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
-          {planBracket && (
-            <>
-              <dt>方案止损</dt>
-              <dd className={protect === 'plan' ? '' : 'dim'}>
-                {fmtPrice(planBracket.stop, priceRound)} <span className="dim">({fmtPct(-planBracket.stopDistancePct, 2)})</span>
-                {protect === 'plan' && <span className="dim"> · 本次用</span>}
+          {protectRows.map((row) => (
+            <Fragment key={row.label}>
+              <dt>{row.label}</dt>
+              <dd className={row.price > 0 ? '' : 'dim'}>
+                {row.price > 0 ? (
+                  <>
+                    {fmtPrice(row.price, priceRound)}
+                    {row.pct !== null && <> <span className="dim">({fmtPct(row.pct, 2)})</span></>}
+                  </>
+                ) : row.note}
               </dd>
-              <dt>方案止盈</dt>
-              <dd className={protect === 'plan' ? '' : 'dim'}>
-                {fmtPrice(planBracket.target, priceRound)} <span className="dim">({fmtPct(planBracket.targetDistancePct, 2)})</span>
-                {protect === 'plan' && <span className="dim"> · 本次用</span>}
-              </dd>
-            </>
-          )}
+            </Fragment>
+          ))}
         </dl>
 
         {!pending ? (
