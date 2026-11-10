@@ -5,6 +5,8 @@
  * 不引第三方依赖，也不需要任何 API key。
  */
 
+import { netFetch } from './net.js';
+
 export interface NewsItem {
   title: string;
   url: string;
@@ -103,7 +105,7 @@ async function fetchFeed(feed: { name: string; url: string }): Promise<{ items: 
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
-    const res = await fetch(feed.url, {
+    const res = await netFetch(feed.url, {
       signal: ctl.signal,
       headers: { 'user-agent': 'Mozilla/5.0 (compatible; xf-rine/1.0)', accept: 'application/rss+xml, application/xml, text/xml' },
     });

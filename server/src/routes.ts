@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint, type GateEnv } from './config.js';
 import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
+import { netFetch, proxyState, refreshProxy } from './net.js';
 import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
@@ -102,11 +103,36 @@ interface GateContract {
  * 行情接口要按合约取最小变动价，每 12 秒拉一次全表太浪费。
  */
 let contractCache: { at: number; list: GateContract[] } | null = null;
+let contractBusy: Promise<void> | null = null;
+
+/** 整张合约表一个多 MB，国内直连要几秒到十几秒 —— 所以拉到就一直留着，过一小时才重拉 */
+function refreshContracts(): Promise<void> {
+  if (contractBusy) return contractBusy;
+  contractBusy = (async () => {
+    const list = await gatePublic<GateContract[]>('/futures/usdt/contracts', {}, 60_000);
+    contractCache = { at: Date.now(), list };
+  })()
+    .catch(() => { /* 拉不到就继续用旧的 */ })
+    .finally(() => { contractBusy = null; });
+  return contractBusy;
+}
+
+/** 单独取一次，避免 TS 把上面那个分支的 null 收窄带进来 */
+const cachedContracts = (): GateContract[] => contractCache?.list ?? [];
+
 async function allContracts(): Promise<GateContract[]> {
-  if (contractCache && Date.now() - contractCache.at < 60_000) return contractCache.list;
-  const list = await gatePublic<GateContract[]>('/futures/usdt/contracts');
-  contractCache = { at: Date.now(), list };
-  return list;
+  if (contractCache) {
+    if (Date.now() - contractCache.at > 60 * 60_000) void refreshContracts();
+    return cachedContracts();
+  }
+  await refreshContracts();
+  return cachedContracts();
+}
+
+/** 不等：有就先用着，没有就返回空，顺手在后台拉。行情接口不该被这张大表拖住 */
+function contractsNow(): GateContract[] {
+  if (!contractCache || Date.now() - contractCache.at > 60 * 60_000) void refreshContracts();
+  return contractCache?.list ?? [];
 }
 
 /**
@@ -116,20 +142,18 @@ async function allContracts(): Promise<GateContract[]> {
  *   trigger.price is not an integer multiple of a price unit
  * 只有一边失败的时候，页面还写着「保护单已挂」—— 止损没挂上也不吭声。
  */
-let tradeContractCache: { at: number; list: GateContract[] } | null = null;
-async function tradeContracts(): Promise<GateContract[]> {
-  if (tradeContractCache && Date.now() - tradeContractCache.at < 60_000) return tradeContractCache.list;
-  const list = await gatePublicTrade<GateContract[]>('/futures/usdt/contracts');
-  tradeContractCache = { at: Date.now(), list };
-  return list;
-}
-
-/** 下单要用的那份合约参数：最小变动、杠杆范围、偏离上限都按这台机器来 */
+/**
+ * 只取单个合约的参数，不拉整张表。
+ * 那张表上千个合约、一个多 MB，从国内直连经常十几秒才回，超时还拿不到缓存 ——
+ * 一次下单、一次刷持仓都跟着卡十几秒。
+ */
+const tradeContractCache = new Map<string, { at: number; c: GateContract }>();
 async function tradeContract(name: string): Promise<GateContract> {
-  const list = await tradeContracts().catch(() => [] as GateContract[]);
-  const hit = list.find((c) => c.name === name);
-  if (hit) return hit;
-  return gatePublicTrade<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
+  const hit = tradeContractCache.get(name);
+  if (hit && Date.now() - hit.at < 60_000) return hit.c;
+  const c = await gatePublicTrade<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
+  tradeContractCache.set(name, { at: Date.now(), c });
+  return c;
 }
 
 router.get('/contracts', wrap(async (_req, res) => {
@@ -508,13 +532,17 @@ const IP_SOURCES: { url: string; host: string; pick: (j: Record<string, unknown>
 /** IPv4 或 IPv6，够用就行；挡掉接口回一句 HTML 被塞进 ip 字段的情况 */
 const looksLikeIp = (v: string): boolean => /^[0-9a-fA-F:.]{3,45}$/.test(v) && (v.includes('.') || v.includes(':'));
 
-async function detectIp(): Promise<IpInfo> {
+async function detectIp(direct = false): Promise<IpInfo> {
   for (const src of IP_SOURCES) {
     try {
-      const r = await fetch(src.url, {
-        headers: { accept: 'application/json', 'user-agent': 'xf-rine' },
-        signal: AbortSignal.timeout(4000),
-      });
+      const r = await netFetch(
+        src.url,
+        {
+          headers: { accept: 'application/json', 'user-agent': 'xf-rine' },
+          signal: AbortSignal.timeout(4000),
+        },
+        { direct },
+      );
       if (!r.ok) continue;
       const got = src.pick(await r.json() as Record<string, unknown>);
       if (looksLikeIp(got.ip)) return { ok: true, ...got, source: src.host, at: Date.now() };
@@ -523,20 +551,26 @@ async function detectIp(): Promise<IpInfo> {
   return { ok: false, ip: '', at: Date.now(), error: '几个查询接口都没答上来（可能没网，或者被代理拦了）' };
 }
 
-/** 同一分钟内重复点就是看同一个结果，别每次都去问三家 */
-let ipCache: { at: number; info: IpInfo } | null = null;
+/** 同一分钟内重复点就是看同一个结果，别每次都去问三家。只缓存 IP 本身，代理状态一律现取 */
+let ipCache: { at: number; info: IpInfo; directIp?: string } | null = null;
 
 router.get('/ip', wrap(async (req, res) => {
   // 出口 IP 是个会变的值，任何一层缓存留着都会让人以为「没重新检测」
   res.set('Cache-Control', 'no-store, max-age=0');
   const fresh = String(req.query.fresh ?? '') === '1';
+  // 手动点「重新检测」时连代理状态一起重新确认：用户刚换了代理，这一步要跟上
+  if (fresh) await refreshProxy(true);
   if (!fresh && ipCache && Date.now() - ipCache.at < 60_000) {
-    res.json(ipCache.info);
+    res.json({ ...ipCache.info, proxy: proxyState(), ...(ipCache.directIp ? { directIp: ipCache.directIp } : {}) });
     return;
   }
+
   const info = await detectIp();
-  ipCache = { at: Date.now(), info };
-  res.json(info);
+  // 代理开着时再问一次直连出口：Gate 的白名单认的是这个地址
+  const directInfo = proxyState().on ? await detectIp(true).catch(() => null) : null;
+  const directIp = directInfo?.ok ? directInfo.ip : undefined;
+  ipCache = { at: Date.now(), info, ...(directIp ? { directIp } : {}) };
+  res.json({ ...info, proxy: proxyState(), ...(directIp ? { directIp } : {}) });
 }));
 
 router.get('/diag', wrap(async (_req, res) => {
@@ -638,21 +672,27 @@ async function readSides(contract: string): Promise<Side[]> {
  */
 async function readPositions() {
   const list = await gatePrivate<GatePosition[]>('GET', '/futures/usdt/positions');
-  const contracts = await tradeContracts().catch(() => [] as GateContract[]);
-  const multOf = new Map(contracts.map((c) => [c.name, Number(c.quanto_multiplier)]));
-  return list.filter((p) => p.size !== 0).map((p) => ({
-    contract: p.contract,
-    size: Math.abs(p.size),
-    direction: sideOf(String(p.mode ?? ''), p.size),
-    leverage: Number(p.leverage),
-    entryPrice: Number(p.entry_price),
-    markPrice: Number(p.mark_price),
-    liqPrice: Number(p.liq_price),
-    unrealisedPnl: Number(p.unrealised_pnl),
-    value: Math.abs(Number(p.value)),
-    mode: p.mode,
-    multiplier: multOf.get(p.contract) ?? 0,
-  }));
+  return list.filter((p) => p.size !== 0).map((p) => {
+    const size = Math.abs(Number(p.size) || 0);
+    const mark = Number(p.mark_price) || 0;
+    const value = Math.abs(Number(p.value) || 0);
+    // 交易所就是这么算持仓价值的：价值 = 张数 × 乘数 × 标记价。
+    // 反推乘数比去拉一张上千合约的全表快得多，两者的数完全一致。
+    const multiplier = size > 0 && mark > 0 && value > 0 ? Number((value / (size * mark)).toPrecision(6)) : 0;
+    return {
+      contract: p.contract,
+      size,
+      direction: sideOf(String(p.mode ?? ''), p.size),
+      leverage: Number(p.leverage),
+      entryPrice: Number(p.entry_price),
+      markPrice: mark,
+      liqPrice: Number(p.liq_price),
+      unrealisedPnl: Number(p.unrealised_pnl),
+      value,
+      mode: p.mode,
+      multiplier,
+    };
+  });
 }
 
 router.get('/positions', wrap(async (_req, res) => {
@@ -1503,7 +1543,7 @@ async function tradableNames(): Promise<Set<string> | null> {
   if (config.env !== 'testnet') return null;
   if (tradableCache.env === config.env && Date.now() - tradableCache.at < 5 * 60_000) return tradableCache.names;
   try {
-    const res = await fetch(restBaseUrl() + '/api/v4/futures/usdt/contracts', { headers: { Accept: 'application/json' } });
+    const res = await netFetch(restBaseUrl() + '/api/v4/futures/usdt/contracts', { headers: { Accept: 'application/json' } });
     if (!res.ok) return tradableCache.names;
     const list = (await res.json()) as { name?: string; status?: string }[];
     const names = new Set(list.filter((c) => c.name && c.status !== 'delisted').map((c) => String(c.name)));
@@ -1514,32 +1554,53 @@ async function tradableNames(): Promise<Set<string> | null> {
   }
 }
 
-router.get('/tickers', wrap(async (_req, res) => {
-  const [list, tradable, contracts] = await Promise.all([
-    gatePublic<GateTicker[]>('/futures/usdt/tickers'),
-    tradableNames(),
+interface TickerRow {
+  contract: string; last: number; mark: number; change24h: number; volume24hUsd: number;
+  fundingRate: number; multiplier: number; openInterest: number; priceRound: number; tradable: boolean;
+}
+
+/** 全部行情也是一大坨，拉一次十几秒。缓存起来，页面每 12 秒问一次就直接给上次的，后台换新的 */
+let tickerCache: { at: number; rows: TickerRow[] } | null = null;
+let tickerBusy: Promise<void> | null = null;
+
+function refreshTickers(): Promise<void> {
+  if (tickerBusy) return tickerBusy;
+  tickerBusy = (async () => {
+    const [list, tradable] = await Promise.all([
+      gatePublic<GateTicker[]>('/futures/usdt/tickers', {}, 60_000),
+      tradableNames().catch(() => null),
+    ]);
     // 拉不到合约元数据不影响行情，只是价格精度退回默认值
-    allContracts().catch(() => [] as GateContract[]),
-  ]);
-  // 持仓和委托卡会同时显示别的合约，价格得按各自的最小变动位显示，
-  // 否则用 BTC 的 0.1 去格式化 DOGE 的 0.15，会写成一个错的 0.2
-  const roundOf = new Map(contracts.map((c) => [c.name, Number(c.order_price_round)]));
-  const rows = list
-    .filter((t) => Number(t.last) > 0)
-    .map((t) => ({
-      contract: t.contract,
-      last: Number(t.last),
-      mark: Number(t.mark_price),
-      change24h: Number(t.change_percentage),
-      volume24hUsd: Number(t.volume_24h_quote),
-      fundingRate: Number(t.funding_rate),
-      multiplier: Number(t.quanto_multiplier),
-      openInterest: Number(t.total_size),
-      priceRound: roundOf.get(t.contract) ?? 0,
-      // 测试网里没上架的合约标出来，别让人点了半天才发现下不了单
-      tradable: tradable === null ? true : tradable.has(t.contract),
-    }));
-  res.json(rows.sort((a, b) => b.volume24hUsd - a.volume24hUsd));
+    const roundOf = new Map(contractsNow().map((c) => [c.name, Number(c.order_price_round)]));
+    tickerCache = {
+      at: Date.now(),
+      rows: list
+        .filter((t) => Number(t.last) > 0)
+        .map((t) => ({
+          contract: t.contract,
+          last: Number(t.last),
+          mark: Number(t.mark_price),
+          change24h: Number(t.change_percentage),
+          volume24hUsd: Number(t.volume_24h_quote),
+          fundingRate: Number(t.funding_rate),
+          multiplier: Number(t.quanto_multiplier),
+          openInterest: Number(t.total_size),
+          priceRound: roundOf.get(t.contract) ?? 0,
+          // 测试网里没上架的合约标出来，别让人点了半天才发现下不了单
+          tradable: tradable === null ? true : tradable.has(t.contract),
+        }))
+        .sort((a, b) => b.volume24hUsd - a.volume24hUsd),
+    };
+  })()
+    .catch(() => { /* 这次没拉到就先用旧的 */ })
+    .finally(() => { tickerBusy = null; });
+  return tickerBusy;
+}
+
+router.get('/tickers', wrap(async (_req, res) => {
+  if (!tickerCache) await refreshTickers();
+  else if (Date.now() - tickerCache.at > 15_000) void refreshTickers();
+  res.json(tickerCache?.rows ?? []);
 }));
 
 export type { Direction };

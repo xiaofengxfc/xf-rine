@@ -300,11 +300,15 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
             </div>
             <div className="hint">
               浏览器当前的地址，走代理或 VPN 时就是代理那边的。
-              {serverIp?.ok && (!ip?.ok || serverIp.ip !== ip.ip) && (
+              {serverIp?.proxy?.on && (
                 <>
-                  {' '}服务端直连出口是 <code>{serverIp.ip}</code>，Gate 的 API 请求从那里发出 ——
-                  白名单要填这一个。
+                  {' '}服务端查 IP 也走系统代理（<code>{serverIp.proxy.url}</code>）。
+                  Gate 的行情和交易直连，直连不通才退回代理，白名单填{' '}
+                  <code>{serverIp.directIp ?? serverIp.ip}</code>。
                 </>
+              )}
+              {serverIp?.proxy && !serverIp.proxy.on && serverIp.ok && (!ip?.ok || serverIp.ip !== ip.ip) && (
+                <> 服务端直连出口是 <code>{serverIp.ip}</code>，Gate 的 API 请求从那里发出 —— 白名单要填这一个。</>
               )}
             </div>
           </div>

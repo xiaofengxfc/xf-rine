@@ -163,7 +163,18 @@ export interface CloseResult {
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
 
-/** 本机出口 IP。Gate 的 API 密钥按 IP 白名单时填这个地址 */
+/** 服务端出网用的代理。Node 不读系统代理，服务端自己读一次注册表 */
+export interface ProxyStatus {
+  on: boolean;
+  url: string;
+  source: 'env' | 'system' | 'direct';
+  error?: string;
+  /** 上一次因为 Gate 的 IP 白名单退回直连的时刻 */
+  blockedAt?: number;
+  at: number;
+}
+
+/** 当前 IP。Gate 的 API 密钥按 IP 白名单时填它 */
 export interface IpInfo {
   ok: boolean;
   ip: string;
@@ -174,6 +185,9 @@ export interface IpInfo {
   source?: string;
   at: number;
   error?: string;
+  /** 只有服务端那条会带：代理状态和直连出口 */
+  proxy?: ProxyStatus;
+  directIp?: string;
 }
 
 /** 账户这一坨一次取回来的快照，四个字段来自同一时刻 */

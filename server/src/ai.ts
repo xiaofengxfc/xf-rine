@@ -9,6 +9,10 @@
 
 import { config, aiEndpoint, aiModelsEndpoint, type AiConfig } from './config.js';
 import type { Bracket } from './levels.js';
+import { netFetch } from './net.js';
+
+/** netFetch 用的是 undici 的 Response，和 DOM 那个不是同一个类型，声明一律取它的实际返回 */
+type FetchResponse = Awaited<ReturnType<typeof netFetch>>;
 
 export class AiError extends Error {
   status: number;
@@ -34,9 +38,9 @@ export async function listModels(ai: AiConfig = config.ai): Promise<string[]> {
   const url = aiModelsEndpoint(ai.baseUrl);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
-  let res: Response;
+  let res: FetchResponse;
   try {
-    res = await fetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal });
+    res = await netFetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal });
   } catch (e) {
     const err = e as Error;
     if (err.name === 'AbortError') throw new AiError(504, 'AI_TIMEOUT', '拉模型列表超时，中转站可能不稳');
@@ -268,11 +272,11 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
   };
   if (opts.jsonMode) body.response_format = { type: 'json_object' };
 
-  const send = async (payload: Record<string, unknown>): Promise<Response> => {
+  const send = async (payload: Record<string, unknown>): Promise<FetchResponse> => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 45_000);
     try {
-      return await fetch(url, {
+      return await netFetch(url, {
         method: 'POST',
         signal: ctl.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
@@ -283,7 +287,7 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
     }
   };
 
-  let res: Response;
+  let res: FetchResponse;
   try {
     res = await send(body);
     // 不少中转站不认 response_format，去掉再试一次

@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { config, restBaseUrl, publicBaseUrl } from '../config.js';
+// 出网统一走 netFetch：配了系统代理时它会自动跟着走
+import { netFetch } from '../net.js';
 
 const PREFIX = '/api/v4';
 const TIMEOUT_MS = 15_000;
@@ -39,6 +41,8 @@ async function request<T>(
   isPrivate = false,
   /** 覆盖请求地址。只有一处需要：公共接口，但要问「下单环境」那台机器要合约参数 */
   baseOverride?: string,
+  /** 这次调用的超时。整张合约表、全部行情这种大接口 15 秒不够 */
+  timeoutMs = TIMEOUT_MS,
 ): Promise<T> {
   // 不能只给 GET/DELETE 拼 query：Gate 的「改杠杆」是 POST 但参数放在 query 上。
   const query = buildQuery(params);
@@ -57,14 +61,16 @@ async function request<T>(
   }
 
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    // Gate 优先直连：直连最快，交易用的白名单也是直连出口。直连不通时才退回代理，
+    // 这样代理只是后路，不会给每次下单、每次刷持仓都加上几秒。
+    const res = await netFetch(url, {
       method,
       headers,
       body: bodyStr || undefined,
       signal: ac.signal,
-    });
+    }, { preferDirect: true, private: isPrivate });
     const text = await res.text();
     // Gate 的订单号和触发单号是 17 位整数，超过 JS 安全整数范围。
     // 直接 JSON.parse 会被 double 截断，拿去撤单就会 ORDER_NOT_FOUND。
@@ -86,8 +92,11 @@ async function request<T>(
   }
 }
 
-export const gatePublic = <T>(path: string, params: Record<string, string | number | boolean | undefined> = {}) =>
-  request<T>('GET', path, params);
+export const gatePublic = <T>(
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+  timeoutMs?: number,
+) => request<T>('GET', path, params, undefined, false, undefined, timeoutMs);
 
 /**
  * 公共接口，但走「下单环境」那台机器。

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { config, keyHint, restBaseUrl, envLabel } from './config.js';
 import { router } from './routes.js';
 import { MarketHub } from './gate/market.js';
+import { refreshProxy, proxyState } from './net.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -24,6 +25,13 @@ if (existsSync(webDist)) {
     res.sendFile(resolve(webDist, 'index.html'));
   });
 }
+
+// 出网跟着系统代理走。Node 自己不读系统代理，这里替它读，并每分钟重新确认一次 ——
+// 用户开关代理、换节点之后不用重启服务。
+void refreshProxy(true).then((p) => {
+  console.log('  出网      ' + (p.on ? '走代理 ' + p.url + '（' + p.source + '）' : '直连') + (p.error ? '  ' + p.error : ''));
+});
+setInterval(() => { void refreshProxy(); }, 60_000).unref();
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
