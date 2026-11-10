@@ -158,6 +158,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 
 .topbar .spacer { flex: 1; }
+/* 行情连接状态：宽屏是一枚小贴片，窄屏只剩一个点（.ws-dot） */
+.ws-pill { display: inline-flex; align-items: center; gap: 6px; }
 
 .status-dot {
   width: 6px; height: 6px; border-radius: 50%;
@@ -177,6 +179,17 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 
 .rail-head { padding: 10px 10px 8px; border-bottom: 1px solid var(--line-soft); }
+.rail-head-row { display: flex; align-items: center; gap: 6px; }
+.rail-head-row .search { flex: 1; min-width: 0; }
+/* 收起按钮只在抽屉形态下出现（见窄屏媒体查询） */
+.rail-close {
+  display: none;
+  width: 28px; height: 28px; flex: none;
+  align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text-2); font-size: 16px; line-height: 1;
+}
+.rail-close:hover { color: var(--text-0); border-color: var(--bg-4); }
 
 .search {
   width: 100%;
@@ -242,6 +255,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   scrollbar-width: none;
 }
 .chart-tools::-webkit-scrollbar { display: none; }
+/* 「画线自动存本地」这行小字不给收缩：一收缩就变成竖排的一列字，
+   把整个工具栏撑到 120 高（桌面上也一样）。放不下时让它横向溢出，工具栏本来就能滚。 */
+.chart-tools > .dim { white-space: nowrap; flex: none; }
 
 .seg { display: flex; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 1px; }
 .seg button {
@@ -824,11 +840,174 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   pointer-events: none;
 }
 
+/* 只在窄屏出现的东西：默认藏起来，媒体查询里放开 */
+.rail-btn { display: none; }
+.narrow-only { display: none; }
+/* 宽屏上「行情已连接」是带文字的小贴片，这个点只在窄屏露出来 */
+.ws-dot { display: none; }
+
+/**
+ * 1180 以下：左栏收成抽屉。
+ * 原来是把左栏直接 display:none —— 结果平板和手机上根本没有换合约的入口，
+ * 只能刷新回上次存的那个币。现在点顶栏的「☰ 合约」滑出来，选完自动收。
+ */
 @media (max-width: 1180px) {
-  .app { grid-template-columns: 0 minmax(0, 1fr) 320px; }
-  .rail { display: none; }
+  .app {
+    grid-template-columns: minmax(0, 1fr) 320px;
+    /* 顶栏在这一档可能放不下一行：给它自适应高度，别让它压到下面的图表上 */
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .rail-btn { display: inline-flex; }
+  .rail-close { display: inline-flex; }
+
+  /* 820 这类宽度上，顶栏那一排贴片放不下。折行比裁掉「解锁交易」「设置」好得多 */
+  .topbar {
+    height: auto;
+    min-height: 46px;
+    flex-wrap: wrap;
+    gap: 10px;
+    row-gap: 4px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .rail {
+    position: fixed;
+    z-index: 72;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(78vw, 300px);
+    display: flex;
+    border-right: 1px solid var(--line);
+    box-shadow: 0 0 44px rgba(0, 0, 0, 0.55);
+    transform: translateX(-102%);
+    transition: transform 0.18s ease;
+    padding-top: env(safe-area-inset-top);
+    overscroll-behavior: contain;
+  }
+  .app.rail-open .rail { transform: none; }
+
+  .rail-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 71;
+    background: rgba(3, 5, 8, 0.62);
+    backdrop-filter: blur(1px);
+    animation: scrim-in 0.14s ease-out;
+    /* 在遮罩上上下划不要连带滚动后面的页面 */
+    touch-action: none;
+  }
+  @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
 }
-@media (max-width: 900px) {
-  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: 46px minmax(0, 1fr) auto; }
-  .side { max-height: 46vh; }
+
+/**
+ * 1000 以下：顶栏那几项行情贴片让位。
+ * 标记价、资金费、周期、24 小时量在图表和档位带里都有更细的数，
+ * 而「解锁交易」和「设置」挤丢了就直接没法下单。
+ */
+@media (max-width: 1000px) {
+  .topbar > .pill.wide-only { display: none; }
+  .ws-dot { display: block; flex: none; }
+}
+
+/**
+ * 760 以下：单列，整页纵向滚动。
+ * 桌面的布局是「三栏铺满一屏、各自滚动」，屏幕一窄就挤成三条竖条，
+ * 什么都看不清。手机上换成正常网页：顶栏贴在顶上，K 线固定高度，卡片一路往下排。
+ */
+@media (max-width: 760px) {
+  html, body, #root { height: auto; }
+  body { overflow: auto; overflow-x: hidden; }
+
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  /* ---- 顶栏：只留换合约、币种价格、解锁、设置 ---- */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 60;
+    height: auto;
+    min-height: 46px;
+    padding: calc(5px + env(safe-area-inset-top)) 8px 6px;
+    /* 6px 的时候 390 宽刚好差几像素，齿轮被挤到第二行；5px 留出价格位数变长的余量 */
+    gap: 5px;
+    /* 390 宽排一行；更窄的机器上允许折行，但不许横向溢出 */
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
+  .brand { border-right: 0; padding-right: 0; gap: 5px; }
+  .brand b, .brand span { display: none; }
+  .brand .env-badge { font-size: 9px; padding: 1px 5px; }
+  .ticker-head { gap: 5px; }
+  .ticker-head .sym { font-size: 14px; }
+  .ticker-head .px { font-size: 14.5px; }
+  .ticker-head .chg { font-size: 11px; }
+  .wide-only { display: none !important; }
+  .narrow-only { display: inline-block; }
+  .ws-dot { display: block; flex: none; }
+  .topbar .spacer { flex: 1 1 auto; }
+  .arm-btn { padding: 5px 8px; font-size: 11px; }
+
+  /* ---- 图表：固定高度，别把整屏占满 ---- */
+  .center {
+    flex: none;
+    height: min(58vh, 480px);
+    min-height: 300px;
+  }
+  .levels-strip { padding: 6px 10px 8px; }
+  /* 这句提示会被挤成一列竖排的字，把工具栏撑成 120 高。手机上看盘不需要它 */
+  .chart-tools > .dim { display: none; }
+
+  /* ---- 右栏卡片：跟着页面走，不再自己滚 ---- */
+  .side {
+    overflow: visible;
+    max-height: none;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+  /* 「看多/看空」和下单面板里的按钮是一回事，手机上省掉这一格 */
+  .side-pick { display: none; }
+  .card-head { padding: 10px 12px 7px; }
+  .card-body { padding: 0 12px 13px; }
+
+  /* ---- 手指比鼠标粗：可点的东西都放大 ---- */
+  .btn { padding: 11px 0; font-size: 13px; }
+  .pos-acts .btn, .bracket-edit .acts .btn, .order-edit .acts .btn { padding: 9px 0; font-size: 12px; }
+  .chip { padding: 8px 0; font-size: 11.5px; }
+  .seg button { padding: 6px 10px; }
+  .tool-btn { padding: 6px 9px; }
+  .icon-btn { width: 32px; height: 32px; }
+  .x { width: 30px; height: 30px; font-size: 15px; }
+  .confirm .acts { gap: 8px; }
+
+  /* iOS 上输入框小于 16px，聚焦时会把整页放大 */
+  .input, .input.sm, .search { font-size: 16px; }
+  .input.sm { padding: 6px 8px; }
+  .field > label { font-size: 11px; }
+  .summary { font-size: 12px; }
+  /* 夹在说明文字里的「填方案价」按钮，窄屏上独占一行，别把句子挤断 */
+  .edit-note .chip { display: block; width: 100%; margin: 0 0 6px; }
+
+  .toast-host {
+    left: 10px;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    max-width: none;
+  }
+  .modal-bg { padding: 10px; }
+  .modal { max-width: 100%; max-height: 92dvh; }
+}
+
+/* 仓没了还挂着的触发单：说清楚它现在没有主人 */
+.orphan-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--warn);
 }

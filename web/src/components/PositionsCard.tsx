@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
   jget, jsend,
-  type Bracket, type LevelsResponse, type OpenOrder, type Position, type PriceOrder,
+  type Bracket, type CanceledTrades, type CloseResult, type LevelsResponse,
+  type OpenOrder, type Position, type PriceOrder,
 } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtTime } from '../lib/format.ts';
 
@@ -33,6 +34,15 @@ interface BracketEdit {
 
 const keyOf = (contract: string, dir: Dir) => contract + ':' + dir;
 const dirLabel = (d: Dir) => (d === 'long' ? '多' : '空');
+
+/** 平仓顺带撤掉的东西，写成一句能读的话 */
+function cleanupText(c: CanceledTrades | undefined): string {
+  const parts: string[] = [];
+  if (c?.orders.length) parts.push('撤掉委托 ' + c.orders.length + ' 张');
+  if (c?.triggers.length) parts.push('撤掉触发单 ' + c.triggers.length + ' 张');
+  parts.push(...(c?.errors ?? []));
+  return parts.join(' · ');
+}
 
 /**
  * 一张触发单是止损还是止盈。
@@ -87,8 +97,13 @@ export default function PositionsCard({
     const k = keyOf(contract, direction);
     setBusy('close-' + k);
     try {
-      await jsend('POST', '/api/close-position', { contract, direction }, token);
-      onToast('ok', '市价平仓已提交', contract + ' ' + (direction === 'long' ? '多头' : '空头'));
+      const r = await jsend<CloseResult>('POST', '/api/close-position', { contract, direction }, token);
+      const cleaned = cleanupText(r.canceled);
+      onToast(
+        'ok',
+        '市价平仓已提交',
+        contract + ' ' + dirLabel(direction) + '头' + (cleaned ? ' · ' + cleaned : ' · 没有挂着的委托要撤'),
+      );
       setConfirmClose(null);
       onRefresh();
     } catch (e) {
@@ -192,12 +207,18 @@ export default function PositionsCard({
     const k = keyOf(p.contract, p.direction);
     setBusy('rev-' + k);
     try {
-      const r = await jsend<{ direction: Dir; size: number }>(
+      const r = await jsend<{ direction: Dir; size: number; canceled?: CanceledTrades }>(
         'POST', '/api/reverse-position',
         { contract: p.contract, direction: p.direction },
         token,
       );
-      onToast('ok', '已反手', '平掉' + dirLabel(p.direction) + '单，现在持有 ' + r.size + ' 张' + dirLabel(r.direction) + '单');
+      const cleaned = cleanupText(r.canceled);
+      onToast(
+        'ok',
+        '已反手',
+        '平掉' + dirLabel(p.direction) + '单，现在持有 ' + r.size + ' 张' + dirLabel(r.direction) + '单'
+        + (cleaned ? ' · ' + cleaned : ''),
+      );
       setConfirmReverse(null);
       onRefresh();
     } catch (e) {
@@ -338,7 +359,11 @@ export default function PositionsCard({
 
                   {editing && edit ? editPanel(edit) : confirmClose === k ? (
                     <div className="confirm">
-                      <p>市价平掉 {p.contract} {isLong ? '多头' : '空头'} 全部 {Math.abs(p.size)} 张？</p>
+                      <p>
+                        市价平掉 {p.contract} {isLong ? '多头' : '空头'} 全部 {Math.abs(p.size)} 张？
+                        这一边挂着的委托和止损止盈会一起撤掉 —— 留着的话，仓没了它们照样会成交，
+                        下次开同方向的仓还会一出现就被打掉。
+                      </p>
                       <div className="acts">
                         <button className="btn ghost" onClick={() => setConfirmClose(null)}>取消</button>
                         <button className="btn danger" onClick={() => closePosition(p.contract, p.direction)} disabled={busy === 'close-' + k}>
@@ -495,23 +520,32 @@ export default function PositionsCard({
               const dir = (o.direction || 'long') as Dir;
               // 交易所网页上挂的单认不出平哪一边，别硬猜成止损或止盈
               const kind = o.direction ? triggerKind(o, dir) : null;
+              // 不带 auto_size / isclose 的触发单是「到价开仓」的条件单，不是保护，别混进止损止盈里
+              const protection = o.protective;
+              // 仓已经没了还挂着的触发单：它不会再平任何东西，开了新仓却会第一时间打掉新仓
+              const orphan = Boolean(o.direction) && !positions.some((p) => p.contract === o.contract && p.direction === o.direction);
               return (
                 <div key={o.id} className="order-row">
                   <span>
                     {o.contract.replace('_USDT', '')}{' '}
-                    <span className={kind === 'stop' ? 'down' : kind === 'target' ? 'up' : 'dim'}>
-                      {kind === 'stop' ? '止损' : kind === 'target' ? '止盈' : '触发'} {fmtPrice(o.triggerPrice, priceRound)}
+                    <span className={!protection ? 'dim' : kind === 'stop' ? 'down' : kind === 'target' ? 'up' : 'dim'}>
+                      {!protection ? '条件单' : kind === 'stop' ? '止损' : kind === 'target' ? '止盈' : '触发'} {fmtPrice(o.triggerPrice, priceRound)}
                     </span>{' '}
                     <span className="dim">
                       {o.direction === 'long' ? '平多' : o.direction === 'short' ? '平空' : '平仓'} · {o.size || '全部'} 张
                     </span>
+                    {orphan && (
+                      <span className="orphan-note">这一边已经没有持仓了，这张单不会再平任何东西，建议撤掉</span>
+                    )}
                   </span>
                   <span className="dim num">{o.id.slice(-6)}</span>
                   <span style={{ display: 'flex', gap: 2 }}>
                     <button
                       className="x edit"
-                      title={o.direction ? '改这一边的止损止盈' : '这张单看不出平哪一边，只能撤'}
-                      disabled={!armed || !o.direction}
+                      title={!o.direction
+                        ? '这张单看不出平哪一边，只能撤'
+                        : !protection ? '条件单不是保护单，改不了，只能撤' : '改这一边的止损止盈'}
+                      disabled={!armed || !o.direction || !protection}
                       onClick={() => {
                         if (!o.direction) return;
                         const cur = bracketOf(o.contract, dir);

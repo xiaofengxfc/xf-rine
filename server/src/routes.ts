@@ -56,13 +56,25 @@ const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
   (req: Request, res: Response) => { fn(req, res).catch((e) => fail(res, translate(e))); };
 
 /**
- * 测试网只上架了几十个合约，主网有一千多个。界面上列的是主网行情，
- * 所以随手点一个测试网没有的币，交易所只会回一句 CONTRACT_NOT_FOUND ——
- * 这句话对用户没有任何意义。在 fail 之前翻译成人话。
+ * 交易所拒单时的两句英文，对用户没有任何意义。在 fail 之前翻译成人话：
+ *   CONTRACT_NOT_FOUND       测试网只上架了几十个合约，主网有一千多个
+ *   MARKET_PRICE_TOO_DEVIATED 盘口另一边没有能成交的价，市价单被滑点保护拒了
  */
 function translate(e: unknown): unknown {
-  if (!(e instanceof GateError) || e.label !== 'CONTRACT_NOT_FOUND') return e;
-  if (config.env !== 'testnet') return e;
+  if (!(e instanceof GateError)) return e;
+
+  if (e.label === 'MARKET_PRICE_TOO_DEVIATED' || e.label === 'PRICE_TOO_DEVIATED') {
+    // 这句最常出现在平仓上：盘口是空的，市价平不掉，用户会以为程序坏了
+    return new GateError(
+      400,
+      'PRICE_TOO_DEVIATED',
+      '交易所拒了这一单：盘口另一边没有能成交的价（挂单太薄，或者价格正在剧烈跳动）。'
+      + '仓位没有任何问题，过几秒重试就行；一直不行就到交易所网页上手动平。'
+      + (config.env === 'testnet' ? '模拟盘的盘口经常是空的，这类拒绝多半不是你的操作有问题。' : ''),
+    );
+  }
+
+  if (e.label !== 'CONTRACT_NOT_FOUND' || config.env !== 'testnet') return e;
   return new GateError(
     400,
     'NOT_IN_TESTNET',
@@ -524,6 +536,14 @@ interface Trigger {
   contract: string;
   /** auto_size 直接写明平哪一边。空字符串表示认不出来（交易所网页上挂的、老的 isclose 单） */
   direction: Direction | '';
+  /**
+   * 是不是「到价平仓」的保护单。
+   * 不能看 reduce_only：Gate 把 auto_size 单回读成 reduce_only: false，
+   * 靠它判断会全部落空（实测：自己挂的止损读回来就是 false）。
+   * 只有带 auto_size 或 isclose 的才会去平仓；别的触发单是「到价开仓」的条件单，不归保护管。
+   */
+  protective: boolean;
+  /** 原样带回来的 reduce_only，只用来显示 */
   reduceOnly: boolean;
   /** 整边平仓（isclose）。只有这种认不出方向的单才可能需要按合约清掉 */
   closeAll: boolean;
@@ -538,12 +558,14 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
     const initial = (o.initial ?? {}) as Record<string, unknown>;
     const trigger = (o.trigger ?? {}) as Record<string, unknown>;
     const auto = String(initial.auto_size ?? '');
+    const closeAll = Boolean(initial.isclose);
     return {
       id: String(o.id),
       contract: String(initial.contract ?? ''),
       direction: auto.includes('long') ? 'long' : auto.includes('short') ? 'short' : '',
-      reduceOnly: Boolean(initial.reduce_only) || Boolean(initial.isclose),
-      closeAll: Boolean(initial.isclose),
+      protective: closeAll || auto !== '',
+      reduceOnly: Boolean(initial.reduce_only),
+      closeAll,
       triggerPrice: Number(trigger.price ?? 0),
       triggerRule: Number(trigger.rule ?? 0),
       size: Number(initial.size ?? 0),
@@ -554,6 +576,100 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
 router.get('/price-orders', wrap(async (_req, res) => {
   res.json(await readTriggers());
 }));
+
+// ---------- 平仓、反手之前要清掉的东西 ----------
+
+interface Cleanup {
+  /** 撤掉的未成交委托号 */
+  orders: string[];
+  /** 撤掉的触发单号 */
+  triggers: string[];
+  errors: string[];
+}
+
+const errText = (e: unknown): string => (e instanceof GateError ? `${e.label} ${e.detail}` : String(e));
+
+/**
+ * 这张委托会不会动到 dir 这一边。
+ * 买 + 减仓 = 平多；卖 + 非减仓 = 开空/加空。其余组合都不是这一边的事。
+ */
+function touchesSide(size: number, reduceOnly: boolean, dir: Direction): boolean {
+  const buy = size > 0;
+  if (reduceOnly) return dir === 'long' ? !buy : buy;
+  return dir === 'long' ? buy : !buy;
+}
+
+/**
+ * 把 dir 这一边名下的挂单和触发单撤掉。平仓、反手、开新仓之前都叫它。
+ *
+ * 非撤不可的原因：
+ *   - 触发单是给这个仓位挂的。仓没了它们还留着，下次开同方向的仓，一出现就被这些单打掉，
+ *     而且它们永远不会撤，页面上会一直挂着一堆找不到主人的「止损」。
+ *   - reduce_only 的限价单同理，仓没了就没有意义；不带 reduce_only 的限价单留着，
+ *     会在平完仓之后重新开出一个仓来 —— 你以为已经空仓，实际多了一个没人管的仓。
+ *
+ * 双向模式下另一边可能还有仓，那时候只动这一边的单：那边还挂着自己的保护单和减仓单。
+ * 另一边也空着说明这个合约要清干净了，那就一张不留 —— 单向模式下反向的限价单成交后同样会开仓。
+ */
+async function cancelSide(contract: string, dirs: Direction[], otherSideHasPosition: boolean): Promise<Cleanup> {
+  const out: Cleanup = { orders: [], triggers: [], errors: [] };
+  const flatAfter = !otherSideHasPosition || dirs.length >= 2;
+
+  let triggers: Trigger[] = [];
+  try {
+    triggers = await readTriggers(contract);
+  } catch (e) {
+    out.errors.push(`读触发单失败: ${errText(e)}`);
+  }
+  for (const t of triggers) {
+    // 认不出平哪一边的整边平仓单（isclose），只有在这个合约要清干净时才敢动
+    const mine = t.direction ? dirs.includes(t.direction) : t.closeAll && flatAfter;
+    if (!mine) continue;
+    try {
+      await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(t.id)}`);
+      out.triggers.push(t.id);
+    } catch (e) {
+      out.errors.push(`撤触发单 ${t.id}: ${errText(e)}`);
+    }
+  }
+
+  let open: Record<string, unknown>[] = [];
+  try {
+    open = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/orders', { contract, status: 'open' });
+  } catch (e) {
+    out.errors.push(`读挂单失败: ${errText(e)}`);
+  }
+  for (const o of open) {
+    const id = String(o.id);
+    const size = Number(o.size ?? 0);
+    const reduceOnly = Boolean(o.is_reduce_only);
+    const mine = flatAfter || dirs.some((d) => touchesSide(size, reduceOnly, d));
+    if (!mine) continue;
+    try {
+      await gatePrivate('DELETE', `/futures/usdt/orders/${encodeURIComponent(id)}`);
+      out.orders.push(id);
+    } catch (e) {
+      out.errors.push(`撤委托 ${id}: ${errText(e)}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * 开新仓之前，把这一边没人管的触发单清掉。
+ * 上一个仓早就没了，留着这些单只会让新仓一出现就被打掉；有仓的时候不动，
+ * 那时候的触发单是有主的，覆盖语义归 /api/bracket 管。
+ */
+async function clearOrphanTriggers(contract: string, dir: Direction): Promise<string[]> {
+  const sides = await readSides(contract).catch(() => [] as Side[]);
+  if (sides.some((s) => s.direction === dir && s.size > 0)) return [];
+  const out: string[] = [];
+  for (const t of (await readTriggers(contract)).filter((x) => x.protective && x.direction === dir)) {
+    await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(t.id)}`);
+    out.push(t.id);
+  }
+  return out;
+}
 
 // ---------- 交易 ----------
 
@@ -738,6 +854,9 @@ router.post('/order', wrap(async (req, res) => {
   const side: Direction = body.side === 'short' ? 'short' : 'long';
   const stop = Number(body.stop ?? 0) || 0;
   const target = Number(body.target ?? 0) || 0;
+  // 开仓前先清掉这一边没人管的触发单（上一个仓已经没了的那种）。
+  // 清不掉不影响下单，顶多在回执里少报一项。
+  const cleared = body.reduceOnly ? [] : await clearOrphanTriggers(contract, side).catch(() => [] as string[]);
   const { prepared, order } = await placeOrder({
     contract,
     side,
@@ -754,6 +873,8 @@ router.post('/order', wrap(async (req, res) => {
     ok: true,
     order: orderReceipt(order),
     bracket,
+    /** 开仓前顺手清掉的孤儿触发单 */
+    cleared,
     checked: {
       notional: Math.round(prepared.notional * 100) / 100,
       multiplier: Number(prepared.info.quanto_multiplier),
@@ -826,51 +947,73 @@ router.post('/order/:id/amend', wrap(async (req, res) => {
 }));
 
 /**
- * 市价平仓。
- * 不能用 close:true —— 双向持仓模式下 Gate 直接拒绝（POSITION_DUAL_MODE）。
- * auto_size 两种模式都能用：它按方向把整边平掉，单仓模式下也一样。
+ * 市价平掉这几边，再把这些边名下的委托和触发单撤掉。
+ *
+ * 顺序是「先平、后撤」：反过来的话，平仓万一被交易所拒了，保护单已经没了，仓就裸着。
+ * 先平的风险只在平仓到撤单之间那几毫秒 —— 挂着的委托顶多在这几毫秒里成交。
  */
-router.post('/close-position', wrap(async (req, res) => {
-  requireArm(req);
-  const { contract, direction } = req.body ?? {};
-  if (!contract) throw new GateError(400, 'BAD_INPUT', '缺少 contract');
-  const sides = await readSides(String(contract));
-  const wanted = sides.filter((s) => s.size > 0 && (!direction || s.direction === direction));
-  if (wanted.length === 0) throw new GateError(400, 'NO_POSITION', '当前没有持仓');
-
+async function flattenSides(contract: string, wanted: Side[], all: Side[]) {
   const orders: { direction: Direction; size: number; id: string; status: string }[] = [];
   for (const s of wanted) {
     const { order } = await placeOrder({
-      contract: String(contract),
+      contract,
       side: s.direction,
       size: 0,
       autoSize: s.direction === 'long' ? 'close_long' : 'close_short',
     });
     orders.push({ direction: s.direction, size: s.size, id: String(order.id), status: String(order.status) });
   }
-  res.json({ ok: true, orders });
+  const otherSideHasPosition = all.some((s) => s.size > 0 && !wanted.includes(s));
+  const canceled = await cancelSide(contract, wanted.map((s) => s.direction), otherSideHasPosition);
+  return { orders, canceled };
+}
+
+/**
+ * 市价平仓。
+ * 不能用 close:true —— 双向持仓模式下 Gate 直接拒绝（POSITION_DUAL_MODE）。
+ * auto_size 两种模式都能用：它按方向把整边平掉，单仓模式下也一样。
+ *
+ * 平仓会连带撤掉这一边的挂单和触发单，回执里列出撤掉了哪些。
+ */
+router.post('/close-position', wrap(async (req, res) => {
+  requireArm(req);
+  const { contract: contractRaw, direction } = req.body ?? {};
+  if (!contractRaw) throw new GateError(400, 'BAD_INPUT', '缺少 contract');
+  const contract = String(contractRaw);
+  const sides = await readSides(contract);
+  const wanted = sides.filter((s) => s.size > 0 && (!direction || s.direction === direction));
+  if (wanted.length === 0) throw new GateError(400, 'NO_POSITION', '当前没有持仓');
+
+  const r = await flattenSides(contract, wanted, sides);
+  res.json({ ok: true, ...r });
 }));
 
 /**
  * 触发单的价格和现价必须站在正确的一侧。
  * Gate 的触发单是「到条件就市价平」：多头把止损挂在现价上方，挂上去那一秒就成交了。
  * 所以先在服务端拦住，别等交易所平了仓再问为什么。
+ *
+ * 判定用最新成交价和标记价里更靠里的那个：触发单（price_type 0）看的是最新成交价，
+ * 而标记价常常比它更靠里一点。只按标记价判，止损落在这两个价之间时照样一挂就成交 ——
+ * 用户会看到「刚挂上就被平了」，那正是最难查的那种 bug。
  */
-function checkTriggerPrices(direction: Direction, mark: number, stop: number, target: number): void {
+function checkTriggerPrices(direction: Direction, low: number, high: number, stop: number, target: number): void {
+  const below = low > 0 ? low : high;
+  const above = high > 0 ? high : low;
   if (stop > 0) {
-    if (direction === 'long' && !(stop < mark)) {
-      throw new GateError(400, 'BAD_STOP', `多头止损要低于现价 ${mark}，挂在上方一挂上就成交`);
+    if (direction === 'long' && !(stop < below)) {
+      throw new GateError(400, 'BAD_STOP', `多头止损要低于现价 ${below}，挂在上方一挂上就成交`);
     }
-    if (direction === 'short' && !(stop > mark)) {
-      throw new GateError(400, 'BAD_STOP', `空头止损要高于现价 ${mark}，挂在下方一挂上就成交`);
+    if (direction === 'short' && !(stop > above)) {
+      throw new GateError(400, 'BAD_STOP', `空头止损要高于现价 ${above}，挂在下方一挂上就成交`);
     }
   }
   if (target > 0) {
-    if (direction === 'long' && !(target > mark)) {
-      throw new GateError(400, 'BAD_TARGET', `多头止盈要高于现价 ${mark}，否则一挂上就成交`);
+    if (direction === 'long' && !(target > above)) {
+      throw new GateError(400, 'BAD_TARGET', `多头止盈要高于现价 ${above}，否则一挂上就成交`);
     }
-    if (direction === 'short' && !(target < mark)) {
-      throw new GateError(400, 'BAD_TARGET', `空头止盈要低于现价 ${mark}，否则一挂上就成交`);
+    if (direction === 'short' && !(target < below)) {
+      throw new GateError(400, 'BAD_TARGET', `空头止盈要低于现价 ${below}，否则一挂上就成交`);
     }
   }
 }
@@ -905,17 +1048,21 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   const otherOpen = sides.some((s) => s.direction !== dir && s.size > 0);
 
   const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
-  const mark = mine && mine.markPrice > 0 ? mine.markPrice : Number(c.last_price);
-  if (hasStop || hasTarget) checkTriggerPrices(dir, mark, hasStop ? stopRaw : 0, hasTarget ? targetRaw : 0);
+  const last = Number(c.last_price) || 0;
+  const mark = mine && mine.markPrice > 0 ? mine.markPrice : last;
+  if (hasStop || hasTarget) {
+    checkTriggerPrices(dir, Math.min(last || mark, mark), Math.max(last, mark), hasStop ? stopRaw : 0, hasTarget ? targetRaw : 0);
+  }
 
   const round = Number(c.order_price_round);
   const snap = (p: number) => (round > 0 ? Math.round(Math.round(p / round) * round * 1e8) / 1e8 : p);
 
   const canceled: string[] = [];
   const errors: string[] = [];
-  // 认不出方向的整边平仓单（交易所网页上挂的 isclose）在对边空着时也只可能属于这一边
+  // 认不出方向的整边平仓单（交易所网页上挂的 isclose）在对边空着时也只可能属于这一边。
+  // 只撤「减仓/平仓」这一类：交易所网页上挂的条件开仓单不归这里管，覆盖保护时不该顺手把它删了。
   const existing = (await readTriggers(contract)).filter(
-    (t) => t.direction === dir || (t.direction === '' && t.closeAll && !otherOpen),
+    (t) => t.protective && (t.direction === dir || (t.direction === '' && t.closeAll && !otherOpen)),
   );
   for (const t of existing) {
     try {
@@ -1067,6 +1214,10 @@ router.post('/reverse-position', wrap(async (req, res) => {
     );
   }
 
+  // 平掉的那一边，委托和触发单跟着一起撤。不撤的话，同一秒反向开的仓一出现，
+  // 旧止损（auto_size 平的是刚平掉的那一边，价格又刚好在现价这侧）就会把新仓打掉。
+  const canceled = await cancelSide(contract, [dir], sides.some((s) => s.direction === opposite && s.size > 0));
+
   try {
     const { order } = await placeOrder({ contract, side: opposite, size: qty });
     res.json({
@@ -1075,6 +1226,7 @@ router.post('/reverse-position', wrap(async (req, res) => {
       opened: orderReceipt(order),
       direction: opposite,
       size: qty,
+      canceled,
     });
   } catch (e) {
     const msg = e instanceof GateError ? `${e.label} ${e.detail}` : String(e);

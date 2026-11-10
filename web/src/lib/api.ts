@@ -131,6 +131,25 @@ export interface OpenOrder {
 export interface PriceOrder {
   id: string; contract: string; direction: '' | 'long' | 'short';
   triggerPrice: number; triggerRule: number; size: number;
+  /** 到价平仓的保护单。靠 auto_size / isclose 判定，不能看 reduce_only（Gate 回读成 false） */
+  protective: boolean;
+  /** 交易所原样带回来的 reduce_only */
+  reduceOnly: boolean;
+  /** 整边平仓（isclose），看不出平哪一边 */
+  closeAll: boolean;
+}
+
+/** 平仓、反手时连带撤掉的东西 */
+export interface CanceledTrades {
+  orders: string[];
+  triggers: string[];
+  errors: string[];
+}
+
+export interface CloseResult {
+  ok: boolean;
+  orders: { direction: 'long' | 'short'; size: number; id: string; status: string }[];
+  canceled: CanceledTrades;
 }
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }

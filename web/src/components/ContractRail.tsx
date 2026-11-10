@@ -8,6 +8,8 @@ interface Props {
   onSelect: (name: string) => void;
   /** 模拟盘才需要标「哪个能下单」；实盘全是能交易的，标了反而吵 */
   showTradable?: boolean;
+  /** 窄屏下左栏是抽屉，给一个明确的收起按钮（点遮罩也能收，但那得有猜的胆量） */
+  onClose?: () => void;
 }
 
 type Tab = 'all' | 'up' | 'down';
@@ -33,7 +35,7 @@ function saveRail(v: { q: string; tab: Tab; scroll: number }): void {
   try { localStorage.setItem(RAIL_KEY, JSON.stringify(v)); } catch { /* 存不了就算了 */ }
 }
 
-export default function ContractRail({ tickers, current, onSelect, showTradable = false }: Props) {
+export default function ContractRail({ tickers, current, onSelect, showTradable = false, onClose }: Props) {
   const rail0 = useRef(readRail()).current;
   const [q, setQ] = useState(rail0.q);
   const [tab, setTab] = useState<Tab>(rail0.tab);
@@ -68,13 +70,16 @@ export default function ContractRail({ tickers, current, onSelect, showTradable 
   return (
     <aside className="rail">
       <div className="rail-head">
-        <input
-          className="search"
-          placeholder="搜索合约 · BTC / ETH…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          spellCheck={false}
-        />
+        <div className="rail-head-row">
+          <input
+            className="search"
+            placeholder="搜索合约 · BTC / ETH…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            spellCheck={false}
+          />
+          {onClose && <button className="rail-close" title="收起" aria-label="收起合约列表" onClick={onClose}>×</button>}
+        </div>
         <div className="rail-tabs">
           <button className={`rail-tab ${tab === 'all' ? 'on' : ''}`} onClick={() => setTab('all')}>全部</button>
           <button className={`rail-tab ${tab === 'up' ? 'on' : ''}`} onClick={() => setTab('up')}>涨</button>

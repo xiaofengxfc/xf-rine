@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { protectionPrices, protectionRows, planWrongSide, type ProtectMode } from '../lib/protection.ts';
+import { riskSizing } from '../lib/sizing.ts';
 
 interface Props {
   contract: ContractInfo | null;
@@ -36,6 +37,9 @@ export default function OrderTicket({
   const [pending, setPending] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  /** 限价框自动填过一次就不再管，用户自己清空是用户的事 */
+  const autoLimitRef = useRef(false);
+
   const mult = contract?.multiplier ?? 0;
   const last = contract?.price ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
@@ -60,7 +64,19 @@ export default function OrderTicket({
     setPending(false);
     setStopStr('');
     setTargetStr('');
+    // 限价也一起清掉：换币种后留着上一个币的价格，点下去会被「价格偏离现价」拒掉
+    setLimitStr('');
+    autoLimitRef.current = false;
   }, [contract?.name]);
+
+  // 限价框空着的时候，提交上去的其实是市价单（price 0），摘要里全是「—」，
+  // 按风险也会按一个不会真正发出去的价算。所以第一次切到限价就把现价填进去。
+  const snapPrice = (p: number) => (priceRound > 0 ? Number((Math.round(p / priceRound) * priceRound).toFixed(10)) : p);
+  useEffect(() => {
+    if (autoLimitRef.current || priceMode !== 'limit' || !(last > 0)) return;
+    autoLimitRef.current = true;
+    setLimitStr(String(snapPrice(last)));
+  }, [priceMode, last, priceRound]);
 
   const priceUsed = priceMode === 'limit' ? Number(limitStr) || 0 : last;
   const size = Math.round(Number(sizeStr) || 0);
@@ -87,7 +103,11 @@ export default function OrderTicket({
   const wanted = protectionPrices(protect, planBracket, stopNum, targetNum);
   // 方案价按方案入场价算，现价可能已经跑过去了，那一侧的触发单一挂上就成交。
   // 这种情况只剔掉跑过头的那一边：另一边往往还是对的，一起丢掉等于白算。
-  const planWrong = planWrongSide(side, planBracket, priceUsed);
+  // 判断要连标记价一起看：触发单看的是最新成交价，止损夹在两个价中间时照样一挂就成交。
+  const mark = contract?.markPrice ?? 0;
+  const lowRef = mark > 0 && priceUsed > 0 ? Math.min(priceUsed, mark) : priceUsed;
+  const highRef = mark > 0 && priceUsed > 0 ? Math.max(priceUsed, mark) : priceUsed;
+  const planWrong = planWrongSide(side, planBracket, priceUsed, mark);
   const effStop = protect === 'plan' && planWrong.stop ? 0 : wanted.stop;
   const effTarget = protect === 'plan' && planWrong.target ? 0 : wanted.target;
   const wantProtect = effStop > 0 || effTarget > 0;
@@ -98,12 +118,28 @@ export default function OrderTicket({
     return side === 'long' ? priceUsed * (1 - move) : priceUsed * (1 + move);
   }, [priceUsed, leverage, side]);
 
-  const riskSized = useMemo(() => {
-    if (!bracket || !contract || priceUsed <= 0) return 0;
-    const perContract = (bracket.riskPct / 100) * bracket.entry * contract.multiplier;
-    if (perContract <= 0) return 0;
-    return Math.max(0, Math.floor((avail * (riskPct / 100)) / perContract));
-  }, [bracket, contract, avail, riskPct, priceUsed]);
+  /**
+   * 按风险算仓位。止损用这一单真会挂上去的那个价；
+   * 「不设保护」或者方案这一边已经跑过头时退回方案算出来的止损价 ——
+   * 那仍然是「这笔交易打算亏多少」唯一的依据，没有止损就谈不上按风险。
+   */
+  const riskStop = effStop > 0 ? effStop : (planBracket?.stop ?? 0);
+  // 限价框还空着的时候也要能按风险算：用方案入场价，没有方案就用现价
+  const sizingPrice = priceUsed > 0 ? priceUsed : (planBracket?.entry ?? last);
+  const sizing = useMemo(() => riskSizing({
+    budget: avail * (riskPct / 100),
+    price: sizingPrice,
+    stop: riskStop,
+    multiplier: mult,
+    available: avail,
+    leverage,
+    feeRate,
+    leverageMax: levMax,
+    sizeMin,
+    sizeMax,
+  }), [avail, riskPct, sizingPrice, riskStop, mult, leverage, feeRate, levMax, sizeMin, sizeMax]);
+
+  const capByMax = (n: number) => (sizeMax > 0 ? Math.min(n, sizeMax) : n);
 
   // 拦下的第一条原因就写在按钮上。保护方式多了以后三元表达式套不下了，改成按顺序返回
   const blocked = (() => {
@@ -115,17 +151,35 @@ export default function OrderTicket({
     if (size < sizeMin) return `张数至少 ${sizeMin}`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
     if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
-    if (protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= priceUsed : stopNum <= priceUsed)) {
+    if (protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= lowRef : stopNum <= highRef)) {
       return '止损价方向不对';
     }
-    if (protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= priceUsed : targetNum >= priceUsed)) {
+    if (protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= highRef : targetNum >= lowRef)) {
       return '止盈价方向不对';
     }
     return '';
   })();
 
   // 摘要下方那一小截：只列这一单真会挂上去的保护
-  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed);
+  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed, mark);
+
+  /** 止损很窄时每张只亏零点几 USDT，两位小数会全变成 0.00，按量级补位数 */
+  const money = (v: number) => fmtUsd(v, v !== 0 && Math.abs(v) < 1 ? 4 : 2);
+
+  /** 按风险开不满时把账写清楚：想要多少、能下多少、真能下的那些亏多少、差在哪 */
+  const sizingNote = (() => {
+    if (!sizing.cappedByMargin) return '';
+    if (sizing.feasible <= 0) {
+      return `按风险 ${riskPct}% 要 ${sizing.wanted} 张，可用 ${fmtUsd(avail)} USDT 连一张都开不下。先降张数或换一个止损更宽的方向。`;
+    }
+    const head = `按风险 ${riskPct}% 要 ${sizing.wanted} 张（每张到止损亏 ${money(sizing.perContract)} USDT），`
+      + `按 ${leverage}x 杠杆和可用 ${fmtUsd(avail)} USDT 只开得下 ${sizing.feasible} 张。`;
+    const tail = sizing.overMaxLeverage
+      ? ` 这是止损太窄（盈亏比 ${planBracket ? planBracket.riskReward.toFixed(2) : '很高'}）造成的：`
+        + `要开满得 ${Number.isFinite(sizing.leverageNeeded) ? `${sizing.leverageNeeded} 倍杠杆，` : ''}这个合约最多 ${levMax} 倍，开不满。`
+      : ` 杠杆提到 ${sizing.leverageNeeded} 倍就能开满。`;
+    return head + tail + ` 按 ${sizing.feasible} 张算，真实最大亏损 ${money(sizing.riskAtFeasible)} USDT，比预算 ${fmtUsd(sizing.budget)} USDT 少。`;
+  })();
 
   async function submit() {
     if (!contract || !token) return;
@@ -207,11 +261,30 @@ export default function OrderTicket({
 
         <div className="row4" style={{ marginBottom: 10 }}>
           <button className="chip" onClick={() => { setSizeStr(String(sizeMin)); setPending(false); }}>最小</button>
-          <button className="chip" onClick={() => { setSizeStr(String(Math.max(sizeMin, riskSized))); setPending(false); }} title="按可用余额 × 风险百分比 / 止损距离算">
+          <button
+            className="chip"
+            disabled={riskStop <= 0 || sizing.feasible <= 0}
+            title={riskStop <= 0
+              ? '先设一个止损价（或者用方案价）才能按风险算张数'
+              : `风险 ${riskPct}% = ${fmtUsd(sizing.budget)} USDT，止损 ${fmtPrice(riskStop, priceRound)}，每张到止损亏 ${money(sizing.perContract)}，按风险要 ${sizing.wanted} 张，现在开得下 ${sizing.feasible} 张`}
+            onClick={() => { setSizeStr(String(Math.max(sizeMin, sizing.feasible))); setPending(false); }}
+          >
             按风险
           </button>
-          <button className="chip" onClick={() => { setSizeStr(String(Math.max(sizeMin, Math.min(maxAffordable, 50)))); setPending(false); }}>50% 仓位</button>
-          <button className="chip" onClick={() => { setSizeStr(String(Math.max(sizeMin, maxAffordable))); setPending(false); }}>满仓</button>
+          <button
+            className="chip"
+            title={`按当前杠杆和可用余额的一半：${Math.floor(maxAffordable / 2)} 张`}
+            onClick={() => { setSizeStr(String(Math.max(sizeMin, capByMax(Math.floor(maxAffordable / 2))))); setPending(false); }}
+          >
+            50% 仓位
+          </button>
+          <button
+            className="chip"
+            title={`按当前 ${leverage}x 杠杆和可用余额最多 ${maxAffordable} 张`}
+            onClick={() => { setSizeStr(String(Math.max(sizeMin, capByMax(maxAffordable)))); setPending(false); }}
+          >
+            满仓
+          </button>
         </div>
 
         <div className="row2" style={{ marginBottom: 9 }}>
@@ -350,6 +423,15 @@ export default function OrderTicket({
             <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
           )}
           <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
+          {riskStop > 0 && (
+            <>
+              <dt>按风险张数</dt>
+              <dd className={sizing.cappedByMargin ? 'down' : ''}>
+                {sizing.wanted > 0 ? `${sizing.wanted} 张` : '—'}
+                {sizing.cappedByMargin && <span className="dim"> → 最多 {sizing.feasible} 张</span>}
+              </dd>
+            </>
+          )}
           {protectRows.map((row) => (
             <Fragment key={row.label}>
               <dt>{row.label}</dt>
@@ -357,13 +439,19 @@ export default function OrderTicket({
                 {row.price > 0 ? (
                   <>
                     {fmtPrice(row.price, priceRound)}
-                    {row.pct !== null && <> <span className="dim">({fmtPct(row.pct, 2)})</span></>}
+                    {row.pct !== null && (
+                      <> <span className="dim">({fmtPct(row.pct, Math.abs(row.pct) < 0.01 ? 3 : 2)})</span></>
+                    )}
                   </>
                 ) : row.note}
               </dd>
             </Fragment>
           ))}
         </dl>
+
+        {sizingNote && (
+          <div className="warn-box" style={{ marginTop: 2 }}>{sizingNote}</div>
+        )}
 
         {!pending ? (
           <button

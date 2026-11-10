@@ -90,6 +90,8 @@ export default function App() {
   const [wsAlive, setWsAlive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 手机上左栏是抽屉：点顶栏的「合约」打开，选完自动收 */
+  const [railOpen, setRailOpen] = useState(false);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
   const [applied, setApplied] = useState<{ bracket: Bracket; at: number } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -110,6 +112,14 @@ export default function App() {
   const marketRef = useRef(market);
   useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
+
+  // 抽屉开着的时候按 Esc 收起来。手机上没键盘，但接外接键盘的平板有。
+  useEffect(() => {
+    if (!railOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRailOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [railOpen]);
 
   const marketKey = `${contract}:${interval}`;
   // 只有归属当前币种和周期的数据才交给界面。切币那一帧旧数据还在 state 里，
@@ -355,7 +365,7 @@ export default function App() {
 
   return (
     <>
-      <div className="app">
+      <div className={`app${railOpen ? ' rail-open' : ''}`}>
         <TopBar
           env={config?.env ?? 'live'}
           ticker={ticker}
@@ -367,14 +377,17 @@ export default function App() {
           keysConfigured={config?.keys.configured ?? false}
           onToggleArm={toggleArm}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenRail={() => setRailOpen(true)}
         />
 
         <ContractRail
           tickers={tickers}
           current={contract}
-          onSelect={setContract}
+          onSelect={(name) => { setContract(name); setRailOpen(false); }}
           showTradable={config?.env === 'testnet'}
+          onClose={() => setRailOpen(false)}
         />
+        {railOpen && <div className="rail-scrim" onClick={() => setRailOpen(false)} />}
 
         <main className="center">
           <ChartPane
@@ -402,7 +415,7 @@ export default function App() {
         </main>
 
         <aside className="side">
-          <div className="card">
+          <div className="card side-pick">
             <div className="card-body" style={{ paddingTop: 10 }}>
               <div className="seg" style={{ width: '100%' }}>
                 <button className={side === 'long' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('long')}>看多</button>
@@ -418,6 +431,7 @@ export default function App() {
             multiplier={info?.multiplier ?? 0}
             equity={account?.total ?? 0}
             riskPercent={riskPct}
+            leverageMax={Math.min(info?.leverageMax ?? 125, 125)}
             onUse={(b) => { setApplied({ bracket: b, at: Date.now() }); setSide(b.direction); push('ok', '已套用方案', `${b.direction === 'long' ? '做多' : '做空'} 止损 ${fmtPrice(b.stop, priceRound)} / 止盈 ${fmtPrice(b.target, priceRound)}`); }}
           />
 

@@ -43,6 +43,8 @@ export function protectionRows(
   manualStop: number,
   manualTarget: number,
   refPrice: number,
+  /** 标记价，和最新价一起判断跑没跑过；不传就只看最新价 */
+  markPrice = 0,
 ): ProtectRow[] {
   if (mode === 'none') return [];
   /** 手动填的价没有预计算的百分比，按现价现算，好看出离得多远 */
@@ -54,7 +56,7 @@ export function protectionRows(
         { label: '止盈（方案）', price: 0, pct: null, note: '还没算出来' },
       ];
     }
-    const wrong = planWrongSide(side, plan, refPrice);
+    const wrong = planWrongSide(side, plan, refPrice, markPrice);
     return [
       wrong.stop
         ? { label: '止损（方案）', price: 0, pct: null, note: '现价已跑过，不挂' }
@@ -70,14 +72,23 @@ export function protectionRows(
   ];
 }
 
+/**
+ * 方案价跑到现价另一边了没有。
+ * 触发单（price_type 0）看的是最新成交价，而标记价常常比它更靠里 ——
+ * 止损正好落在这两个价之间时，只按最新价判会放过它，挂上去那一秒就成交。
+ * 所以两边取更严格的那个：要低于 min(最新价, 标记价)，或高于 max(最新价, 标记价)。
+ */
 export function planWrongSide(
   side: 'long' | 'short',
   plan: Bracket | null,
   refPrice: number,
+  markPrice = 0,
 ): { stop: boolean; target: boolean } {
   if (!plan || !(refPrice > 0)) return { stop: false, target: false };
+  const low = markPrice > 0 ? Math.min(refPrice, markPrice) : refPrice;
+  const high = markPrice > 0 ? Math.max(refPrice, markPrice) : refPrice;
   return {
-    stop: side === 'long' ? plan.stop >= refPrice : plan.stop <= refPrice,
-    target: side === 'long' ? plan.target <= refPrice : plan.target >= refPrice,
+    stop: side === 'long' ? plan.stop >= low : plan.stop <= high,
+    target: side === 'long' ? plan.target <= high : plan.target >= low,
   };
 }
