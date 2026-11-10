@@ -74,7 +74,16 @@ app.use('/api', (req, res, next) => {
 });
 
 app.use('/api', router);
-app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
+/**
+ * 健康检查。
+ *
+ * instance 是外壳启动子进程时给的随机标记，原样带回去。
+ * 只有它能证明「这个端口上的服务端是我这一份」—— 开发环境、上一个没退干净的实例
+ * 都可能正好在同一个端口上，光看 200 分不出来，页面接上去就成了别人的数据。
+ */
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, ts: Date.now(), instance: process.env.XFRINE_INSTANCE ?? '' });
+});
 
 // 生产模式：直接托管已打包的前端。
 // 桌面端把 web/dist 放在 resources/web-dist，用 WEB_DIST 指过来；

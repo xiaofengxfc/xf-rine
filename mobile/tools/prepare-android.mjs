@@ -37,6 +37,58 @@ cpSync(pluginDir, target, {
   filter: (src) => !/[\\/](node_modules|dist|scripts|Package\.swift)[\\/]?$/.test(src.replace(pluginDir, '')),
 });
 
+/**
+ * 原生库加载失败别让 App 直接退出。
+ *
+ * 插件原来的写法是静态块里直接 System.loadLibrary，失败抛的是 ExceptionInInitializerError ——
+ * 那是 Error 不是 Exception，Capacitor 的 Plugin.load() 里接不住，进程当场结束。
+ * 用户看到的就是「启动闪退」，连一句提示都没有。
+ *
+ * 这里把原因存下来，等 start() 时当作普通错误返回给页面，页面能把话说明白。
+ */
+const nodejsJava = join(target, 'android/src/main/java/io/capawesome/capacitorjs/plugins/nodejs/Nodejs.java');
+const javaSrc = readFileSync(nodejsJava, 'utf8');
+const loadBlock = `    static {
+        System.loadLibrary("node");
+        System.loadLibrary("capacitor-nodejs");
+    }`;
+if (!javaSrc.includes(loadBlock)) {
+  console.error('Nodejs.java 里的静态加载块和预期不一样，插件可能升级了，先看一眼再改本脚本');
+  process.exit(1);
+}
+const guardedLoad = `    /** 原生库加载失败时记下原因（null 表示正常） */
+    static String LOAD_ERROR = null;
+
+    static {
+        try {
+            System.loadLibrary("node");
+            System.loadLibrary("capacitor-nodejs");
+        } catch (Throwable t) {
+            LOAD_ERROR = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
+            android.util.Log.e("Nodejs", "原生运行时加载失败", t);
+        }
+    }`;
+let patchedJava = javaSrc.replace(loadBlock, guardedLoad);
+
+const startHead = `        if (started) {
+            callback.error(CustomExceptions.NODE_ALREADY_RUNNING);
+            return;
+        }`;
+if (!patchedJava.includes(startHead)) {
+  console.error('Nodejs.java 的 start() 和预期不一样，先看一眼再改本脚本');
+  process.exit(1);
+}
+patchedJava = patchedJava.replace(
+  startHead,
+  startHead + `
+        if (LOAD_ERROR != null) {
+            callback.error(new Exception("原生运行时加载失败：" + LOAD_ERROR));
+            return;
+        }`,
+);
+writeFileSync(nodejsJava, patchedJava, 'utf8');
+console.log('已给原生库加载加上兜底（失败时报给页面，不再闪退）');
+
 // cap sync 每次都会重写这个文件，所以这里改的是它最后一次的产物
 const settingsFile = join(androidDir, 'capacitor.settings.gradle');
 const original = readFileSync(settingsFile, 'utf8');

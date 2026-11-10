@@ -33,7 +33,28 @@ let win = null;
 let restarts = 0;
 let quitting = false;
 
+/**
+ * 这一份服务端的标记。
+ *
+ * 端口上可能有别人（开发环境、上一个没退干净的实例），光看「有 200 返回」分不清是谁。
+ * 每次启动生成一个，交给子进程，再由 /api/health 带回来 —— 对不上就不是我们的，换端口。
+ */
+const INSTANCE = randomBytes(8).toString('hex');
+
 // ---------- 路径 ----------
+
+/**
+ * 开发态（pnpm -F desktop start）用另一套用户目录。
+ *
+ * 不分开的话，仓库里跑起来的这个和装好的那个读同一份 .env、同一份 localStorage ——
+ * 调样式时改坏一个设置，装好的那份跟着变，反过来也一样。
+ * 安装版用产品名的目录（%APPDATA%\\巡风），开发态在后面加 -dev。
+ */
+if (!app.isPackaged) {
+  try {
+    app.setPath('userData', app.getPath('userData') + '-dev');
+  } catch { /* 改不了就用默认的 */ }
+}
 
 function dataDir() {
   const d = app.getPath('userData');
@@ -142,8 +163,27 @@ function ensureEnv() {
 
 // ---------- 端口 ----------
 
-function portFree(port, host) {
+/**
+ * 有人在听吗？
+ *
+ * 只靠「绑得上」判断不行，Windows 上会骗人：别的程序绑了 127.0.0.1:8787，
+ * 这里绑 0.0.0.0:8787 照样成功，两个进程同时监听，而 127.0.0.1 的请求
+ * 会优先给更具体的那个 —— 页面于是连到了别人（比如开发环境的服务端）。
+ * 连一下才分得清：能连上就是有人。
+ */
+function portTaken(port) {
   return new Promise((resolve) => {
+    const s = net.connect({ port, host: '127.0.0.1' });
+    s.setTimeout(900);
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('timeout', () => { s.destroy(); resolve(false); });
+    s.once('error', () => resolve(false));
+  });
+}
+
+async function portFree(port, host) {
+  if (await portTaken(port)) return false;
+  return await new Promise((resolve) => {
     const s = net.createServer();
     s.unref();
     s.once('error', () => resolve(false));
@@ -158,10 +198,10 @@ function portFree(port, host) {
  * 上次用过的端口写在 .env 里，优先接着用 —— 手机端填的地址跟端口绑在一起，
  * 每次启动换一个的话，手机上那串就白填了。
  */
-async function pickPort(preferred) {
-  if (preferred && (await portFree(preferred, serverHost))) return preferred;
-  for (const p of [8787, 8788, 8789, 8790, 8791]) {
-    if (await portFree(p, serverHost)) return p;
+async function pickPort(preferred, skip = new Set()) {
+  if (preferred && !skip.has(preferred) && (await portFree(preferred, serverHost))) return preferred;
+  for (const p of [8787, 8788, 8789, 8790, 8791, 8792]) {
+    if (!skip.has(p) && (await portFree(p, serverHost))) return p;
   }
   return await new Promise((resolve, reject) => {
     const s = net.createServer();
@@ -185,6 +225,7 @@ function spawnServer() {
     // 让 Electron 的 exe 当成 node 来跑这个脚本：用户机器上不需要装 Node
     ELECTRON_RUN_AS_NODE: '1',
     PORT: String(serverPort),
+    XFRINE_INSTANCE: INSTANCE,
     XFRINE_HOME: dataDir(),
     WEB_DIST: webDistDir(),
     NODE_ENV: 'production',
@@ -206,17 +247,68 @@ function spawnServer() {
   return child;
 }
 
-async function waitHealth(timeoutMs) {
+/**
+ * 等自己这一份服务端就绪。
+ *
+ * 返回 'ok' 才算数：端口上回 200 的可能是别人（开发环境、上一个实例、别的程序），
+ * 接上去就成了别人的数据 —— 用户在安装版里改密钥，写进去的是项目的 server/.env。
+ */
+async function waitOurs(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await fetch('http://127.0.0.1:' + serverPort + '/api/health', { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return true;
+      if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        return String(body.instance ?? '') === INSTANCE ? 'ok' : 'foreign';
+      }
     } catch { /* 还没起来 */ }
     // 进程已经退了就别干等
-    if (!serverProc) return false;
+    if (!serverProc) return 'down';
     await new Promise((r) => setTimeout(r, 250));
   }
+  return 'down';
+}
+
+/** 收掉当前这一份服务端，并且不让它的退出触发重启 */
+function stopServer() {
+  const p = serverProc;
+  serverProc = null;
+  if (!p) return;
+  try { p.removeListener('exit', onServerExit); } catch { /* 已经没了 */ }
+  try { p.kill(); } catch { /* 同上 */ }
+}
+
+/**
+ * 挑端口 → 起子进程 → 确认「这是我这一份」。
+ *
+ * 端口被别的程序占着（尤其是只绑 127.0.0.1 的开发服务）时，Windows 会让
+ * 我们的 0.0.0.0 绑定也成功，然后页面连到的是对方。所以这里有三道：
+ * 先连一下、再试绑、最后对标记。任何一道过不去就换下一个端口。
+ */
+async function startServer() {
+  const preferred = readEnvNumber(readEnvText(), 'PORT');
+  const skip = new Set();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    serverPort = await pickPort(attempt === 0 ? preferred : 0, skip);
+    if (attempt === 0 && serverPort !== preferred) {
+      // 记住这次挑到的端口，下次接着用；手机端填的地址才不会每天都变
+      writeEnvLine('PORT', String(serverPort));
+    }
+    log('[main] 端口 ' + serverPort + '（配置里是 ' + (preferred || '未设置') + '）');
+    serverProc = spawnServer();
+    const r = await waitOurs(30_000);
+    if (r === 'ok') return true;
+    if (r === 'foreign') {
+      log('[main] ' + serverPort + ' 上回话的不是我们自己的服务端（多半是开发环境占了），换一个端口');
+      stopServer();
+      skip.add(serverPort);
+      continue;
+    }
+    log('[main] 服务端没起来');
+    return false;
+  }
+  log('[main] 连着几个端口都不是自己的，放弃');
   return false;
 }
 
@@ -244,9 +336,7 @@ function onServerExit(code, signal) {
   setTimeout(async () => {
     if (quitting) return;
     try {
-      serverPort = await pickPort(serverPort);
-      serverProc = spawnServer();
-      const ok = await waitHealth(20_000);
+      const ok = await startServer();
       if (!ok) log('[main] 重启后仍然不健康');
       if (win && !win.isDestroyed()) win.loadURL(urlFor());
     } catch (e) {
@@ -343,10 +433,11 @@ function runSmoke() {
     // React 挂载是异步的，给几秒
     for (let i = 0; i < 20; i += 1) {
       try {
-        const ok = await w.webContents.executeJavaScript(
-          "Boolean(document.getElementById('root') && document.getElementById('root').childElementCount > 0)",
+        const state = await w.webContents.executeJavaScript(
+          "({ title: document.title, mounted: Boolean(document.getElementById('root') && document.getElementById('root').childElementCount > 0) })",
         );
-        if (ok) { finish(true, ''); return; }
+        // 页面对了才算过：端口上要是坐着别人的页面，DOM 一样是满的
+        if (state && state.mounted && String(state.title).includes('巡风')) { finish(true, ''); return; }
       } catch { /* 页面还在加载 */ }
       await new Promise((r) => setTimeout(r, 400));
     }
@@ -366,16 +457,7 @@ async function main() {
   trimLog();
   ensureEnv();
 
-  const preferred = readEnvNumber(readEnvText(), 'PORT');
-  serverPort = await pickPort(preferred);
-  if (serverPort !== preferred) {
-    // 记住这次挑到的端口，下次接着用；手机端填的地址才不会每天都变
-    writeEnvLine('PORT', String(serverPort));
-  }
-  log('[main] 端口 ' + serverPort + '（配置里是 ' + (preferred || '未设置') + '）');
-
-  serverProc = spawnServer();
-  const ok = await waitHealth(30_000);
+  const ok = await startServer();
 
   if (SMOKE) {
     if (!ok) {
