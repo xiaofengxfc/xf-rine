@@ -11,6 +11,9 @@ interface Props {
   onOpenSettings: () => void;
 }
 
+/** 卡片里的动作按钮都长这样，别一半宽一半窄 */
+const CARD_BTN = { padding: '7px 0', width: '100%' } as const;
+
 const VERDICT: Record<AiAnalysis['verdict'], { text: string; cls: string }> = {
   long: { text: '偏多', cls: 'long' },
   short: { text: '偏空', cls: 'short' },
@@ -21,10 +24,20 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
   const [data, setData] = useState<AiAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ label: string; detail: string } | null>(null);
+  /** 这一次已经等了多久，秒 */
+  const [waited, setWaited] = useState(0);
   const seqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (refresh: boolean) => {
+  // 拿到结论或者停下来就归零，下一次从 0 数起
+  useEffect(() => {
+    if (!loading) return;
+    setWaited(0);
+    const t = window.setInterval(() => setWaited((s) => s + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [loading]);
+
+  const load = useCallback(async () => {
     if (!configured) return;
     abortRef.current?.abort();
     const ac = new AbortController();
@@ -32,15 +45,16 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
     const seq = ++seqRef.current;
     setLoading(true);
     setError(null);
+    // 重新分析时先把上一份结论收走：留着旧的，你分不清屏幕上这份是刚才的还是这次的
+    setData(null);
     try {
-      const d = await jsend<AiAnalysis>('POST', '/api/ai/analyze', { contract, interval, refresh }, undefined, ac.signal);
+      const d = await jsend<AiAnalysis>('POST', '/api/ai/analyze', { contract, interval }, undefined, ac.signal);
       if (seq === seqRef.current) setData(d);
     } catch (e) {
       if (seq !== seqRef.current) return;
       // 用户自己按的停止，不算错误，也不该弹红字
       if (e instanceof DOMException && e.name === 'AbortError') return;
       setError(e instanceof ApiError ? { label: e.label, detail: e.message } : { label: 'ERROR', detail: String(e) });
-      setData(null);
     } finally {
       if (seq === seqRef.current) setLoading(false);
       if (abortRef.current === ac) abortRef.current = null;
@@ -77,7 +91,7 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
       <div className="card-head">
         <h3>AI 分析</h3>
         <span className="dim" style={{ fontSize: 10 }}>
-          {data ? `${data.model}${data.cached ? ' · 缓存' : ''}` : configured ? (loading ? '分析中' : '') : '未配置'}
+          {data ? data.model : configured ? (loading ? '分析中' : '') : '未配置'}
         </span>
       </div>
       <div className="card-body">
@@ -87,7 +101,7 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
             <div className="ai-note">
               支持任何 OpenAI 兼容接口，官方地址、中转站、本地 Ollama 都行。填接口地址、密钥和模型名就能用。
             </div>
-            <button className="btn ghost" style={{ padding: '6px 0', marginTop: 8 }} onClick={onOpenSettings}>
+            <button className="btn ghost" style={{ ...CARD_BTN, marginTop: 8 }} onClick={onOpenSettings}>
               去设置里填
             </button>
           </>
@@ -98,33 +112,35 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
             <div className="ai-note" style={{ color: 'var(--warn)' }}>
               {error.detail || error.label}
             </div>
-            <button className="btn ghost" style={{ padding: '6px 0', marginTop: 8 }} onClick={() => void load(true)} disabled={loading}>
+            <button className="btn ghost" style={{ ...CARD_BTN, marginTop: 8 }} onClick={() => void load()} disabled={loading}>
               重试
             </button>
           </>
         )}
 
-        {configured && !error && loading && !data && (
+        {configured && !data && !error && loading && (
           <>
-            <div className="empty" style={{ padding: '10px 0' }}>正在分析…</div>
-            <button className="btn ghost" style={{ padding: '6px 0', marginTop: 8 }} onClick={stop}>
+            <div className="empty" style={{ padding: '10px 0' }}>
+              正在分析…{waited > 0 ? ` ${waited} 秒` : ''}
+            </div>
+            <button className="btn ghost" style={{ ...CARD_BTN, marginTop: 8 }} onClick={stop}>
               停止分析
             </button>
           </>
         )}
 
-        {configured && !error && !loading && !data && (
+        {configured && !data && !error && !loading && (
           <>
             <div className="ai-note" style={{ marginBottom: 8 }}>
               点下面才开始。会把这个币的技术面和新闻一起发给模型，一次调用有成本，所以不自动跑。
             </div>
-            <button className="btn accent" style={{ padding: '7px 0', width: '100%' }} onClick={() => void load(false)}>
+            <button className="btn accent" style={CARD_BTN} onClick={() => void load()}>
               开始分析
             </button>
           </>
         )}
 
-        {configured && !error && data && v && (
+        {configured && data && v && (
           <>
             <div className="ai-head">
               <span className={`ai-verdict ${v.cls}`}>{v.text}</span>
@@ -134,11 +150,7 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
                 </div>
                 <span className="ai-conf-num">{Math.round(data.confidence * 100)}%</span>
               </div>
-              {loading ? (
-                <button className="ai-refresh" onClick={stop} title="停止这次分析">停止</button>
-              ) : (
-                <button className="ai-refresh" onClick={() => void load(true)} title="重新分析（不走缓存）">↻</button>
-              )}
+              <button className="ai-refresh" onClick={() => void load()} title="重新分析">↻</button>
             </div>
 
             {data.reasons.length > 0 && (
@@ -169,6 +181,15 @@ export default function AiCard({ contract, interval, configured, liveTrading, en
               这是模型给的参考意见，不是交易信号。
               {liveTrading && env === 'live' ? '实盘下单开着，按自己的判断下单。' : ''}
             </div>
+
+            <button
+              className="btn ghost"
+              style={{ ...CARD_BTN, marginTop: 8 }}
+              onClick={() => void load()}
+              title="重新问一次模型"
+            >
+              重新分析
+            </button>
           </>
         )}
       </div>

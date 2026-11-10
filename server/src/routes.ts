@@ -285,7 +285,7 @@ router.post('/ai/analyze', wrap(async (req, res) => {
   const contract = String(req.body?.contract ?? 'BTC_USDT').toUpperCase();
   const interval = INTERVALS.has(String(req.body?.interval)) ? String(req.body.interval) : '15m';
   const snapshot = await buildSnapshot(contract, interval);
-  res.json(await analyze(snapshot, { refresh: req.body?.refresh === true }));
+  res.json(await analyze(snapshot));
 }));
 
 router.post('/ai/test', wrap(async (req, res) => {

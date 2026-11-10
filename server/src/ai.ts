@@ -106,7 +106,6 @@ export interface AiAnalysis {
   riskNote: string;
   model: string;
   at: number;
-  cached: boolean;
   /** 模型没按格式回的时候，把原文带出来，不假装解析成功 */
   raw?: string;
   usage?: { promptTokens: number; completionTokens: number };
@@ -343,22 +342,14 @@ export async function testConnection(ai?: AiConfig): Promise<{ ok: true; model: 
   return { ok: true, model: r.model, ms: Date.now() - t0, endpoint: aiEndpoint((ai ?? config.ai).baseUrl) };
 }
 
-// ---------- 缓存 ----------
-
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const cache = new Map<string, { at: number; value: AiAnalysis }>();
-
-export function analyze(snapshot: AiSnapshot, opts: { refresh?: boolean } = {}): Promise<AiAnalysis> {
-  const key = `${snapshot.contract}:${snapshot.interval}`;
-  const hit = cache.get(key);
-  if (!opts.refresh && hit && Date.now() - hit.at < CACHE_TTL_MS) {
-    return Promise.resolve({ ...hit.value, cached: true });
-  }
-
-  return runAnalysis(snapshot).then((value) => {
-    cache.set(key, { at: Date.now(), value });
-    return value;
-  });
+/**
+ * 每点一次就真问一次模型。
+ * 以前这里按「币种:周期」缓存十分钟，refresh 为假就直接回缓存。
+ * 结果人刷新页面点「开始分析」，拿到的是上一次的结论，界面上还写着同一个时间，
+ * 看着就像点了没反应。多花一次调用，比给出一个旧结论强。
+ */
+export function analyze(snapshot: AiSnapshot): Promise<AiAnalysis> {
+  return runAnalysis(snapshot);
 }
 
 async function runAnalysis(s: AiSnapshot): Promise<AiAnalysis> {
@@ -385,7 +376,6 @@ async function runAnalysis(s: AiSnapshot): Promise<AiAnalysis> {
       riskNote: '',
       model: res.model,
       at,
-      cached: false,
       raw: res.content.slice(0, 2000),
       usage: res.usage,
     };
@@ -401,7 +391,6 @@ async function runAnalysis(s: AiSnapshot): Promise<AiAnalysis> {
     riskNote: String(obj.risk_note ?? obj.riskNote ?? '').trim(),
     model: res.model,
     at,
-    cached: false,
     usage: res.usage,
   };
 }

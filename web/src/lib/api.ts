@@ -153,7 +153,6 @@ export interface AiAnalysis {
   riskNote: string;
   model: string;
   at: number;
-  cached: boolean;
   raw?: string;
   usage?: { promptTokens: number; completionTokens: number };
 }
