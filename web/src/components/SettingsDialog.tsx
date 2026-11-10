@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
+import { detectBrowserIp } from '../lib/ip.ts';
 
 interface Props {
   config: AppConfig | null;
@@ -58,7 +59,10 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const [aiKey, setAiKey] = useState('');
   const [clearAiKey, setClearAiKey] = useState(false);
   const [testing, setTesting] = useState(false);
+  /** 当前 IP：浏览器自己问出来的，含系统代理和 VPN */
   const [ip, setIp] = useState<IpInfo | null>(null);
+  /** 服务端直连出去的地址，和上面那个常常不是一个 */
+  const [serverIp, setServerIp] = useState<IpInfo | null>(null);
   const [ipBusy, setIpBusy] = useState(false);
 
   const currentEnv = config?.env ?? 'testnet';
@@ -106,20 +110,21 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   }
 
   /**
-   * 本机出口 IP。Gate 的密钥按 IP 白名单时，填的就是它。
-   * 服务端去问，浏览器直连那几个查询接口会被跨域挡住。
+   * 两路一起问：
+   *   1. 浏览器自己问 —— 走系统代理和 VPN，这才是「当前 IP」；
+   *   2. 服务端 /api/ip —— Node 直连出去的地址，Gate 的 API 请求从那里发出。
+   * 两者不一样时把服务端那个也写出来，白名单才不会填错。
    */
   const loadIp = useCallback(async (fresh: boolean): Promise<IpInfo> => {
     setIpBusy(true);
     try {
-      // no-store：出口 IP 变过之后，浏览器缓存里的旧值会让人以为「没重新检测」
-      const info = await jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' });
-      setIp(info);
-      return info;
-    } catch (e) {
-      const bad: IpInfo = { ok: false, ip: '', at: Date.now(), error: (e as Error).message };
-      setIp(bad);
-      return bad;
+      const [browser, server] = await Promise.all([
+        detectBrowserIp(),
+        jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' }).catch(() => null),
+      ]);
+      setIp(browser);
+      setServerIp(server);
+      return browser;
     } finally {
       setIpBusy(false);
     }
@@ -248,7 +253,7 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         {env === 'live' && (
           <div className="field">
             <label className="ip-label">
-              <span>当前出口 IP</span>
+              <span>当前 IP</span>
               <button
                 className="link-btn"
                 onClick={() => {
@@ -294,7 +299,13 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
               )}
             </div>
             <div className="hint">
-              这是本机出网地址，Gate 那边看到的就是它。API 密钥设了 IP 白名单，把这一行填进去。
+              浏览器当前的地址，走代理或 VPN 时就是代理那边的。
+              {serverIp?.ok && (!ip?.ok || serverIp.ip !== ip.ip) && (
+                <>
+                  {' '}服务端直连出口是 <code>{serverIp.ip}</code>，Gate 的 API 请求从那里发出 ——
+                  白名单要填这一个。
+                </>
+              )}
             </div>
           </div>
         )}
