@@ -161,6 +161,19 @@ export interface CloseResult {
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
 
+/** 本机出口 IP。Gate 的 API 密钥按 IP 白名单时填这个地址 */
+export interface IpInfo {
+  ok: boolean;
+  ip: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  source?: string;
+  at: number;
+  error?: string;
+}
+
 /** 账户这一坨一次取回来的快照，四个字段来自同一时刻 */
 export interface PrivateState {
   account: Account;

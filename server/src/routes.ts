@@ -454,6 +454,89 @@ router.post('/ai/models', wrap(async (req, res) => {
   res.json({ models, current: config.ai.model, endpoint: aiEndpoint(override.baseUrl) });
 }));
 
+// ---------- 本机出口 IP ----------
+
+interface IpInfo {
+  ok: boolean;
+  ip: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  /** 是哪个查询接口答的，排查时用 */
+  source?: string;
+  at: number;
+  error?: string;
+}
+
+/**
+ * 本机出网 IP。Gate 的 API 密钥按 IP 白名单时，填的就是这个地址。
+ *
+ * 由服务端去问，不让浏览器直连：那几个查询接口都不带跨域头。
+ * 三家依次兜底，一家挂了换下一家；全挂就如实说，不编一个地址出来。
+ */
+const IP_SOURCES: { url: string; host: string; pick: (j: Record<string, unknown>) => Omit<IpInfo, 'ok' | 'at' | 'source'> }[] = [
+  {
+    url: 'https://ipinfo.io/json',
+    host: 'ipinfo.io',
+    pick: (j) => ({
+      ip: String(j.ip ?? ''),
+      country: j.country ? String(j.country) : undefined,
+      region: j.region ? String(j.region) : undefined,
+      city: j.city ? String(j.city) : undefined,
+      isp: j.org ? String(j.org) : undefined,
+    }),
+  },
+  {
+    url: 'https://api.ip.sb/geoip',
+    host: 'api.ip.sb',
+    pick: (j) => ({
+      ip: String(j.ip ?? ''),
+      country: j.country ? String(j.country) : undefined,
+      region: j.region ? String(j.region) : undefined,
+      city: j.city ? String(j.city) : undefined,
+      isp: j.organization ? String(j.organization) : undefined,
+    }),
+  },
+  {
+    url: 'https://api.ipify.org?format=json',
+    host: 'ipify.org',
+    pick: (j) => ({ ip: String(j.ip ?? '') }),
+  },
+];
+
+/** IPv4 或 IPv6，够用就行；挡掉接口回一句 HTML 被塞进 ip 字段的情况 */
+const looksLikeIp = (v: string): boolean => /^[0-9a-fA-F:.]{3,45}$/.test(v) && (v.includes('.') || v.includes(':'));
+
+async function detectIp(): Promise<IpInfo> {
+  for (const src of IP_SOURCES) {
+    try {
+      const r = await fetch(src.url, {
+        headers: { accept: 'application/json', 'user-agent': 'xf-rine' },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!r.ok) continue;
+      const got = src.pick(await r.json() as Record<string, unknown>);
+      if (looksLikeIp(got.ip)) return { ok: true, ...got, source: src.host, at: Date.now() };
+    } catch { /* 这家不通就换下一家 */ }
+  }
+  return { ok: false, ip: '', at: Date.now(), error: '几个查询接口都没答上来（可能没网，或者被代理拦了）' };
+}
+
+/** 同一分钟内重复点就是看同一个结果，别每次都去问三家 */
+let ipCache: { at: number; info: IpInfo } | null = null;
+
+router.get('/ip', wrap(async (req, res) => {
+  const fresh = String(req.query.fresh ?? '') === '1';
+  if (!fresh && ipCache && Date.now() - ipCache.at < 60_000) {
+    res.json(ipCache.info);
+    return;
+  }
+  const info = await detectIp();
+  ipCache = { at: Date.now(), info };
+  res.json(info);
+}));
+
 router.get('/diag', wrap(async (_req, res) => {
   const out: Record<string, unknown> = {
     env: config.env,

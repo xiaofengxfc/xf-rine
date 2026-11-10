@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { jget, jsend, type AppConfig } from '../lib/api.ts';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 
 interface Props {
   config: AppConfig | null;
@@ -58,6 +58,8 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const [aiKey, setAiKey] = useState('');
   const [clearAiKey, setClearAiKey] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [ip, setIp] = useState<IpInfo | null>(null);
+  const [ipBusy, setIpBusy] = useState(false);
 
   const currentEnv = config?.env ?? 'testnet';
 
@@ -101,6 +103,49 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     } finally { setBusy(false); }
+  }
+
+  /**
+   * 本机出口 IP。Gate 的密钥按 IP 白名单时，填的就是它。
+   * 服务端去问，浏览器直连那几个查询接口会被跨域挡住。
+   */
+  const loadIp = useCallback(async (fresh: boolean) => {
+    setIpBusy(true);
+    try {
+      setIp(await jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : '')));
+    } catch (e) {
+      setIp({ ok: false, ip: '', at: Date.now(), error: (e as Error).message });
+    } finally {
+      setIpBusy(false);
+    }
+  }, []);
+
+  // 打开实盘这一页就顺手识别一次
+  useEffect(() => {
+    if (tab !== 'live' || ip || ipBusy) return;
+    void loadIp(false);
+  }, [tab, ip, ipBusy, loadIp]);
+
+  async function copyIp() {
+    if (!ip?.ok || !ip.ip) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(ip.ip);
+      } else {
+        // 走局域网地址打开时不是安全上下文，clipboard 用不了，退回老办法
+        const ta = document.createElement('textarea');
+        ta.value = ip.ip;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      onToast('ok', 'IP 已复制', ip.ip);
+    } catch {
+      onToast('err', '复制失败', '手动选中那个地址复制');
+    }
   }
 
   /** 切环境是个独立动作：它决定钱从哪个账户出，不该夹在保存里 */
@@ -194,6 +239,47 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
             <>这是<b>另一套密钥</b>，存在 <code>{info.keyVar}</code> 那一格。保存它<b>不会</b>把程序切到这个环境。</>
           )}
         </div>
+
+        {env === 'live' && (
+          <div className="ip-card">
+            <div className="ip-head">
+              <span>当前出口 IP</span>
+              <button
+                className="x"
+                title="重新识别（换了网络或代理之后点这里）"
+                aria-label="重新识别 IP"
+                disabled={ipBusy}
+                onClick={() => void loadIp(true)}
+              >
+                {ipBusy ? '…' : '↻'}
+              </button>
+            </div>
+            {ip?.ok ? (
+              <>
+                <div className="ip-value">
+                  <span className={ip.ip.length > 18 ? 'long' : ''}>{ip.ip}</span>
+                  <button className="ip-copy" onClick={copyIp}>复制</button>
+                </div>
+                <div className="ip-meta">
+                  {[
+                    ip.country,
+                    ip.region,
+                    ip.city,
+                    // 运营商名字前面的 AS 号（AS9808 …）对填白名单没用，去掉
+                    ip.isp ? ip.isp.replace(/^AS\d+\s+/i, '') : '',
+                  ].filter(Boolean).join(' · ')}
+                </div>
+              </>
+            ) : (
+              <div className="ip-value dim">{ipBusy ? '识别中…' : ip ? '没识别到' : '识别中…'}</div>
+            )}
+            {ip && !ip.ok && <div className="ip-meta down">{ip.error}</div>}
+            <div className="ip-note">
+              这是本机出网地址，Gate 那边看到的就是它。
+              API 密钥如果设了 IP 白名单，把这一行填进去。
+            </div>
+          </div>
+        )}
 
         <div className="field">
           <label>密钥状态</label>
