@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
+import { protectionPrices, planWrongSide, type ProtectMode } from '../lib/protection.ts';
 
 interface Props {
   contract: ContractInfo | null;
@@ -26,7 +27,7 @@ export default function OrderTicket({
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
   const [sizeStr, setSizeStr] = useState('');
-  const [protect, setProtect] = useState<'none' | 'manual'>('none');
+  const [protect, setProtect] = useState<ProtectMode>('none');
   const [stopStr, setStopStr] = useState('');
   const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
@@ -44,12 +45,13 @@ export default function OrderTicket({
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
   const sizeMax = Math.floor(contract?.sizeMax ?? 0);
 
-  // 从「自动档位」套用过来：填方向 + 限价
+  // 从「自动档位」套用过来：填方向 + 限价，保护直接用这套方案的价
   useEffect(() => {
     if (!applied) return;
     setSide(applied.bracket.direction);
     setPriceMode('limit');
     setLimitStr(String(applied.bracket.entry));
+    setProtect('plan');
     setPending(false);
   }, [applied]);
 
@@ -81,6 +83,12 @@ export default function OrderTicket({
   // 方案是分方向的，看多的方案不能填进卖出的单里
   const planBracket = bracket && bracket.direction === side ? bracket : null;
 
+  // 三种保护来源最终都落成这两个价：留 0 表示这一边不挂
+  const { stop: effStop, target: effTarget } = protectionPrices(protect, planBracket, stopNum, targetNum);
+  const wantProtect = effStop > 0 || effTarget > 0;
+  // 方案价是按方案入场价算的，现价可能已经跑过去了，那一侧就挂不上
+  const planWrong = planWrongSide(side, planBracket, priceUsed);
+
   const liqEstimate = useMemo(() => {
     if (!priceUsed || leverage <= 0) return 0;
     const move = 1 / leverage;
@@ -94,27 +102,27 @@ export default function OrderTicket({
     return Math.max(0, Math.floor((avail * (riskPct / 100)) / perContract));
   }, [bracket, contract, avail, riskPct, priceUsed]);
 
-  const blocked = !contract
-    ? '没有选中合约'
-    : contract.tradable === false
-      ? '模拟盘没有这个合约'
-      : !keysConfigured
-        ? '未配置 API 密钥'
-        : !liveTrading
-          ? '服务端 LIVE_TRADING=false，下单被禁用'
-          : !armed
-            ? '先点右上角解锁交易'
-            : size < sizeMin
-              ? `张数至少 ${sizeMin}`
-              : sizeMax > 0 && size > sizeMax
-                ? `张数最多 ${sizeMax}`
-                : priceMode === 'limit' && !(priceUsed > 0)
-                  ? '限价必须大于 0'
-                  : protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= priceUsed : stopNum <= priceUsed)
-                    ? '止损价方向不对'
-                    : protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= priceUsed : targetNum >= priceUsed)
-                      ? '止盈价方向不对'
-                      : '';
+  // 拦下的第一条原因就写在按钮上。保护方式多了以后三元表达式套不下了，改成按顺序返回
+  const blocked = (() => {
+    if (!contract) return '没有选中合约';
+    if (contract.tradable === false) return '模拟盘没有这个合约';
+    if (!keysConfigured) return '未配置 API 密钥';
+    if (!liveTrading) return '服务端 LIVE_TRADING=false，下单被禁用';
+    if (!armed) return '先点右上角解锁交易';
+    if (size < sizeMin) return `张数至少 ${sizeMin}`;
+    if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
+    if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
+    if (protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= priceUsed : stopNum <= priceUsed)) {
+      return '止损价方向不对';
+    }
+    if (protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= priceUsed : targetNum >= priceUsed)) {
+      return '止盈价方向不对';
+    }
+    if (protect === 'plan' && !planBracket) return '这个方向还没有方案价';
+    if (protect === 'plan' && planWrong.stop) return '方案止损已跑到现价另一边，改手动设';
+    if (protect === 'plan' && planWrong.target) return '方案止盈已跑到现价另一边，改手动设';
+    return '';
+  })();
 
   async function submit() {
     if (!contract || !token) return;
@@ -126,7 +134,7 @@ export default function OrderTicket({
       onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
     }
     try {
-      const wantProtect = protect === 'manual' && (stopNum > 0 || targetNum > 0);
+      // 手动设和用方案都归到 effStop/effTarget 上，不设就是 0/0（不挂保护）
       type Attach =
         | { status: 'attached'; created: { kind: string }[] }
         | { status: 'pending' }
@@ -140,8 +148,8 @@ export default function OrderTicket({
           side,
           price: priceMode === 'limit' ? priceUsed : 0,
           tif: priceMode === 'market' ? 'ioc' : 'gtc',
-          stop: wantProtect ? stopNum : 0,
-          target: wantProtect ? targetNum : 0,
+          stop: wantProtect ? effStop : 0,
+          target: wantProtect ? effTarget : 0,
         },
         token,
       );
@@ -154,7 +162,7 @@ export default function OrderTicket({
         + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
       );
       if (b?.status === 'failed') onToast('err', '保护单没挂上', b.error);
-      if (b?.status === 'pending') onQueueProtect({ contract: contract.name, direction: side, stop: stopNum, target: targetNum });
+      if (b?.status === 'pending') onQueueProtect({ contract: contract.name, direction: side, stop: effStop, target: effTarget });
       setPending(false);
       setSizeStr('');
       onRefresh();
@@ -244,9 +252,37 @@ export default function OrderTicket({
           <label>止盈止损（可以不设）</label>
           <div className="seg" style={{ width: '100%' }}>
             <button className={protect === 'none' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('none'); setPending(false); }}>不设</button>
+            <button
+              className={protect === 'plan' ? 'on' : ''}
+              style={{ flex: 1 }}
+              title={planBracket ? '成交后按下面这套方案价挂止损止盈' : '这个方向还没算出方案价'}
+              onClick={() => { setProtect('plan'); setPending(false); }}
+            >
+              方案价
+            </button>
             <button className={protect === 'manual' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('manual'); setPending(false); }}>手动设</button>
           </div>
         </div>
+
+        {protect === 'plan' && (
+          planBracket ? (
+            <>
+              <div className="edit-note" style={{ marginBottom: planBracket.acceptable ? 8 : 4 }}>
+                用下面「方案止损 / 方案止盈」那两个价，盈亏比 {planBracket.riskReward.toFixed(2)}。
+                成交之后才挂得上；限价单还没成交就先记着，等它成交页面自动补挂。
+              </div>
+              {!planBracket.acceptable && (
+                <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
+                  这套方案盈亏比低于 {planBracket.minRR}，这一侧的结构不支持，最好别开。
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="warn-box" style={{ marginBottom: 8 }}>
+              这个方向还没算出方案价（数据太少或者行情正在刷新）。换成「不设」，或者用「手动设」自己填。
+            </div>
+          )
+        )}
 
         {protect === 'manual' && (
           <>
@@ -296,12 +332,18 @@ export default function OrderTicket({
             <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
           )}
           <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
-          {bracket && (
+          {planBracket && (
             <>
               <dt>方案止损</dt>
-              <dd>{fmtPrice(bracket.stop, priceRound)} <span className="dim">({fmtPct(-bracket.stopDistancePct, 2)})</span></dd>
+              <dd className={protect === 'plan' ? '' : 'dim'}>
+                {fmtPrice(planBracket.stop, priceRound)} <span className="dim">({fmtPct(-planBracket.stopDistancePct, 2)})</span>
+                {protect === 'plan' && <span className="dim"> · 本次用</span>}
+              </dd>
               <dt>方案止盈</dt>
-              <dd>{fmtPrice(bracket.target, priceRound)} <span className="dim">({fmtPct(bracket.targetDistancePct, 2)})</span></dd>
+              <dd className={protect === 'plan' ? '' : 'dim'}>
+                {fmtPrice(planBracket.target, priceRound)} <span className="dim">({fmtPct(planBracket.targetDistancePct, 2)})</span>
+                {protect === 'plan' && <span className="dim"> · 本次用</span>}
+              </dd>
             </>
           )}
         </dl>
@@ -323,12 +365,12 @@ export default function OrderTicket({
               名义 <b>{fmtUsd(notional)}</b> USDT，{leverage}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
               {env === 'testnet' ? '模拟盘，扣的是测试网假钱。' : '这是真实资金。'}
             </p>
-            {protect === 'manual' && (stopNum > 0 || targetNum > 0) && (
+            {wantProtect && (
               <p className="dim" style={{ fontSize: 11 }}>
-                成交后挂保护：
-                {stopNum > 0 ? `止损 ${fmtPrice(stopNum, priceRound)}` : ''}
-                {stopNum > 0 && targetNum > 0 ? ' / ' : ''}
-                {targetNum > 0 ? `止盈 ${fmtPrice(targetNum, priceRound)}` : ''}
+                成交后挂保护（{protect === 'plan' ? '方案价' : '手动设'}）：
+                {effStop > 0 ? `止损 ${fmtPrice(effStop, priceRound)}` : ''}
+                {effStop > 0 && effTarget > 0 ? ' / ' : ''}
+                {effTarget > 0 ? `止盈 ${fmtPrice(effTarget, priceRound)}` : ''}
               </p>
             )}
             {marginShort > 0 && (
