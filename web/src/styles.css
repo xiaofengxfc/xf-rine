@@ -1046,7 +1046,10 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   /* ---- 图表：固定高度，别把整屏占满 ---- */
   .center {
     flex: none;
+    /* vh 在手机浏览器里是「地址栏收起来时的高度」，收起展开会跳一下；
+       认得 dvh 的用 dvh，认不得的退回 vh */
     height: min(58vh, 480px);
+    height: min(58dvh, 480px);
     min-height: 300px;
   }
   .levels-strip { padding: 6px 10px 8px; }
@@ -1096,6 +1099,46 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .modal-bg { padding: 10px; }
   .modal { max-width: 100%; max-height: 92dvh; }
   .ip-row .input { font-size: 12px; }
+}
+
+/**
+ * 手机端第一屏：填服务器地址。
+ * 这一屏是 App 的入口，没有它就只能看一屏空图表，
+ * 所以排版按「一个表单」来做，不套交易台的网格。
+ */
+.gate {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(24px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
+  background: radial-gradient(120% 90% at 50% 0%, var(--bg-2) 0%, var(--bg-1) 55%, var(--bg-0) 100%);
+}
+.gate-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 20px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-1);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.gate-card h1 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.gate-card .hint { margin: 0 0 16px; line-height: 1.65; }
+.gate-err {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 95, 109, 0.35);
+  background: var(--down-dim);
+  color: #ffb3b8;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* 仓没了还挂着的触发单：说清楚它现在没有主人 */

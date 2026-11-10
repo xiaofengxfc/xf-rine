@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 import { detectBrowserIp } from '../lib/ip.ts';
+import { isNative, apiBase, clearTarget } from '../lib/endpoint.ts';
 
 interface Props {
   config: AppConfig | null;
@@ -66,6 +67,9 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const [ipBusy, setIpBusy] = useState(false);
 
   const currentEnv = config?.env ?? 'testnet';
+  /** 手机要填的那两行。口令只有在本机打开页面时才带回来 */
+  const native = isNative();
+  const lanUrl = config?.remote?.urls[0] ?? '';
 
   /** 只保存这个环境自己那一格的密钥，绝不碰 GATE_ENV */
   async function saveEnv(env: 'testnet' | 'live') {
@@ -118,13 +122,16 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   const loadIp = useCallback(async (fresh: boolean): Promise<IpInfo> => {
     setIpBusy(true);
     try {
+      // 手机上「浏览器 IP」是手机自己的，拿它填白名单等于把交易挡在门外，
+      // 所以手机端只问服务端那一条 —— Gate 看到的是电脑的出口地址。
       const [browser, server] = await Promise.all([
-        detectBrowserIp(),
+        isNative() ? Promise.resolve(null) : detectBrowserIp(),
         jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' }).catch(() => null),
       ]);
       setIp(browser);
       setServerIp(server);
-      return browser;
+      // 调用方拿这个去弹提示，说清楚「抄的是哪一个」
+      return (browser ?? server ?? { ok: false, ip: '', at: Date.now(), error: '没查到' }) as IpInfo;
     } finally {
       setIpBusy(false);
     }
@@ -136,15 +143,15 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
     void loadIp(false);
   }, [tab, loadIp]);
 
-  async function copyIp() {
-    if (!ip?.ok || !ip.ip) return;
+  async function copyText(text: string, okTitle: string) {
+    if (!text) return;
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(ip.ip);
+      if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
       } else {
         // 走局域网地址打开时不是安全上下文，clipboard 用不了，退回老办法
         const ta = document.createElement('textarea');
-        ta.value = ip.ip;
+        ta.value = text;
         ta.style.position = 'fixed';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
@@ -152,10 +159,16 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         document.execCommand('copy');
         ta.remove();
       }
-      onToast('ok', 'IP 已复制', ip.ip);
+      onToast('ok', okTitle, text);
     } catch {
-      onToast('err', '复制失败', '手动选中那个地址复制');
+      onToast('err', '复制失败', '手动选中那串字复制');
     }
+  }
+
+  async function copyIp() {
+    const src = native ? serverIp : ip;
+    if (!src?.ok || !src.ip) return;
+    await copyText(src.ip, 'IP 已复制');
   }
 
   /** 切环境是个独立动作：它决定钱从哪个账户出，不该夹在保存里 */
@@ -273,33 +286,35 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
                 className="input"
                 readOnly
                 spellCheck={false}
-                value={ip?.ok ? ip.ip : ''}
+                value={(native ? serverIp : ip)?.ok ? (native ? serverIp : ip)?.ip ?? '' : ''}
                 placeholder={ipBusy ? '检测中…' : '没检测到'}
                 onFocus={(e) => e.currentTarget.select()}
               />
-              <button className="btn ghost ip-copy" onClick={copyIp} disabled={!ip?.ok}>复制</button>
+              <button className="btn ghost ip-copy" onClick={copyIp} disabled={!(native ? serverIp : ip)?.ok}>复制</button>
             </div>
             <div className="hint mono ip-meta">
               <span className="ip-geo">
-                {ip?.ok
+                {(native ? serverIp : ip)?.ok
                   ? [
-                      ip.country,
-                      ip.region,
-                      ip.city,
+                      (native ? serverIp : ip)?.country,
+                      (native ? serverIp : ip)?.region,
+                      (native ? serverIp : ip)?.city,
                       // 运营商名字前面的 AS 号（AS9808 …）对填白名单没用，去掉
-                      ip.isp ? ip.isp.replace(/^AS\d+\s+/i, '') : '',
+                      (native ? serverIp : ip)?.isp?.replace(/^AS\d+\s+/i, '') ?? '',
                     ].filter(Boolean).join(' · ')
-                  : (ip?.error ?? '')}
+                  : ((native ? serverIp : ip)?.error ?? '')}
               </span>
               {/* 检测时间：点了「重新检测」有没有真的重查，看这个 */}
-              {ip?.ok && (
+              {(native ? serverIp : ip)?.ok && (
                 <span className="ip-time">
-                  检测于 {new Date(ip.at).toLocaleTimeString('zh-CN', { hour12: false })}
+                  检测于 {new Date((native ? serverIp : ip)!.at).toLocaleTimeString('zh-CN', { hour12: false })}
                 </span>
               )}
             </div>
             <div className="hint">
-              浏览器当前的地址，走代理或 VPN 时就是代理那边的。
+              {native
+                ? '服务端就在这台手机上，所以这也是手机的网络出口地址 —— 白名单填它。换 Wi-Fi 或用流量时这个地址会变。'
+                : '浏览器当前的地址，走代理或 VPN 时就是代理那边的。'}
               {serverIp?.proxy?.on && (
                 <>
                   {' '}服务端查 IP 也走系统代理（<code>{serverIp.proxy.url}</code>）。
@@ -357,9 +372,17 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         )}
 
         <div className="hint" style={{ marginBottom: 12 }}>
-          密钥只写进 <code>server/.env</code>，只有服务端读；页面拿到的永远只有尾号四位。
+          密钥只写进服务端的 <code>{config?.envPath ?? 'server/.env'}</code>，只有服务端读；
+          页面拿到的永远只有尾号四位。
           到 Gate「API 管理」建密钥时勾选 <b>合约交易 · 读写</b> 就够，<b>不要开提现权限</b>。
         </div>
+
+        {native && (
+          <div className="hint" style={{ marginBottom: 12 }}>
+            手机上整套程序都在本地跑，密钥也存在这台手机上（<code>{config?.envPath ?? 'App 私有目录'}</code>），
+            和电脑那份互不相干。交易所如果开了 IP 白名单，要填的是<b>这台手机</b>的出口地址 —— 见实盘页那一格。
+          </div>
+        )}
 
         <div className="row2">
           {isCurrent ? (
@@ -485,6 +508,76 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
               <button className="btn accent" style={{ width: '100%' }} onClick={saveAi} disabled={busy}>
                 {busy ? '处理中…' : '保存 AI 配置'}
               </button>
+
+              <div className="field" style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+                <label>{native ? '数据目录' : '手机访问'}</label>
+                {native ? (
+                  <div className="hint">
+                    密钥和设置存在 <code>{config?.envPath ?? 'App 私有目录'}</code>。
+                    这是 App 自己的目录，卸载 App 才会跟着没；电脑上那一份是另一套，两个互不覆盖。
+                  </div>
+                ) : config?.remote?.enabled ? (
+                  <>
+                    <div className="ip-row">
+                      <input
+                        className="input mono"
+                        readOnly
+                        spellCheck={false}
+                        value={lanUrl}
+                        placeholder="没找到局域网地址（电脑没连 Wi-Fi？）"
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                      <button className="btn ghost ip-copy" onClick={() => void copyText(lanUrl, '地址已复制')} disabled={!lanUrl}>
+                        复制
+                      </button>
+                    </div>
+                    <div className="ip-row" style={{ marginTop: 8 }}>
+                      <input
+                        className="input mono"
+                        readOnly
+                        spellCheck={false}
+                        value={config.remote.token ?? ''}
+                        placeholder="没设口令"
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                      <button
+                        className="btn ghost ip-copy"
+                        onClick={() => void copyText(config.remote?.token ?? '', '口令已复制')}
+                        disabled={!config.remote.token}
+                      >
+                        复制
+                      </button>
+                    </div>
+                    <div className="hint" style={{ marginTop: 6 }}>
+                      手机 App 里填上面两行，同一个 Wi-Fi 才能连上。口令是这一台服务端的钥匙，
+                      谁拿到谁就能下单，别随手发出去。
+                      第一次启动时 Windows 会弹防火墙，要选「允许专用网络访问」，否则手机连不进来。
+                    </div>
+                  </>
+                ) : (
+                  <div className="hint">
+                    服务端现在只听本机（<code>HOST=127.0.0.1</code>），手机连不进来。
+                    桌面安装版第一次启动会自动打开这一项；
+                    手动跑源码的话，在 <code>{config?.envPath ?? 'server/.env'}</code> 里加两行
+                    {' '}<code>HOST=0.0.0.0</code> 和 <code>REMOTE_TOKEN=一串自己定的口令</code>，
+                    重启服务后回来这里就有地址了。
+                  </div>
+                )}
+              </div>
+
+              {native && (
+                <div className="field">
+                  <label>当前连的服务端</label>
+                  <div className="hint mono">{apiBase() || '（同源）'}</div>
+                  <button
+                    className="btn ghost"
+                    style={{ width: '100%', marginTop: 6 }}
+                    onClick={() => { clearTarget(); location.reload(); }}
+                  >
+                    换一台电脑
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>

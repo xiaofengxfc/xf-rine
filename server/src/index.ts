@@ -2,28 +2,98 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { config, keyHint, restBaseUrl, envLabel } from './config.js';
+import { resolve } from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
+import { config, keyHint, restBaseUrl, envLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
 import { router } from './routes.js';
 import { MarketHub } from './gate/market.js';
 import { refreshProxy, proxyState } from './net.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '256kb' }));
+
+/**
+ * 手机端（以及任何装在 WebView 里的页面）访问时的跨域。
+ *
+ * 页面由 App 从 http://localhost 读出来，真正的服务端在电脑上，
+ * 两者的源不一样 —— 少了这几个头，浏览器连请求都不发。
+ * 接口不带 cookie，靠的是下面那道口令，所以 Allow-Origin 用 * 就够了。
+ */
+app.use('/api', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, x-arm-token, x-remote-token');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
+const isLoopbackAddr = (a: string): boolean => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+
+/** 定长比较，别让「一位一位试」从响应时间里读出答案 */
+function tokenOk(given: string): boolean {
+  const want = config.remoteToken;
+  if (!want) return true;
+  if (!given || given.length !== want.length) return false;
+  return timingSafeEqual(Buffer.from(given), Buffer.from(want));
+}
+
+/**
+ * 口令是不是连本机也拦。
+ *
+ * 电脑上是「只听回环」的，从别的机器来的才要口令；本机浏览器和桌面窗口不受影响。
+ * 手机 App 不是这个情况：服务端就绑在 127.0.0.1:8787，而 Android 上的回环是整个设备共用的，
+ * 同一台手机里别的应用也能摸到这个端口 —— 那后面是下单和密钥。
+ * 所以手机上要求「连本机也带口令」，口令每次启动随机生成，只给 App 自己的页面。
+ */
+const requireToken = process.env.XFRINE_REQUIRE_TOKEN === '1';
+
+/**
+ * 手机访问的口令。
+ *
+ * 绑在 0.0.0.0 上之后，同一个 Wi-Fi 里的任何设备都能连到这个端口，
+ * 而端口后面是下单、平仓、撤单 —— 没有口令等于把仓位交给整栋楼。
+ *
+ * 平时只拦「从别的机器来的」请求：桌面窗口和本机浏览器走的是回环地址，不受影响。
+ * 手机上连本机也要拦，那种情形由上面的 requireToken 打开。
+ */
+app.use('/api', (req, res, next) => {
+  if (!requireToken && (!lanEnabled() || isLoopbackAddr(req.socket.remoteAddress ?? ''))) {
+    next();
+    return;
+  }
+  const given = String(req.header('x-remote-token') ?? req.query.token ?? '');
+  if (tokenOk(given)) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: 'REMOTE_TOKEN_REQUIRED', detail: '这台服务端只接受带访问口令的连接，口令在电脑的设置页里' });
+});
 
 app.use('/api', router);
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// 生产模式：直接托管已打包的前端
-const webDist = resolve(here, '../../web/dist');
-if (existsSync(webDist)) {
+// 生产模式：直接托管已打包的前端。
+// 桌面端把 web/dist 放在 resources/web-dist，用 WEB_DIST 指过来；
+// 开发时还是往上两级找 web/dist。
+/** 手机端只有接口：页面由 App 自己从内置资源里发，不需要（也不该）在这里再托管一份 */
+const apiOnly = process.env.XFRINE_API_ONLY === '1';
+
+const webDist = (process.env.WEB_DIST ?? '').trim() || resolve(moduleDir(), '../../web/dist');
+if (apiOnly) {
+  // 什么都不做：只提供 /api 和 /ws
+} else if (existsSync(webDist)) {
   app.use(express.static(webDist));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
     res.sendFile(resolve(webDist, 'index.html'));
   });
+} else {
+  // 少了前端产物的话页面会是一片空白，什么线索都没有。
+  console.error('[fatal] 找不到前端产物：' + webDist);
 }
 
 // 出网跟着系统代理走。Node 自己不读系统代理，这里替它读，并每分钟重新确认一次 ——
@@ -34,7 +104,21 @@ void refreshProxy(true).then((p) => {
 setInterval(() => { void refreshProxy(); }, 60_000).unref();
 
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+
+// WebSocket 也过同一道口令。浏览器升级请求带不了自定义头，所以口令走查询参数。
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  verifyClient: (info, cb) => {
+    if (!requireToken && (!lanEnabled() || isLoopbackAddr(info.req.socket.remoteAddress ?? ''))) return cb(true);
+    let token = '';
+    try {
+      token = new URL(info.req.url ?? '/', 'http://localhost').searchParams.get('token') ?? '';
+    } catch { /* 地址畸形就当没带口令 */ }
+    if (tokenOk(token)) return cb(true);
+    cb(false, 401, 'Unauthorized');
+  },
+});
 const hub = new MarketHub(wss);
 hub.connect();
 
@@ -43,19 +127,68 @@ setInterval(() => {
   if (!s.alive) console.warn('[ws] gate 掉线，正在重连…');
 }, 30_000).unref();
 
-server.listen(config.port, '127.0.0.1', () => {
+/**
+ * 绑在 0.0.0.0 上却没有口令，等于把交易接口挂到局域网上裸奔。
+ * 这种配置直接拒绝启动，比启动之后让人以为「只是手机上连不上」强。
+ */
+if (lanEnabled() && !config.remoteToken) {
+  console.error('  [fatal] HOST=' + config.host + ' 是给手机开的门，必须同时设 REMOTE_TOKEN，否则拒绝启动。');
+  process.exit(1);
+}
+
+// 手机 App 里要求「连本机也带口令」，那就必须真有口令，否则这道门形同虚设
+if (requireToken && !config.remoteToken) {
+  console.error('  [fatal] XFRINE_REQUIRE_TOKEN=1 但没有 REMOTE_TOKEN，拒绝启动。');
+  process.exit(1);
+}
+
+// 端口被占（比如另一个实例、或者开发时的服务还开着）时说清楚，别只抛一句 EADDRINUSE。
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error('  [fatal] 端口 ' + config.port + ' 已经被占用，换一个 PORT 再启动。');
+  } else {
+    console.error('  [fatal] 服务端启动失败：', err);
+  }
+  process.exit(1);
+});
+
+server.listen(config.port, config.host, () => {
   const k = keyHint();
   console.log('');
   console.log('  巡风日内台  http://127.0.0.1:' + config.port);
   console.log('  环境      ' + envLabel() + '  ' + restBaseUrl());
   console.log('  密钥      ' + (k.configured ? '已配置 ' + k.hint : '未配置（只能看盘，不能下单）'));
   console.log('  下单      ' + (config.liveTrading ? '已开启' + (config.env === 'live' ? ' —— 用的是真钱，谨慎' : '（模拟盘假钱）') : '关闭（只读）'));
+  console.log('  配置      ' + ENV_PATH);
+  if (lanEnabled()) {
+    const urls = lanUrls(config.port);
+    console.log('  手机      ' + (urls.length ? urls.join('  ') : '没找到局域网地址（没连 Wi-Fi？）'));
+    console.log('           口令 ' + (config.remoteToken ? config.remoteToken.slice(0, 2) + '••••' + config.remoteToken.slice(-2) : '未设置'));
+  }
   console.log('');
 });
 
 const bye = () => { hub.close(); server.close(); process.exit(0); };
 process.on('SIGINT', bye);
 process.on('SIGTERM', bye);
+
+/**
+ * 桌面端把服务端当子进程拉起。
+ *
+ * 主进程要是被强杀（任务管理器结束进程、安装程序替换文件、崩溃），
+ * 子进程会活下来占着端口 —— 下一次启动就变成「端口被别的程序占用」，
+ * 用户看到的是一连串莫名其妙的端口号。
+ *
+ * 主进程一死，管道另一端就关了，stdin 收到 EOF，这里跟着退。
+ * 只在桌面端显式要求时开（XFRINE_PARENT_PIPE=1）：从终端跑的时候 stdin 是 tty，
+ * 有些环境里它也是管道，不设这个开关就可能在启动瞬间直接退出。
+ */
+if (process.env.XFRINE_PARENT_PIPE === '1') {
+  process.stdin.on('end', bye);
+  process.stdin.on('close', bye);
+  process.stdin.on('error', bye);
+  process.stdin.resume();
+}
 
 /**
  * 一个漏网的异常不该让整个台子停掉。

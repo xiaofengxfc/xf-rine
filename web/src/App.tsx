@@ -6,6 +6,7 @@ import {
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
+import { wsUrl } from './lib/endpoint.ts';
 import ChartPane from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
 import TopBar from './components/TopBar.tsx';
@@ -127,6 +128,17 @@ export default function App() {
    * 所以先攒在 ref 里，300ms 一次刷进状态 —— 肉眼看是连续的，React 也扛得住。
    */
   const pendingTickerRef = useRef<LiveTicker | null>(null);
+
+  // 安卓返回键（见 lib/native.ts）：先收浮层，没人接手才退出程序。
+  // 手机上没 Esc，这是唯一能「关掉这一层」的顺手动作。
+  useEffect(() => {
+    const onBack = (e: Event) => {
+      if (settingsOpen) { e.preventDefault(); setSettingsOpen(false); return; }
+      if (railOpen) { e.preventDefault(); setRailOpen(false); }
+    };
+    window.addEventListener('xf-back', onBack);
+    return () => window.removeEventListener('xf-back', onBack);
+  }, [settingsOpen, railOpen]);
 
   // 抽屉开着的时候按 Esc 收起来。手机上没键盘，但接外接键盘的平板有。
   useEffect(() => {
@@ -363,8 +375,8 @@ export default function App() {
 
     const connect = () => {
       if (disposed) return;
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      // 地址和口令都由 endpoint 决定：浏览器同源，手机端拼到电脑上
+      const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
 
       ws.onopen = () => {

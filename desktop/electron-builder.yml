@@ -1,0 +1,41 @@
+appId: com.xfrine.terminal
+productName: 巡风
+copyright: 个人自用工具，非投资建议
+
+directories:
+  output: release
+  buildResources: assets
+
+# 服务端已经用 esbuild 打成一个文件，node_modules 不用跟着走
+files:
+  - electron/**
+  - package.json
+
+extraResources:
+  # 前端产物：服务端启动时用 WEB_DIST 指过来
+  - from: ../web/dist
+    to: web-dist
+  - from: out/server.cjs
+    to: server/server.cjs
+
+asar: true
+compression: normal
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.ico
+  # 双击 exe 直接进程序，不弹控制台
+  artifactName: XunFeng-${version}-Setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 巡风
+  # 卸载时别删用户目录里的密钥和设置，重装回来还能接着用
+  deleteAppDataOnUninstall: false

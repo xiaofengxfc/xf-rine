@@ -1,5 +1,8 @@
 import { Router, type Request, type Response } from 'express';
-import { config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint, type GateEnv } from './config.js';
+import {
+  config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint,
+  remoteAccess, ENV_PATH, type GateEnv,
+} from './config.js';
 import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
 import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
@@ -386,7 +389,10 @@ router.get('/ai/snapshot', wrap(async (req, res) => {
 
 // ---------- 配置与体检 ----------
 
-router.get('/config', (_req, res) => {
+router.get('/config', (req, res) => {
+  // 手机端要填的地址和口令。口令只回本机 —— 本机都打不开页面的话，也没有理由知道它。
+  const remote = remoteAccess();
+  const local = /127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(req.socket.remoteAddress ?? '');
   res.json({
     env: config.env,
     envLabel: envLabel(),
@@ -394,6 +400,9 @@ router.get('/config', (_req, res) => {
     keys: keyHint(),
     keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
+    // 密钥文件到底存在哪。桌面端不在 server/.env，页面上要能说对地方
+    envPath: ENV_PATH,
+    remote: { enabled: remote.enabled, urls: remote.urls, token: local ? remote.token : null },
     ai: {
       configured: aiKeyHint().configured,
       baseUrl: config.ai.baseUrl,

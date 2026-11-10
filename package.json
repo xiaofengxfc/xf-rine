@@ -7,7 +7,9 @@
     "dev": "concurrently -n api,web -c cyan,magenta \"pnpm -F server dev\" \"pnpm -F web dev\"",
     "build": "pnpm -F web build",
     "start": "pnpm -F server start",
-    "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck"
+    "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck",
+    "pack:win": "pnpm -F web build && pnpm -F desktop dist",
+    "pack:android": "pnpm -F web build && pnpm -F mobile apk"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

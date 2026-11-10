@@ -1,3 +1,5 @@
+import { apiUrl, authHeaders } from './endpoint.ts';
+
 export class ApiError extends Error {
   label: string;
   status: number;
@@ -20,8 +22,9 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 export function jget<T>(url: string, init?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  return fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
+  // 口令和地址都在这里补：调用方写的一律是 /api/xxx，手机端才会拼到电脑上
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() };
+  return fetch(apiUrl(url), { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
     .then(parse<T>);
 }
 
@@ -33,10 +36,10 @@ export function jsend<T>(
   /** 用来中途取消（AI 分析点「停止」时用） */
   signal?: AbortSignal,
 ): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['x-arm-token'] = token;
-  return fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal }).then(parse<T>);
+  return fetch(apiUrl(url), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal }).then(parse<T>);
 }
 
 // ---------- 类型 ----------
@@ -238,6 +241,10 @@ export interface AppConfig {
   keysByEnv: Record<'testnet' | 'live', { configured: boolean; hint: string }>;
   liveTrading: boolean;
   ai: AiSettings;
+  /** 密钥文件的实际路径。装在桌面上时不在 server/.env，设置页要说对地方 */
+  envPath?: string;
+  /** 手机端要填的地址和口令。口令只在本机打开页面时才有值 */
+  remote?: { enabled: boolean; urls: string[]; token: string | null };
 }
 
 export interface NewsItem {

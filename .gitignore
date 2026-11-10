@@ -10,3 +10,21 @@ web/.env
 data/
 server/data/
 .scratch/
+
+# 打包用的本地工具链（JDK、Android SDK），几百兆，不进版本库
+.toolchain/
+
+# 桌面端：esbuild 打出来的服务端单文件、electron-builder 的产物
+desktop/out/
+desktop/release/
+
+# 手机端：Gradle 的构建目录和本机路径，每台机器不一样
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/keystore.properties
+# 打包时从 node_modules 复制出来的原生插件（见 mobile/tools/prepare-android.mjs）
+mobile/android/plugins/
+*.keystore
+*.jks
