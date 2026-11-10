@@ -527,6 +527,8 @@ async function detectIp(): Promise<IpInfo> {
 let ipCache: { at: number; info: IpInfo } | null = null;
 
 router.get('/ip', wrap(async (req, res) => {
+  // 出口 IP 是个会变的值，任何一层缓存留着都会让人以为「没重新检测」
+  res.set('Cache-Control', 'no-store, max-age=0');
   const fresh = String(req.query.fresh ?? '') === '1';
   if (!fresh && ipCache && Date.now() - ipCache.at < 60_000) {
     res.json(ipCache.info);

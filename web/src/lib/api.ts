@@ -19,8 +19,10 @@ async function parse<T>(res: Response): Promise<T> {
   return body as T;
 }
 
-export function jget<T>(url: string): Promise<T> {
-  return fetch(url, { headers: { Accept: 'application/json' } }).then(parse<T>);
+export function jget<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  return fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
+    .then(parse<T>);
 }
 
 export function jsend<T>(

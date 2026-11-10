@@ -109,12 +109,17 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
    * 本机出口 IP。Gate 的密钥按 IP 白名单时，填的就是它。
    * 服务端去问，浏览器直连那几个查询接口会被跨域挡住。
    */
-  const loadIp = useCallback(async (fresh: boolean) => {
+  const loadIp = useCallback(async (fresh: boolean): Promise<IpInfo> => {
     setIpBusy(true);
     try {
-      setIp(await jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : '')));
+      // no-store：出口 IP 变过之后，浏览器缓存里的旧值会让人以为「没重新检测」
+      const info = await jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' });
+      setIp(info);
+      return info;
     } catch (e) {
-      setIp({ ok: false, ip: '', at: Date.now(), error: (e as Error).message });
+      const bad: IpInfo = { ok: false, ip: '', at: Date.now(), error: (e as Error).message };
+      setIp(bad);
+      return bad;
     } finally {
       setIpBusy(false);
     }
@@ -246,7 +251,12 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
               <span>当前出口 IP</span>
               <button
                 className="link-btn"
-                onClick={() => void loadIp(true)}
+                onClick={() => {
+                  // 手动点的这次一定真的去问，问完把结果说出来 —— 否则 IP 没变就什么反馈都没有
+                  void loadIp(true).then((r) => {
+                    onToast(r.ok ? 'ok' : 'err', r.ok ? '已重新检测' : '检测失败', r.ok ? r.ip : r.error);
+                  });
+                }}
                 disabled={ipBusy}
                 title="换了网络或代理之后点这里"
               >
@@ -264,16 +274,24 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
               />
               <button className="btn ghost ip-copy" onClick={copyIp} disabled={!ip?.ok}>复制</button>
             </div>
-            <div className="hint mono">
-              {ip?.ok
-                ? [
-                    ip.country,
-                    ip.region,
-                    ip.city,
-                    // 运营商名字前面的 AS 号（AS9808 …）对填白名单没用，去掉
-                    ip.isp ? ip.isp.replace(/^AS\d+\s+/i, '') : '',
-                  ].filter(Boolean).join(' · ')
-                : (ip?.error ?? '')}
+            <div className="hint mono ip-meta">
+              <span className="ip-geo">
+                {ip?.ok
+                  ? [
+                      ip.country,
+                      ip.region,
+                      ip.city,
+                      // 运营商名字前面的 AS 号（AS9808 …）对填白名单没用，去掉
+                      ip.isp ? ip.isp.replace(/^AS\d+\s+/i, '') : '',
+                    ].filter(Boolean).join(' · ')
+                  : (ip?.error ?? '')}
+              </span>
+              {/* 检测时间：点了「重新检测」有没有真的重查，看这个 */}
+              {ip?.ok && (
+                <span className="ip-time">
+                  检测于 {new Date(ip.at).toLocaleTimeString('zh-CN', { hour12: false })}
+                </span>
+              )}
             </div>
             <div className="hint">
               这是本机出网地址，Gate 那边看到的就是它。API 密钥设了 IP 白名单，把这一行填进去。
