@@ -16,7 +16,8 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Bar, Bracket, Level, Pattern, Position } from '../lib/api.ts';
+import type { Bar, Bracket, Level, OpenOrder, Pattern, Position } from '../lib/api.ts';
+import { pendingOrderLines } from '../lib/orderLines.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
@@ -25,6 +26,8 @@ const NEUTRAL = '#8b98a5';
 const ENTRY = '#7aa2ff';
 /** 真实持仓成本 */
 const HOLDING = '#ffcf4d';
+/** 还挂着的限价单 */
+const PENDING = '#b58bff';
 
 /**
  * 把形态转成图上的标记。
@@ -82,6 +85,8 @@ interface Props {
   bracket: Bracket | null;
   /** 当前合约的真实持仓，用来在图上标出成本线（双向模式可能多空各一条） */
   positions: Position[];
+  /** 当前合约还挂着的委托，限价单在图上画一条线，成交或撤掉就消失 */
+  orders: OpenOrder[];
   resetKey: string;
   loading: boolean;
   /** 拖到最左边时向上再要一页更早的 K 线 */
@@ -91,7 +96,8 @@ interface Props {
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, patterns, bracket, positions, resetKey, loading, onNeedOlder, onIntervalChange, onManualLevels,
+  contract, interval, bars, levels, patterns, bracket, positions, orders, resetKey, loading,
+  onNeedOlder, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -405,7 +411,7 @@ export default function ChartPane({
     };
   }, [onNeedOlder, resetKey, viewKey]);
 
-  // ---- 自动识别出的支撑 / 阻力 ----
+  // ---- 图上的横线：方案止损止盈、持仓均价、挂着的限价单、支撑阻力 ----
   useEffect(() => {
     const price = priceRef.current;
     if (!price) return;
@@ -470,6 +476,21 @@ export default function ChartPane({
       });
     }
 
+    // 挂着的限价单：成交之前它只是一个打算，用虚线跟已成交的持仓区分。
+    // 抢标签排在持仓均价之后、计划入场之前 —— 止损止盈和成本比它要紧，
+    // 但它是交易所里真挂着的单，比算出来的计划和档位更该报出价来。
+    for (const o of pendingOrderLines(orders)) {
+      items.push({
+        price: o.price,
+        rank: 1.5,
+        color: PENDING,
+        width: 2,
+        style: LineStyle.Dashed,
+        title: o.label,
+        wants: true,
+      });
+    }
+
     // 档位按离现价远近排，近的先说话
     const byNear = [...levels].sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
     byNear.forEach((lv, i) => {
@@ -512,7 +533,7 @@ export default function ChartPane({
     // 分两个 ref 只是为了记录要清理的线，这里一起收
     levelLinesRef.current = [];
     bracketLinesRef.current = board;
-  }, [levels, bracket, positions]);
+  }, [levels, bracket, positions, orders]);
 
   // ---- 工具切换 ----
   useEffect(() => {

@@ -385,6 +385,7 @@ export default function App() {
             patterns={fresh ? (levels?.patterns ?? EMPTY_PATTERNS) : EMPTY_PATTERNS}
             bracket={bracketForSide}
             positions={positions.filter((p) => p.contract === contract)}
+            orders={orders.filter((o) => o.contract === contract)}
             resetKey={`${contract}:${interval}`}
             loading={loading}
             onNeedOlder={loadOlder}
