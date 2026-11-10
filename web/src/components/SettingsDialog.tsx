@@ -120,11 +120,11 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
     }
   }, []);
 
-  // 打开实盘这一页就顺手识别一次
+  // 每次进实盘这一页都重新要一次。服务端 60 秒内给缓存，点开就是秒回
   useEffect(() => {
-    if (tab !== 'live' || ip || ipBusy) return;
+    if (tab !== 'live') return;
     void loadIp(false);
-  }, [tab, ip, ipBusy, loadIp]);
+  }, [tab, loadIp]);
 
   async function copyIp() {
     if (!ip?.ok || !ip.ip) return;
@@ -241,42 +241,42 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
         </div>
 
         {env === 'live' && (
-          <div className="ip-card">
-            <div className="ip-head">
+          <div className="field">
+            <label className="ip-label">
               <span>当前出口 IP</span>
               <button
-                className="x"
-                title="重新识别（换了网络或代理之后点这里）"
-                aria-label="重新识别 IP"
-                disabled={ipBusy}
+                className="link-btn"
                 onClick={() => void loadIp(true)}
+                disabled={ipBusy}
+                title="换了网络或代理之后点这里"
               >
-                {ipBusy ? '…' : '↻'}
+                {ipBusy ? '检测中…' : '重新检测'}
               </button>
+            </label>
+            <div className="ip-row">
+              <input
+                className="input"
+                readOnly
+                spellCheck={false}
+                value={ip?.ok ? ip.ip : ''}
+                placeholder={ipBusy ? '检测中…' : '没检测到'}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+              <button className="btn ghost ip-copy" onClick={copyIp} disabled={!ip?.ok}>复制</button>
             </div>
-            {ip?.ok ? (
-              <>
-                <div className="ip-value">
-                  <span className={ip.ip.length > 18 ? 'long' : ''}>{ip.ip}</span>
-                  <button className="ip-copy" onClick={copyIp}>复制</button>
-                </div>
-                <div className="ip-meta">
-                  {[
+            <div className="hint mono">
+              {ip?.ok
+                ? [
                     ip.country,
                     ip.region,
                     ip.city,
                     // 运营商名字前面的 AS 号（AS9808 …）对填白名单没用，去掉
                     ip.isp ? ip.isp.replace(/^AS\d+\s+/i, '') : '',
-                  ].filter(Boolean).join(' · ')}
-                </div>
-              </>
-            ) : (
-              <div className="ip-value dim">{ipBusy ? '识别中…' : ip ? '没识别到' : '识别中…'}</div>
-            )}
-            {ip && !ip.ok && <div className="ip-meta down">{ip.error}</div>}
-            <div className="ip-note">
-              这是本机出网地址，Gate 那边看到的就是它。
-              API 密钥如果设了 IP 白名单，把这一行填进去。
+                  ].filter(Boolean).join(' · ')
+                : (ip?.error ?? '')}
+            </div>
+            <div className="hint">
+              这是本机出网地址，Gate 那边看到的就是它。API 密钥设了 IP 白名单，把这一行填进去。
             </div>
           </div>
         )}
