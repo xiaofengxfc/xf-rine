@@ -16,6 +16,8 @@ interface Props {
   longBracket: Bracket | null;
   shortBracket: Bracket | null;
   priceRound: number;
+  /** 每个合约的最小变动价。这张卡会列出别的合约的仓和委托，价格得按各自的来 */
+  rounds?: ReadonlyMap<string, number>;
   armed: boolean;
   token: string | null;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
@@ -56,9 +58,14 @@ function triggerKind(o: PriceOrder, dir: Dir): 'stop' | 'target' {
 }
 
 export default function PositionsCard({
-  positions, orders, priceOrders, currentContract, longBracket, shortBracket, priceRound,
+  positions, orders, priceOrders, currentContract, longBracket, shortBracket, priceRound, rounds,
   armed, token, onToast, onRefresh,
 }: Props) {
+  /**
+   * 这一行是哪个合约，就用那个合约的最小变动位显示价。
+   * 在 BTC 的 0.1 底下显示 DOGE 的 0.15 会被写成 0.2 —— 一个不对的价。
+   */
+  const roundOf = (contract: string) => rounds?.get(contract) ?? priceRound;
   const [tab, setTab] = useState<'pos' | 'ord' | 'trig'>('pos');
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const [confirmReverse, setConfirmReverse] = useState<string | null>(null);
@@ -329,6 +336,7 @@ export default function PositionsCard({
               const k = keyOf(p.contract, p.direction);
               const pnlCls = p.unrealisedPnl >= 0 ? 'up' : 'down';
               const cur = bracketOf(p.contract, p.direction);
+              const round = roundOf(p.contract);
               const editing = edit && edit.contract === p.contract && edit.direction === p.direction;
               return (
                 <div key={k} className={'pos ' + (isLong ? 'long' : 'short')}>
@@ -338,9 +346,9 @@ export default function PositionsCard({
                   </div>
                   <div className="pos-grid">
                     <div><span>张数</span><span>{Math.abs(p.size)}</span></div>
-                    <div><span>开仓价</span><span>{fmtPrice(p.entryPrice, priceRound)}</span></div>
-                    <div><span>标记价</span><span>{fmtPrice(p.markPrice, priceRound)}</span></div>
-                    <div><span>强平价</span><span>{p.liqPrice > 0 ? fmtPrice(p.liqPrice, priceRound) : '—'}</span></div>
+                    <div><span>开仓价</span><span>{fmtPrice(p.entryPrice, round)}</span></div>
+                    <div><span>标记价</span><span>{fmtPrice(p.markPrice, round)}</span></div>
+                    <div><span>强平价</span><span>{p.liqPrice > 0 ? fmtPrice(p.liqPrice, round) : '—'}</span></div>
                     <div><span>价值</span><span>{fmtUsd(p.value, 0)}</span></div>
                     <div><span>持仓模式</span><span>{p.mode === 'single' ? '单向' : p.mode === 'dual_long' ? '双向多' : p.mode === 'dual_short' ? '双向空' : p.mode}</span></div>
                   </div>
@@ -348,9 +356,9 @@ export default function PositionsCard({
                   <div className="pos-prot">
                     <span>
                       保护{' '}
-                      <span style={{ color: 'var(--down)' }}>{cur.stop ? fmtPrice(cur.stop.triggerPrice, priceRound) : '—'}</span>
+                      <span style={{ color: 'var(--down)' }}>{cur.stop ? fmtPrice(cur.stop.triggerPrice, round) : '—'}</span>
                       {' / '}
-                      <span style={{ color: 'var(--up)' }}>{cur.target ? fmtPrice(cur.target.triggerPrice, priceRound) : '—'}</span>
+                      <span style={{ color: 'var(--up)' }}>{cur.target ? fmtPrice(cur.target.triggerPrice, round) : '—'}</span>
                     </span>
                     <span className={cur.stop || cur.target ? 'dim' : 'none'}>
                       {cur.stop || cur.target ? '到价自动平' : '没设'}
@@ -480,10 +488,17 @@ export default function PositionsCard({
                 <div key={o.id} className="order-row">
                   <span>
                     {o.contract.replace('_USDT', '')}{' '}
-                    <span className={o.size > 0 ? 'up' : 'down'}>{o.size > 0 ? '买' : '卖'} {Math.abs(o.size)}</span>{' '}
-                    <span className="dim num">{o.price > 0 ? '@' + fmtPrice(o.price, priceRound) : '市价'}</span>
+                    {/* 显示「还剩多少」：部分成交后真正会成交的是剩余量，改单也按它算 */}
+                    <span className={o.size > 0 ? 'up' : 'down'}>
+                      {o.size > 0 ? '买' : '卖'} {Math.abs(o.left || o.size)}
+                      {Math.abs(o.left || o.size) !== Math.abs(o.size) && (
+                        <span className="dim"> / 共 {Math.abs(o.size)}</span>
+                      )}
+                    </span>{' '}
+                    <span className="dim num">{o.price > 0 ? '@' + fmtPrice(o.price, roundOf(o.contract)) : '市价'}</span>
                   </span>
-                  <span className="dim num">{fmtTime(o.createTime / 1e6)}</span>
+                  {/* createTime 是 unix 秒（服务端统一过单位），fmtTime 自己会乘 1000 */}
+                  <span className="dim num">{fmtTime(o.createTime)}</span>
                   <span style={{ display: 'flex', gap: 2 }}>
                     <button
                       className="x edit"
@@ -529,7 +544,7 @@ export default function PositionsCard({
                   <span>
                     {o.contract.replace('_USDT', '')}{' '}
                     <span className={!protection ? 'dim' : kind === 'stop' ? 'down' : kind === 'target' ? 'up' : 'dim'}>
-                      {!protection ? '条件单' : kind === 'stop' ? '止损' : kind === 'target' ? '止盈' : '触发'} {fmtPrice(o.triggerPrice, priceRound)}
+                      {!protection ? '条件单' : kind === 'stop' ? '止损' : kind === 'target' ? '止盈' : '触发'} {fmtPrice(o.triggerPrice, roundOf(o.contract))}
                     </span>{' '}
                     <span className="dim">
                       {o.direction === 'long' ? '平多' : o.direction === 'short' ? '平空' : '平仓'} · {o.size || '全部'} 张
@@ -544,8 +559,12 @@ export default function PositionsCard({
                       className="x edit"
                       title={!o.direction
                         ? '这张单看不出平哪一边，只能撤'
-                        : !protection ? '条件单不是保护单，改不了，只能撤' : '改这一边的止损止盈'}
-                      disabled={!armed || !o.direction || !protection}
+                        : !protection
+                          ? '条件单不是保护单，改不了，只能撤'
+                          : orphan
+                            ? '这一边已经没有持仓了，挂不上新保护，这张单只能撤'
+                            : '改这一边的止损止盈'}
+                      disabled={!armed || !o.direction || !protection || orphan}
                       onClick={() => {
                         if (!o.direction) return;
                         const cur = bracketOf(o.contract, dir);

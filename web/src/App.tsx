@@ -36,6 +36,8 @@ const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null }
 
 const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
+/** 解锁令牌的有效期，和服务端 routes.ts 的 ARM_TTL_MS 对齐 */
+const ARM_TTL_MS = 10 * 60 * 1000;
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
 interface Prefs {
@@ -103,6 +105,8 @@ export default function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number>(0);
+  /** 解锁令牌的到期计时器 */
+  const armTimerRef = useRef(0);
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
@@ -119,6 +123,16 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRailOpen(false); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
+  }, [railOpen]);
+
+  // 抽屉是窄屏才有的形态。窗口从窄拖宽之后它已经不在屏幕上了，
+  // 状态得跟着收掉：否则那块遮罩会留在 DOM 里当网格子元素，把整页布局撑歪。
+  useEffect(() => {
+    if (!railOpen) return;
+    const mq = window.matchMedia('(max-width: 1180px)');
+    const onChange = () => { if (!mq.matches) setRailOpen(false); };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
   }, [railOpen]);
 
   const marketKey = `${contract}:${interval}`;
@@ -342,23 +356,78 @@ export default function App() {
 
   // ---------- 交易解锁 ----------
 
+  /** 落锁：清掉本地令牌和到期计时器。服务端那边的令牌到点也会失效，两边一起走 */
+  const clearArmTimer = useCallback(() => {
+    if (armTimerRef.current) { window.clearTimeout(armTimerRef.current); armTimerRef.current = 0; }
+  }, []);
+
+  const lockTrading = useCallback((title?: string, detail?: string) => {
+    clearArmTimer();
+    setArmed(false);
+    setToken(null);
+    if (title) push('ok', title, detail);
+  }, [clearArmTimer, push]);
+
   const toggleArm = useCallback(async () => {
     if (armed) {
       try { await jsend('POST', '/api/trade/arm', { on: false }); } catch { /* ignore */ }
-      setArmed(false); setToken(null);
-      push('ok', '交易已锁定');
+      lockTrading('交易已锁定');
       return;
     }
     try {
-      const r = await jsend<{ armed: boolean; token?: string }>('POST', '/api/trade/arm', { on: true });
-      if (r.armed && r.token) { setArmed(true); setToken(r.token); push('ok', '交易已解锁', '10 分钟内有效，随时可锁定'); }
+      const r = await jsend<{ armed: boolean; token?: string; expiresAt?: number }>('POST', '/api/trade/arm', { on: true });
+      if (!r.armed || !r.token) return;
+      setArmed(true);
+      setToken(r.token);
+      const left = Math.max(1000, (r.expiresAt ?? Date.now() + ARM_TTL_MS) - Date.now());
+      clearArmTimer();
+      // 到点自动落锁。不这么做的话，页面上会一直写着「交易已解锁」，
+      // 直到某次下单被服务端用 NOT_ARMED 拒掉才发现早就过期了。
+      armTimerRef.current = window.setTimeout(() => {
+        lockTrading('交易已自动锁定', '解锁有效期 10 分钟，要接着交易请再点一次「解锁交易」');
+      }, left);
+      push('ok', '交易已解锁', '10 分钟内有效，随时可锁定');
     } catch (e) {
       push('err', '无法解锁交易', (e as Error).message);
     }
-  }, [armed, push]);
+  }, [armed, clearArmTimer, lockTrading, push]);
+
+  // 换环境就等于换账户：服务端会把旧令牌全部作废，页面这边也跟着落锁，
+  // 免得上一个环境的解锁状态被带到实盘上。
+  const envSeenRef = useRef<string | null>(null);
+  useEffect(() => {
+    const env = config?.env;
+    if (!env) return;
+    if (envSeenRef.current && envSeenRef.current !== env) {
+      lockTrading(
+        '环境已切换，交易已锁定',
+        (env === 'live' ? '现在打的是实盘，花真钱。' : '现在打的是模拟盘。') + '要交易请重新解锁',
+      );
+      // 排队等着补挂的保护单属于上一个账户，不能跟着过来
+      setProtectQueue([]);
+    }
+    envSeenRef.current = env;
+  }, [config?.env, lockTrading]);
+
+  // 下单开关被关掉时，服务端已经作废了所有令牌，页面不能还显示「已解锁」
+  useEffect(() => {
+    if (config && !config.liveTrading) lockTrading();
+  }, [config, lockTrading]);
+
+  useEffect(() => clearArmTimer, [clearArmTimer]);
 
   const ticker = useMemo(() => tickers.find((t) => t.contract === contract), [tickers, contract]);
   const priceRound = info?.priceRound ?? 0.1;
+  // 持仓卡里会同时列出别的合约。价格精度按各自的最小变动位算，
+  // 否则在 BTC 的 0.1 下看 DOGE 的 0.15，会显示成 0.2。
+  const roundMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of tickers) {
+      const r = t.priceRound ?? 0;
+      if (r > 0) m.set(t.contract, r);
+    }
+    return m;
+  }, [tickers]);
   const bracketForSide = side === 'long' ? levels?.brackets.long ?? null : levels?.brackets.short ?? null;
 
   const onManualLevels = useCallback((prices: number[]) => setManualLevels(prices), []);
@@ -430,6 +499,8 @@ export default function App() {
             priceRound={priceRound}
             multiplier={info?.multiplier ?? 0}
             equity={account?.total ?? 0}
+            available={account?.available ?? 0}
+            feeRate={info?.takerFee ?? 0}
             riskPercent={riskPct}
             leverageMax={Math.min(info?.leverageMax ?? 125, 125)}
             onUse={(b) => { setApplied({ bracket: b, at: Date.now() }); setSide(b.direction); push('ok', '已套用方案', `${b.direction === 'long' ? '做多' : '做空'} 止损 ${fmtPrice(b.stop, priceRound)} / 止盈 ${fmtPrice(b.target, priceRound)}`); }}
@@ -460,6 +531,7 @@ export default function App() {
             longBracket={levels?.brackets.long ?? null}
             shortBracket={levels?.brackets.short ?? null}
             priceRound={priceRound}
+            rounds={roundMap}
             armed={armed}
             token={token}
             onToast={push}

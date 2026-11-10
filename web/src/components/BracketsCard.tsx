@@ -7,7 +7,15 @@ interface Props {
   short: Bracket | null;
   priceRound: number;
   multiplier: number;
+  /** 账户权益。没传可用余额时退回它，宁可少算也不显示 0 */
   equity: number;
+  /**
+   * 可用余额。风险预算和「开不开得下」都按它算，
+   * 和下单面板的「可用 × 风险 %」是同一个口径，两处数字才不会打架。
+   */
+  available?: number;
+  /** 吃单手续费率：交易所按「保证金 + 手续费 ≤ 可用」放行，不算手续费会高估张数 */
+  feeRate?: number;
   riskPercent: number;
   /** 这个合约允许的最大杠杆：按风险算出来的张数到底开不开得下，要看它 */
   leverageMax: number;
@@ -15,7 +23,7 @@ interface Props {
 }
 
 export default function BracketsCard({
-  long, short, priceRound, multiplier, equity, riskPercent, leverageMax, onUse,
+  long, short, priceRound, multiplier, equity, available, feeRate = 0, riskPercent, leverageMax, onUse,
 }: Props) {
   const rows: { b: Bracket; cls: string; label: string }[] = [];
   if (long) rows.push({ b: long, cls: 'long', label: '做多方案' });
@@ -31,8 +39,8 @@ export default function BracketsCard({
         {rows.length === 0 && <div className="empty">还没有足够强的位，无法给出方案</div>}
         <div className="brackets">
           {rows.map(({ b, cls, label }) => {
-            const riskUsd = equity * (riskPercent / 100);
-            void label;
+            const base = available ?? equity;
+            const riskUsd = base * (riskPercent / 100);
             // 按风险算张数，再按合约能给的最大杠杆看这个张数开不开得下。
             // 止损很窄（盈亏比很高）时想要的张数会大得离谱，直接写出来会让人以为能下。
             const sizing = riskSizing({
@@ -40,9 +48,9 @@ export default function BracketsCard({
               price: b.entry,
               stop: b.stop,
               multiplier,
-              available: equity,
+              available: base,
               leverage: leverageMax,
-              feeRate: 0,
+              feeRate,
               leverageMax,
               sizeMin: 1,
               sizeMax: 0,
@@ -67,11 +75,13 @@ export default function BracketsCard({
                   <dt>可担亏损</dt><dd>{fmtUsd(riskUsd)} USDT</dd>
                   <dt>对应张数</dt>
                   <dd>
-                    {equity <= 0
-                      ? <span className="dim">未读到权益</span>
-                      : sizing.feasible > 0
-                        ? (sizing.cappedByMargin ? `${sizing.feasible} 张（按风险要 ${sizing.wanted}）` : `${sizing.feasible} 张`)
-                        : <span className="dim">余额不足</span>}
+                    {!(multiplier > 0)
+                      ? <span className="dim">未读到合约信息</span>
+                      : base <= 0
+                        ? <span className="dim">未读到可用余额</span>
+                        : sizing.feasible > 0
+                          ? (sizing.cappedByMargin ? `${sizing.feasible} 张（按风险要 ${sizing.wanted}）` : `${sizing.feasible} 张`)
+                          : <span className="dim">余额不足</span>}
                   </dd>
                 </dl>
                 {sizing.overMaxLeverage && (

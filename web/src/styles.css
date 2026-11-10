@@ -116,14 +116,13 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .brand {
   display: flex;
-  align-items: baseline;
+  /* 一行放不下时折行（窄屏上「巡风 / Gate 永续 / 模拟盘」会换行），别再写第二遍 align-items */
+  flex-wrap: wrap;
+  align-items: center;
   gap: 7px;
   padding-right: 14px;
   border-right: 1px solid var(--line);
   height: 100%;
-  align-content: center;
-  flex-wrap: wrap;
-  align-items: center;
 }
 .brand b { font-size: 14px; letter-spacing: 0.06em; font-weight: 650; }
 .brand span { font-size: 10px; color: var(--text-2); letter-spacing: 0.14em; text-transform: uppercase; }
@@ -191,6 +190,13 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .rail-close:hover { color: var(--text-0); border-color: var(--bg-4); }
 
+/**
+ * 抽屉遮罩只在窄屏的抽屉形态下存在。
+ * 宽屏必须 display:none：窗口从窄拖宽时这块 div 还留在 DOM 里，
+ * 没有样式就会变成 .app 网格的第四个格子，整页被挤出一行空白。
+ */
+.rail-scrim { display: none; }
+
 .search {
   width: 100%;
   background: var(--bg-2);
@@ -233,6 +239,20 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .sym-list .sym .n em { font-style: normal; color: var(--text-2); font-size: 10.5px; }
 .sym-list .sym .p { font-family: var(--mono); font-size: 11.5px; text-align: right; }
 .sym-list .sym .c { font-family: var(--mono); font-size: 10.5px; text-align: right; }
+
+/* 模拟盘能下单的合约打个绿点。反着来（把不能下单的淡掉）不行 ——
+   测试网 1081 个里只有 53 个能交易，整列会看起来像坏了。 */
+.sym-list .sym.ok::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 50%;
+  background: var(--up);
+}
 
 /* ---------- 中间 图表 ---------- */
 
@@ -313,12 +333,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .levels-strip::-webkit-scrollbar { height: 4px; }
 .levels-strip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
 .levels-strip::-webkit-scrollbar-track { background: transparent; }
-.levels-strip.scrollable { cursor: grab; }
-.levels-strip.dragging { cursor: grabbing; user-select: none; }
-/* 放不下时两端渐隐，暗示还有内容 */
+/* 放不下时两端渐隐，暗示还有内容；同时给鼠标用户一个可拖的手型 */
 .levels-strip.scrollable {
+  cursor: grab;
   mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
 }
+.levels-strip.dragging { cursor: grabbing; user-select: none; }
 
 .lv {
   position: relative;
@@ -333,20 +353,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   transition: border-color 0.14s, transform 0.14s;
 }
 /* 只是划过时给点反馈，不做上浮 —— 上浮会让人以为能点 */
-/* 模拟盘能下单的合约打个绿点。反着来（把不能下单的淡掉）不行 ——
-   测试网 1081 个里只有 53 个能交易，整列会看起来像坏了。 */
-.sym-list .sym.ok::before {
-  content: '';
-  position: absolute;
-  left: 2px;
-  top: 50%;
-  width: 3px;
-  height: 3px;
-  margin-top: -1.5px;
-  border-radius: 50%;
-  background: var(--up);
-}
-
 .lv:hover { border-color: var(--bg-4); }
 .lv .bar {
   position: absolute; left: 0; bottom: 0; height: 2px;
@@ -649,6 +655,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .chip:hover { border-color: var(--bg-4); color: var(--text-0); }
 
+/* 禁用的按钮不该还给出「可以点」的悬停反馈 —— 「按风险」没止损时是灰的，
+   鼠标划过去变色会让人以为再点一下就能用 */
+button.chip:disabled:hover { border-color: var(--line); color: var(--text-1); }
+button.btn:disabled:hover { filter: none; }
+button.x:disabled:hover { background: none; color: var(--text-2); }
+
 .summary {
   display: grid; grid-template-columns: 1fr auto; gap: 2px 8px;
   font-size: 11.5px; padding: 8px 0 10px;
@@ -842,7 +854,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 /* 只在窄屏出现的东西：默认藏起来，媒体查询里放开 */
 .rail-btn { display: none; }
-.narrow-only { display: none; }
 /* 宽屏上「行情已连接」是带文字的小贴片，这个点只在窄屏露出来 */
 .ws-dot { display: none; }
 
@@ -870,6 +881,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
     padding-top: 6px;
     padding-bottom: 6px;
   }
+  /* .brand 的 height:100% 会把第一行撑到整条顶栏那么高（宽屏上是给竖分隔线用的），
+     折行之后第二行就被挤出顶栏、压在图表上 —— 1024 宽正好中招：
+     「解锁交易」和「设置」跑到顶栏外面去了。这一档让它跟着自己那一行走。 */
+  .brand { height: auto; align-self: stretch; }
 
   .rail {
     position: fixed;
@@ -882,13 +897,16 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
     border-right: 1px solid var(--line);
     box-shadow: 0 0 44px rgba(0, 0, 0, 0.55);
     transform: translateX(-102%);
-    transition: transform 0.18s ease;
+    /* 藏起来的时候一并从可访问树和 Tab 顺序里拿掉；收起的动画还得看得见，所以 visibility 也过渡 */
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0.18s ease;
     padding-top: env(safe-area-inset-top);
     overscroll-behavior: contain;
   }
-  .app.rail-open .rail { transform: none; }
+  .app.rail-open .rail { transform: none; visibility: visible; }
 
   .rail-scrim {
+    display: block;
     position: fixed;
     inset: 0;
     z-index: 71;
@@ -899,6 +917,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
     touch-action: none;
   }
   @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+
+  /* 抽屉盖住整屏时，底下的页面不该跟着滚 */
+  body:has(.app.rail-open) { overflow: hidden; }
 }
 
 /**

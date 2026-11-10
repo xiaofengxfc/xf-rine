@@ -40,6 +40,15 @@ export default function OrderTicket({
   /** 限价框自动填过一次就不再管，用户自己清空是用户的事 */
   const autoLimitRef = useRef(false);
 
+  /**
+   * 风险百分比自己拿着字符串。直接绑 number 的话，输入「1.」会被
+   * Number("1.") 抹成 1 再写回输入框，小数点当场消失 —— 小数风险根本打不进去。
+   */
+  const [riskStr, setRiskStr] = useState(String(riskPct));
+  useEffect(() => {
+    setRiskStr((cur) => (Number(cur) === riskPct ? cur : String(riskPct)));
+  }, [riskPct]);
+
   const mult = contract?.multiplier ?? 0;
   const last = contract?.price ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
@@ -48,6 +57,13 @@ export default function OrderTicket({
   const sizeMin = Math.max(1, Math.ceil(contract?.sizeMin ?? 1));
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
   const sizeMax = Math.floor(contract?.sizeMax ?? 0);
+  // 杠杆上限跟着合约走。切到上限更低的合约时，原来的 50x 必须夹回去：
+  // 不夹的话摘要会按交易所根本不接受的杠杆算保证金，设置杠杆那一步也会静默失败，
+  // 最后真正下单用的还是账户上原来的杠杆，和确认条上写的不是一回事。
+  const lev = Math.min(Math.max(1, leverage), levMax);
+  useEffect(() => {
+    setLeverage((v) => Math.min(Math.max(1, v), levMax));
+  }, [levMax]);
 
   // 从「自动档位」套用过来：填方向 + 限价，保护直接用这套方案的价
   useEffect(() => {
@@ -55,6 +71,8 @@ export default function OrderTicket({
     setSide(applied.bracket.direction);
     setPriceMode('limit');
     setLimitStr(String(applied.bracket.entry));
+    // 这个价是用户点「套用」指定的，不能被「限价框自动填现价」那一步盖掉
+    autoLimitRef.current = true;
     setProtect('plan');
     setPending(false);
   }, [applied]);
@@ -81,15 +99,15 @@ export default function OrderTicket({
   const priceUsed = priceMode === 'limit' ? Number(limitStr) || 0 : last;
   const size = Math.round(Number(sizeStr) || 0);
   const notional = size * mult * priceUsed;
-  const margin = leverage > 0 ? notional / leverage : 0;
+  const margin = lev > 0 ? notional / lev : 0;
   const avail = account?.available ?? 0;
   // 交易所按「保证金 + 手续费 ≤ 可用」放行。满仓如果只算保证金，
   // 差的正好是那几块钱手续费，点满仓必然被拒。
   const feeRate = Math.max(contract?.takerFee ?? 0, 0);
   const need = margin + notional * feeRate;
   const marginShort = need > avail ? need - avail : 0;
-  const maxAffordable = mult > 0 && priceUsed > 0 && leverage > 0
-    ? Math.floor(avail / (1 / leverage + feeRate) / (mult * priceUsed))
+  const maxAffordable = mult > 0 && priceUsed > 0 && lev > 0
+    ? Math.floor(avail / (1 / lev + feeRate) / (mult * priceUsed))
     : 0;
   /** 按同样的杠杆和可用余额，这笔最多能做多少张 */
   const affordableNow = need > 0 ? Math.floor((size * avail) / need) : 0;
@@ -113,10 +131,10 @@ export default function OrderTicket({
   const wantProtect = effStop > 0 || effTarget > 0;
 
   const liqEstimate = useMemo(() => {
-    if (!priceUsed || leverage <= 0) return 0;
-    const move = 1 / leverage;
+    if (!priceUsed || lev <= 0) return 0;
+    const move = 1 / lev;
     return side === 'long' ? priceUsed * (1 - move) : priceUsed * (1 + move);
-  }, [priceUsed, leverage, side]);
+  }, [priceUsed, lev, side]);
 
   /**
    * 按风险算仓位。止损用这一单真会挂上去的那个价；
@@ -132,12 +150,12 @@ export default function OrderTicket({
     stop: riskStop,
     multiplier: mult,
     available: avail,
-    leverage,
+    leverage: lev,
     feeRate,
     leverageMax: levMax,
     sizeMin,
     sizeMax,
-  }), [avail, riskPct, sizingPrice, riskStop, mult, leverage, feeRate, levMax, sizeMin, sizeMax]);
+  }), [avail, riskPct, sizingPrice, riskStop, mult, lev, feeRate, levMax, sizeMin, sizeMax]);
 
   const capByMax = (n: number) => (sizeMax > 0 ? Math.min(n, sizeMax) : n);
 
@@ -173,7 +191,7 @@ export default function OrderTicket({
       return `按风险 ${riskPct}% 要 ${sizing.wanted} 张，可用 ${fmtUsd(avail)} USDT 连一张都开不下。先降张数或换一个止损更宽的方向。`;
     }
     const head = `按风险 ${riskPct}% 要 ${sizing.wanted} 张（每张到止损亏 ${money(sizing.perContract)} USDT），`
-      + `按 ${leverage}x 杠杆和可用 ${fmtUsd(avail)} USDT 只开得下 ${sizing.feasible} 张。`;
+      + `按 ${lev}x 杠杆和可用 ${fmtUsd(avail)} USDT 只开得下 ${sizing.feasible} 张。`;
     const tail = sizing.overMaxLeverage
       ? ` 这是止损太窄（盈亏比 ${planBracket ? planBracket.riskReward.toFixed(2) : '很高'}）造成的：`
         + `要开满得 ${Number.isFinite(sizing.leverageNeeded) ? `${sizing.leverageNeeded} 倍杠杆，` : ''}这个合约最多 ${levMax} 倍，开不满。`
@@ -185,7 +203,7 @@ export default function OrderTicket({
     if (!contract || !token) return;
     setBusy(true);
     try {
-      await jsend('POST', '/api/leverage', { contract: contract.name, leverage }, token);
+      await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev }, token);
     } catch (e) {
       // 杠杆设置失败不阻断下单：可能本来就是目标杠杆，或者用户没有改过
       onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
@@ -280,7 +298,7 @@ export default function OrderTicket({
           </button>
           <button
             className="chip"
-            title={`按当前 ${leverage}x 杠杆和可用余额最多 ${maxAffordable} 张`}
+            title={`按当前 ${lev}x 杠杆和可用余额最多 ${maxAffordable} 张`}
             onClick={() => { setSizeStr(String(Math.max(sizeMin, capByMax(maxAffordable)))); setPending(false); }}
           >
             满仓
@@ -290,16 +308,28 @@ export default function OrderTicket({
         <div className="row2" style={{ marginBottom: 9 }}>
           <div className="field" style={{ marginBottom: 0 }}>
             <label>风险 %</label>
-            <input className="input sm" inputMode="decimal" value={riskPct} onChange={(e) => onRiskPctChange(Math.max(0.1, Number(e.target.value) || 0.1))} />
+            <input
+              className="input sm"
+              inputMode="decimal"
+              value={riskStr}
+              onChange={(e) => {
+                const raw = e.target.value.replace(/[^0-9.]/g, '');
+                setRiskStr(raw);
+                // 中间态（""、"1."、"0."）先不往外传，等它变成合法数字再说
+                const n = Number(raw);
+                if (Number.isFinite(n) && n >= 0.1 && n <= 100) onRiskPctChange(n);
+              }}
+              onBlur={() => setRiskStr(String(riskPct))}
+            />
           </div>
           <div className="field" style={{ marginBottom: 0 }}>
-            <label>杠杆 {leverage}x</label>
+            <label>杠杆 {lev}x</label>
             <input
               className="input sm"
               type="range"
               min={1}
               max={levMax}
-              value={Math.min(leverage, levMax)}
+              value={lev}
               onChange={(e) => setLeverage(Number(e.target.value))}
               style={{ padding: 0, accentColor: 'var(--accent)' }}
             />
@@ -467,7 +497,7 @@ export default function OrderTicket({
             <p>
               确认 {side === 'long' ? '买入开多' : '卖出开空'} <b>{size}</b> 张 {contract?.name}，
               {priceMode === 'limit' ? `限价 ${priceUsed}` : '市价'}，
-              名义 <b>{fmtUsd(notional)}</b> USDT，{leverage}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
+              名义 <b>{fmtUsd(notional)}</b> USDT，{lev}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
               {env === 'testnet' ? '模拟盘，扣的是测试网假钱。' : '这是真实资金。'}
             </p>
             {wantProtect && (
@@ -486,8 +516,8 @@ export default function OrderTicket({
             )}
             <div className="acts">
               <button className="btn ghost" onClick={() => setPending(false)} disabled={busy}>取消</button>
-              <button className={`btn ${side}`} onClick={submit} disabled={busy}>
-                {busy ? '下单中…' : env === 'testnet' ? '确认模拟下单' : '确认下单'}
+              <button className={`btn ${side}`} onClick={submit} disabled={busy || Boolean(blocked)} title={blocked || undefined}>
+                {busy ? '下单中…' : blocked || (env === 'testnet' ? '确认模拟下单' : '确认下单')}
               </button>
             </div>
           </div>

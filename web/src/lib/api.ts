@@ -66,6 +66,8 @@ export interface Ticker {
   change24h: number;
   volume24hUsd: number;
   fundingRate: number;
+  /** 这个合约的最小变动价。持仓卡里同时显示别的合约，价格得按各自的最小变动位写 */
+  priceRound?: number;
   /** 当前环境能不能交易它。模拟盘只上架了几十个合约，其余只能看 */
   tradable?: boolean;
 }
@@ -125,7 +127,10 @@ export interface Position {
 
 export interface OpenOrder {
   id: string; contract: string; size: number; left: number; price: number; fillPrice: number;
-  status: string; reduceOnly: boolean; createTime: number; tif: string;
+  status: string; reduceOnly: boolean;
+  /** 下单时间，unix 秒（服务端已经统一过单位） */
+  createTime: number;
+  tif: string;
 }
 
 export interface PriceOrder {

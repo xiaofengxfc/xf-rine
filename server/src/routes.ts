@@ -32,7 +32,11 @@ const ARM_TTL_MS = 10 * 60 * 1000;
 function requireArm(req: Request): void {
   const t = String(req.header('x-arm-token') ?? '');
   const exp = armTokens.get(t);
-  if (!exp || exp < Date.now()) throw new GateError(403, 'NOT_ARMED', '未解锁交易，请先在页面右上角点「解锁交易」');
+  if (!exp || exp < Date.now()) {
+    // 过期的令牌顺手删掉，否则每解锁一次就在内存里留一条永不回收的记录
+    if (t) armTokens.delete(t);
+    throw new GateError(403, 'NOT_ARMED', '未解锁交易，请先在页面右上角点「解锁交易」');
+  }
 }
 
 function notionalOf(sizeContracts: number, price: number, multiplier: number): number {
@@ -93,8 +97,20 @@ interface GateContract {
   taker_fee_rate: string; maker_fee_rate: string; order_price_deviate: string;
 }
 
-router.get('/contracts', wrap(async (_req, res) => {
+/**
+ * 合约元数据（最小变动、杠杆上限、手续费）不常变，缓存一分钟。
+ * 行情接口要按合约取最小变动价，每 12 秒拉一次全表太浪费。
+ */
+let contractCache: { at: number; list: GateContract[] } | null = null;
+async function allContracts(): Promise<GateContract[]> {
+  if (contractCache && Date.now() - contractCache.at < 60_000) return contractCache.list;
   const list = await gatePublic<GateContract[]>('/futures/usdt/contracts');
+  contractCache = { at: Date.now(), list };
+  return list;
+}
+
+router.get('/contracts', wrap(async (_req, res) => {
+  const list = await allContracts();
   res.json(list
     .filter((c) => c.status === 'trading' && !c.in_delisting)
     .map((c) => ({
@@ -361,6 +377,9 @@ router.post('/config/keys', wrap(async (req, res) => {
   if (typeof aiApiKey === 'string') patch.AI_API_KEY = aiApiKey.trim();
   if (typeof aiModel === 'string' && aiModel.trim()) patch.AI_MODEL = aiModel.trim();
   if (Object.keys(patch).length === 0) throw new GateError(400, 'EMPTY', '没有要写入的字段');
+  // 关掉下单开关就是撤销所有已解锁的会话。否则重新打开开关时，
+  // 十分钟前解锁的那个令牌还活着，等于开关白关了一次。
+  if (typeof liveTrading === 'boolean' && !liveTrading) armTokens.clear();
   writeEnv(patch);
   res.json({
     ok: true,
@@ -381,6 +400,9 @@ router.post('/config/env', wrap(async (req, res) => {
   requireLocal(req, '切环境');
   const { env } = req.body ?? {};
   if (env !== 'testnet' && env !== 'live') throw new GateError(400, 'BAD_ENV', 'env 只能是 testnet 或 live');
+  // 换环境＝换账户。旧令牌是在另一个账户上解锁的，不能跟着过来：
+  // 从模拟盘切到实盘时它要是还有效，就等于绕过了一次「用真钱」的确认。
+  armTokens.clear();
   writeEnv({ GATE_ENV: env, LIVE_TRADING: 'false' });
   res.json({
     ok: true,
@@ -513,6 +535,20 @@ router.get('/positions', wrap(async (_req, res) => {
   }));
 }));
 
+/**
+ * 下单时间统一成「秒」。
+ * Gate 的 create_time 是带微秒小数的秒（1730000000.123456），
+ * 页面那边直接乘 1000 转 Date；单位搞错会让委托列表上的时间变成 1970 年。
+ * 这里再兜一层毫秒/微秒的历史格式，免得换个端点就显示成乱码时间。
+ */
+function unixSeconds(v: unknown): number {
+  const n = Number(v ?? 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (n > 1e14) return n / 1e6; // 微秒
+  if (n > 1e11) return n / 1e3; // 毫秒
+  return n;
+}
+
 router.get('/orders', wrap(async (req, res) => {
   const contract = req.query.contract ? String(req.query.contract) : undefined;
   const list = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/orders', { contract, status: 'open' });
@@ -526,7 +562,7 @@ router.get('/orders', wrap(async (req, res) => {
     status: String(o.status),
     finishAs: o.finish_as ? String(o.finish_as) : null,
     reduceOnly: Boolean(o.is_reduce_only),
-    createTime: Number(o.create_time),
+    createTime: unixSeconds(o.create_time),
     tif: String(o.tif),
   })));
 }));
@@ -611,9 +647,11 @@ function touchesSide(size: number, reduceOnly: boolean, dir: Direction): boolean
  * 双向模式下另一边可能还有仓，那时候只动这一边的单：那边还挂着自己的保护单和减仓单。
  * 另一边也空着说明这个合约要清干净了，那就一张不留 —— 单向模式下反向的限价单成交后同样会开仓。
  */
-async function cancelSide(contract: string, dirs: Direction[], otherSideHasPosition: boolean): Promise<Cleanup> {
+async function cancelSide(contract: string, dirs: Direction[], contractFlat: boolean): Promise<Cleanup> {
   const out: Cleanup = { orders: [], triggers: [], errors: [] };
-  const flatAfter = !otherSideHasPosition || dirs.length >= 2;
+  // 合约是不是真的空仓了，由调用方按「平仓实际成交了多少」判断，不再靠方向个数猜：
+  // 想平两边但只成交了一边时，dirs 会有两个，可另一边其实还裸着。
+  const flatAfter = contractFlat;
 
   let triggers: Trigger[] = [];
   try {
@@ -954,6 +992,9 @@ router.post('/order/:id/amend', wrap(async (req, res) => {
  */
 async function flattenSides(contract: string, wanted: Side[], all: Side[]) {
   const orders: { direction: Direction; size: number; id: string; status: string }[] = [];
+  /** 真的平干净了的那几边。没平完的那一边不能撤保护，否则仓还开着却没人管 */
+  const closed: Direction[] = [];
+  const notFullyClosed: string[] = [];
   for (const s of wanted) {
     const { order } = await placeOrder({
       contract,
@@ -961,10 +1002,23 @@ async function flattenSides(contract: string, wanted: Side[], all: Side[]) {
       size: 0,
       autoSize: s.direction === 'long' ? 'close_long' : 'close_short',
     });
-    orders.push({ direction: s.direction, size: s.size, id: String(order.id), status: String(order.status) });
+    const status = String(order.status ?? '');
+    const left = Number(order.left ?? 0);
+    const done = String(order.finish_as ?? '') === 'filled' || (status === 'finished' && left === 0);
+    orders.push({ direction: s.direction, size: s.size, id: String(order.id), status });
+    if (done) {
+      closed.push(s.direction);
+    } else {
+      // 盘口太薄时市价平仓只成交一部分。这一边还有仓，保护单必须留着。
+      notFullyClosed.push(
+        `平${s.direction === 'long' ? '多' : '空'}没完全成交（剩 ${left} 张，状态 ${status || '未知'}），这一边的保护单没有撤`,
+      );
+    }
   }
   const otherSideHasPosition = all.some((s) => s.size > 0 && !wanted.includes(s));
-  const canceled = await cancelSide(contract, wanted.map((s) => s.direction), otherSideHasPosition);
+  const flat = !otherSideHasPosition && closed.length === wanted.length;
+  const canceled = await cancelSide(contract, closed, flat);
+  canceled.errors.push(...notFullyClosed);
   return { orders, canceled };
 }
 
@@ -1050,12 +1104,17 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
   const last = Number(c.last_price) || 0;
   const mark = mine && mine.markPrice > 0 ? mine.markPrice : last;
-  if (hasStop || hasTarget) {
-    checkTriggerPrices(dir, Math.min(last || mark, mark), Math.max(last, mark), hasStop ? stopRaw : 0, hasTarget ? targetRaw : 0);
-  }
 
   const round = Number(c.order_price_round);
   const snap = (p: number) => (round > 0 ? Math.round(Math.round(p / round) * round * 1e8) / 1e8 : p);
+
+  // 先吸附到最小变动价，再判方向：止损离现价不到一个 tick 时，
+  // 吸附会把它推到现价上，按原值判「严格在下方」会放行，挂上去那一秒就成交。
+  const stop = hasStop ? snap(stopRaw) : 0;
+  const target = hasTarget ? snap(targetRaw) : 0;
+  if (stop > 0 || target > 0) {
+    checkTriggerPrices(dir, Math.min(last || mark, mark), Math.max(last, mark), stop, target);
+  }
 
   const canceled: string[] = [];
   const errors: string[] = [];
@@ -1074,8 +1133,8 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   }
 
   const jobs: { kind: 'stop' | 'target'; price: number; rule: 1 | 2 }[] = [];
-  if (hasStop) jobs.push({ kind: 'stop', price: snap(stopRaw), rule: dir === 'long' ? 2 : 1 });
-  if (hasTarget) jobs.push({ kind: 'target', price: snap(targetRaw), rule: dir === 'long' ? 1 : 2 });
+  if (stop > 0) jobs.push({ kind: 'stop', price: stop, rule: dir === 'long' ? 2 : 1 });
+  if (target > 0) jobs.push({ kind: 'target', price: target, rule: dir === 'long' ? 1 : 2 });
 
   const created: { kind: string; id: string; triggerPrice: number }[] = [];
   for (const job of jobs) {
@@ -1216,7 +1275,8 @@ router.post('/reverse-position', wrap(async (req, res) => {
 
   // 平掉的那一边，委托和触发单跟着一起撤。不撤的话，同一秒反向开的仓一出现，
   // 旧止损（auto_size 平的是刚平掉的那一边，价格又刚好在现价这侧）就会把新仓打掉。
-  const canceled = await cancelSide(contract, [dir], sides.some((s) => s.direction === opposite && s.size > 0));
+  // 这一边已经平干净了。反方向没有仓时整个合约就空着，可以一张不留地清干净。
+  const canceled = await cancelSide(contract, [dir], !sides.some((s) => s.direction === opposite && s.size > 0));
 
   try {
     const { order } = await placeOrder({ contract, side: opposite, size: qty });
@@ -1306,10 +1366,15 @@ async function tradableNames(): Promise<Set<string> | null> {
 }
 
 router.get('/tickers', wrap(async (_req, res) => {
-  const [list, tradable] = await Promise.all([
+  const [list, tradable, contracts] = await Promise.all([
     gatePublic<GateTicker[]>('/futures/usdt/tickers'),
     tradableNames(),
+    // 拉不到合约元数据不影响行情，只是价格精度退回默认值
+    allContracts().catch(() => [] as GateContract[]),
   ]);
+  // 持仓和委托卡会同时显示别的合约，价格得按各自的最小变动位显示，
+  // 否则用 BTC 的 0.1 去格式化 DOGE 的 0.15，会写成一个错的 0.2
+  const roundOf = new Map(contracts.map((c) => [c.name, Number(c.order_price_round)]));
   const rows = list
     .filter((t) => Number(t.last) > 0)
     .map((t) => ({
@@ -1321,6 +1386,7 @@ router.get('/tickers', wrap(async (_req, res) => {
       fundingRate: Number(t.funding_rate),
       multiplier: Number(t.quanto_multiplier),
       openInterest: Number(t.total_size),
+      priceRound: roundOf.get(t.contract) ?? 0,
       // 测试网里没上架的合约标出来，别让人点了半天才发现下不了单
       tradable: tradable === null ? true : tradable.has(t.contract),
     }));
