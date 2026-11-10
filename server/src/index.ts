@@ -48,3 +48,15 @@ server.listen(config.port, '127.0.0.1', () => {
 const bye = () => { hub.close(); server.close(); process.exit(0); };
 process.on('SIGINT', bye);
 process.on('SIGTERM', bye);
+
+/**
+ * 一个漏网的异常不该让整个台子停掉。
+ * 进程一死，页面不会自己发现 —— 它继续显示最后一帧持仓和均价，看着就像「线画错了」。
+ * 记下来、继续跑；页面那边也会在数据停更时直说。
+ */
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] 未捕获的异常，进程继续运行：', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[fatal] 未处理的 Promise 拒绝，进程继续运行：', err);
+});

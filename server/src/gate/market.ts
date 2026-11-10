@@ -20,6 +20,15 @@ interface GateTrade {
   contract: string;
 }
 
+interface GateTicker {
+  contract: string;
+  last: string;
+  mark_price: string;
+  change_percentage: string;
+  funding_rate: string;
+  volume_24h_quote: string;
+}
+
 type Client = { id: number; send: (data: string) => void };
 
 /**
@@ -48,7 +57,13 @@ export class MarketHub {
       };
       this.clients.set(id, client);
       sock.send(JSON.stringify({ type: 'hello', ts: Date.now() }));
-      sock.on('message', (raw) => this.onClientMessage(client, raw.toString()));
+      sock.on('message', (raw) => {
+        try {
+          this.onClientMessage(client, raw.toString());
+        } catch (err) {
+          console.warn('[ws] 解析客户端消息失败:', err instanceof Error ? err.message : String(err));
+        }
+      });
       sock.on('close', () => {
         this.clients.delete(id);
         for (const [key, sub] of this.wanted) {
@@ -71,6 +86,9 @@ export class MarketHub {
       this.dropAllRefs(client.id);
       this.addWanted(client.id, `candles:${interval}:${contract}`, 'futures.candlesticks', [interval, contract]);
       this.addWanted(client.id, `trades:${contract}`, 'futures.trades', [contract]);
+      // 最新价和标记价也走推送：轮询一次要十几秒，持仓的已盈亏就跟着旧价算，
+      // 看上去像「数据半天不动」。标记价才是交易所算盈亏用的那个价。
+      this.addWanted(client.id, `tickers:${contract}`, 'futures.tickers', [contract]);
       client.send(JSON.stringify({ type: 'subscribed', contract, interval }));
     }
   }
@@ -119,7 +137,15 @@ export class MarketHub {
       this.heartbeat.unref();
     });
 
-    ws.on('message', (buf) => this.onGateMessage(buf.toString()));
+    // 交易所偶尔会推形状不对的帧。不兜住的话异常会冒到事件循环上把进程带走 ——
+    // 页面还开着，数据却停在那一刻，看起来就像「均价跑到别处去了」。
+    ws.on('message', (buf) => {
+      try {
+        this.onGateMessage(buf.toString());
+      } catch (err) {
+        console.warn('[ws] 解析行情帧失败:', err instanceof Error ? err.message : String(err));
+      }
+    });
 
     ws.on('close', (code, reason) => {
       this.alive = false;
@@ -165,6 +191,21 @@ export class MarketHub {
           closed: c.w === true,
         },
       });
+      return;
+    }
+
+    if (msg.channel === 'futures.tickers' && Array.isArray(msg.result)) {
+      for (const t of msg.result as GateTicker[]) {
+        this.broadcast({
+          type: 'ticker',
+          contract: t.contract,
+          last: Number(t.last),
+          mark: Number(t.mark_price),
+          change24h: Number(t.change_percentage),
+          fundingRate: Number(t.funding_rate),
+          volume24hUsd: Number(t.volume_24h_quote),
+        });
+      }
       return;
     }
 

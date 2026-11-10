@@ -10,6 +10,17 @@ export const fmtPct = (v: number, digits = 2): string =>
 export const fmtUsd = (v: number, digits = 2): string =>
   Number.isFinite(v) ? v.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
 
+/**
+ * 盈亏这类钱：两位小数会把「亏了 3 厘」写成 -0.00，看着像没亏。
+ * 按量级补位数，0.01 以下给四位。
+ */
+export const fmtMoney = (v: number): string => {
+  if (!Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs === 0) return fmtUsd(0, 2);
+  return fmtUsd(v, abs >= 1 ? 2 : abs >= 0.01 ? 3 : 4);
+};
+
 export const compact = (v: number): string => {
   if (!Number.isFinite(v)) return '—';
   const abs = Math.abs(v);

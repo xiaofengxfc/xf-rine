@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
   type Account, type AppConfig, type Bar, type Bracket, type ContractInfo,
-  type LevelsResponse, type LiveBar, type NewsDigest, type OpenOrder, type Pattern, type Position, type PriceOrder, type Ticker,
+  type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Pattern, type Position,
+  type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
 import ChartPane from './components/ChartPane.tsx';
@@ -87,6 +88,9 @@ export default function App() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<OpenOrder[]>([]);
   const [priceOrders, setPriceOrders] = useState<PriceOrder[]>([]);
+  /** 私有数据最后一次成功刷新的时刻，以及失败原因（失败时界面要直说，不能装作还是新的） */
+  const [privateAt, setPrivateAt] = useState(0);
+  const [privateErr, setPrivateErr] = useState<string | null>(null);
   const [armed, setArmed] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [wsAlive, setWsAlive] = useState(false);
@@ -116,6 +120,13 @@ export default function App() {
   const marketRef = useRef(market);
   useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
+  /** 私有数据的请求序号：轮询和手动刷新撞在一起时，只认最后发出去的那一份 */
+  const privateSeqRef = useRef(0);
+  /**
+   * ws 推上来的行情。每秒好几帧，每帧都 setState 会把整棵树重渲染好几遍，
+   * 所以先攒在 ref 里，300ms 一次刷进状态 —— 肉眼看是连续的，React 也扛得住。
+   */
+  const pendingTickerRef = useRef<LiveTicker | null>(null);
 
   // 抽屉开着的时候按 Esc 收起来。手机上没键盘，但接外接键盘的平板有。
   useEffect(() => {
@@ -243,15 +254,21 @@ export default function App() {
 
   const loadPrivate = useCallback(async () => {
     if (!config?.keys.configured) return;
+    const seq = ++privateSeqRef.current;
     try {
-      const [a, p, o, t] = await Promise.all([
-        jget<Account>('/api/account'),
-        jget<Position[]>('/api/positions'),
-        jget<OpenOrder[]>('/api/orders'),
-        jget<PriceOrder[]>('/api/price-orders'),
-      ]);
-      setAccount(a); setPositions(p); setOrders(o); setPriceOrders(t);
-    } catch { /* 私有接口挂了不影响看盘 */ }
+      // 一次取全：账户、持仓、委托、触发单。分四次发的话，四份回包来自四个时刻，
+      // 持仓和它的止损单可能一个新一个旧，看起来就像「止损没挂上」。
+      const s = await jget<PrivateState>('/api/private-state');
+      if (seq !== privateSeqRef.current) return;
+      setAccount(s.account); setPositions(s.positions); setOrders(s.orders); setPriceOrders(s.priceOrders);
+      setPrivateAt(Date.now());
+      setPrivateErr(null);
+    } catch (e) {
+      // 服务端挂了或者交易所一直报错时，页面原来会一声不响地停在最后一份快照上 ——
+      // 仓位、均价、盈亏全是旧的，看着就像「线画错了」。现在把它记下来，界面上直说。
+      if (seq !== privateSeqRef.current) return;
+      setPrivateErr((e as Error).message || '刷新失败');
+    }
   }, [config?.keys.configured]);
 
   useEffect(() => { void loadConfig(); void loadTickers(); }, [loadConfig, loadTickers]);
@@ -264,9 +281,56 @@ export default function App() {
 
   useEffect(() => {
     void loadPrivate();
-    const t = window.setInterval(() => void loadPrivate(), 6_000);
+    // 持仓的已盈亏、挂单、止损止盈都跟着这一份走。3 秒一次：
+    // 慢一档就能看着盘面变了半分钟，卡片上的盈亏还在原处。
+    const t = window.setInterval(() => void loadPrivate(), 3_000);
     return () => window.clearInterval(t);
   }, [loadPrivate]);
+
+  // 上一次没取到就快点再试一次，不用干等下一个 3 秒
+  useEffect(() => {
+    if (!privateErr) return;
+    const t = window.setTimeout(() => void loadPrivate(), 1_200);
+    return () => window.clearTimeout(t);
+  }, [privateErr, privateAt, loadPrivate]);
+
+  // 切回这个标签页、或者窗口重新获得焦点时立刻刷一次：
+  // 浏览器在后台会压制定时器，回来时先对一次账，别让人对着几分前的仓做决定。
+  useEffect(() => {
+    const wake = () => {
+      if (document.visibilityState === 'visible') void loadPrivate();
+    };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('focus', wake);
+    return () => {
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('focus', wake);
+    };
+  }, [loadPrivate]);
+
+  // ws 的行情帧攒够了再写进状态
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const p = pendingTickerRef.current;
+      if (!p) return;
+      pendingTickerRef.current = null;
+      setTickers((prev) => {
+        const i = prev.findIndex((x) => x.contract === p.contract);
+        if (i < 0) return prev;
+        const next = prev.slice();
+        next[i] = {
+          ...next[i]!,
+          last: p.last,
+          mark: p.mark,
+          change24h: p.change24h,
+          fundingRate: p.fundingRate,
+          volume24hUsd: p.volume24hUsd,
+        };
+        return next;
+      });
+    }, 300);
+    return () => window.clearInterval(t);
+  }, []);
 
   // 限价单成交之后才挂得上保护。持仓一出现就补挂一次，挂完或者等太久就把这条丢掉。
   useEffect(() => {
@@ -310,9 +374,15 @@ export default function App() {
       };
 
       ws.onmessage = (ev) => {
-        let msg: { type?: string; contract?: string; bar?: LiveBar };
-        try { msg = JSON.parse(ev.data); } catch { return; }
-        if (msg.type === 'candle' && msg.bar && msg.contract === contract) {
+        let msg: WsMessage;
+        try { msg = JSON.parse(ev.data) as WsMessage; } catch { return; }
+        // 最新价、标记价、24 小时涨跌每秒好几帧。标记价就是交易所算已盈亏用的那个价，
+        // 所以顶栏、图上摘要、持仓卡的数字都跟着它走，不用等下一次轮询。
+        if (msg.type === 'ticker') {
+          if (msg.contract === contract) pendingTickerRef.current = msg;
+          return;
+        }
+        if (msg.type === 'candle' && msg.contract === contract) {
           const b = msg.bar;
           // 行情里收到的这根属于哪个 key，就只有那个 key 的快照能收下它
           const key = `${contract}:${interval}`;
@@ -428,6 +498,47 @@ export default function App() {
     }
     return m;
   }, [tickers]);
+  /**
+   * 每个合约最新的标记价。持仓卡里可能还列着别的合约，盈亏各按各自的标记价算 ——
+   * 交易所的 unrealised_pnl 也是按标记价来的，用最新价算会和交易所差几个点。
+   */
+  const markMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of tickers) if (t.mark > 0) m.set(t.contract, t.mark);
+    return m;
+  }, [tickers]);
+
+  /** 图上的已盈亏按这个价算，和持仓卡、和交易所同一个价 */
+  const markPrice = ticker && ticker.mark > 0 ? ticker.mark : info?.markPrice ?? 0;
+
+  /**
+   * 下单面板用的合约信息：现价和标记价换成 ws 的最新一帧，其余（乘数、最小变动、杠杆上限）还是合约元数据。
+   * 原来这两项只在切币种时取过一次，现价能停在十几秒前 —— 限价、止损方向、风险张数全按旧价算。
+   */
+  const liveInfo = useMemo(() => {
+    if (!info) return null;
+    if (!ticker) return info;
+    return {
+      ...info,
+      price: ticker.last > 0 ? ticker.last : info.price,
+      markPrice: ticker.mark > 0 ? ticker.mark : info.markPrice,
+    };
+  }, [info, ticker]);
+
+  // 行情每 300ms 刷一次，这几条过滤不能跟着重算：
+  // 数组换一份新的，图表就会把价格线全部拆了重画一遍。
+  const myPositions = useMemo(() => positions.filter((p) => p.contract === contract), [positions, contract]);
+  const myOrders = useMemo(() => orders.filter((o) => o.contract === contract), [orders, contract]);
+  const myTriggers = useMemo(() => priceOrders.filter((o) => o.contract === contract), [priceOrders, contract]);
+
+  /**
+   * 私有数据停更了没有。停更时页面上的仓位、均价、盈亏全是旧快照 ——
+   * 不说清楚的话，用户会以为图上的均价线画错了。
+   */
+  const privateStale = privateErr
+    ? { err: privateErr, ageMs: privateAt > 0 ? Date.now() - privateAt : 0 }
+    : null;
+
   const bracketForSide = side === 'long' ? levels?.brackets.long ?? null : levels?.brackets.short ?? null;
 
   const onManualLevels = useCallback((prices: number[]) => setManualLevels(prices), []);
@@ -466,8 +577,13 @@ export default function App() {
             levels={levels?.levels ?? []}
             patterns={fresh ? (levels?.patterns ?? EMPTY_PATTERNS) : EMPTY_PATTERNS}
             bracket={bracketForSide}
-            positions={positions.filter((p) => p.contract === contract)}
-            orders={orders.filter((o) => o.contract === contract)}
+            positions={myPositions}
+            orders={myOrders}
+            priceOrders={myTriggers}
+            multiplier={info?.multiplier ?? 0}
+            markPrice={markPrice}
+            priceRound={priceRound}
+            stale={privateStale}
             resetKey={`${contract}:${interval}`}
             loading={loading}
             onNeedOlder={loadOlder}
@@ -477,7 +593,7 @@ export default function App() {
           <LevelsStrip
             levels={levels?.levels ?? []}
             manual={manualLevels}
-            price={levels?.last ?? ticker?.last ?? 0}
+            price={ticker?.last || levels?.last || 0}
             priceRound={priceRound}
             atr={levels?.atr ?? 0}
           />
@@ -507,7 +623,7 @@ export default function App() {
           />
 
           <OrderTicket
-            contract={info}
+            contract={liveInfo}
             bracket={bracketForSide}
             applied={applied}
             armed={armed}
@@ -532,6 +648,8 @@ export default function App() {
             shortBracket={levels?.brackets.short ?? null}
             priceRound={priceRound}
             rounds={roundMap}
+            marks={markMap}
+            stale={privateStale}
             armed={armed}
             token={token}
             onToast={push}

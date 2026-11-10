@@ -65,14 +65,15 @@ export default function OrderTicket({
     setLeverage((v) => Math.min(Math.max(1, v), levMax));
   }, [levMax]);
 
-  // 从「自动档位」套用过来：填方向 + 限价，保护直接用这套方案的价
+  /**
+   * 从「自动止盈止损」卡片套用过来：只带方向和这套方案的止损止盈。
+   * 限价框不动 —— 里面那个价是用户自己填的（或者自动填的现价），
+   * 方案里的 entry 只是「结构上理想的入场价」，拿它盖掉用户填的价，
+   * 等于悄悄地改了他要下的单。
+   */
   useEffect(() => {
     if (!applied) return;
     setSide(applied.bracket.direction);
-    setPriceMode('limit');
-    setLimitStr(String(applied.bracket.entry));
-    // 这个价是用户点「套用」指定的，不能被「限价框自动填现价」那一步盖掉
-    autoLimitRef.current = true;
     setProtect('plan');
     setPending(false);
   }, [applied]);
@@ -212,6 +213,8 @@ export default function OrderTicket({
       // 手动设和用方案都归到 effStop/effTarget 上，不设就是 0/0（不挂保护）
       type Attach =
         | { status: 'attached'; created: { kind: string }[] }
+        /** 止损止盈只挂上了一边，另一边被交易所拒了 */
+        | { status: 'partial'; created: { kind: string }[]; errors: string[] }
         | { status: 'pending' }
         | { status: 'failed'; error: string }
         | null;
@@ -234,9 +237,11 @@ export default function OrderTicket({
         `下单成功 #${r.order.id}`,
         `${r.order.status} · 名义 ${fmtUsd(r.checked.notional)} USDT`
         + `${r.order.fillPrice ? ` · 成交价 ${r.order.fillPrice}` : ''}`
-        + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
+        + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'partial' ? ' · 保护只挂上了一边' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
       );
       if (b?.status === 'failed') onToast('err', '保护单没挂上', b.error);
+      // 一边挂上、一边没挂上是最危险的情况：看着有保护，实际少了一半
+      if (b?.status === 'partial') onToast('err', '保护只挂上了一边', b.errors.join(' · '));
       if (b?.status === 'pending') onQueueProtect({ contract: contract.name, direction: side, stop: effStop, target: effTarget });
       setPending(false);
       setSizeStr('');
@@ -376,6 +381,7 @@ export default function OrderTicket({
               <div className="edit-note" style={{ marginBottom: 6 }}>
                 成交后按下面的方案价挂，盈亏比 {planBracket.riskReward.toFixed(2)}。
                 限价单还没成交就先记着，等它成交页面自动补挂。
+                方案入场价 {fmtPrice(planBracket.entry, priceRound)} 只是参考，不会改上面填的限价。
               </div>
               {planWrong.stop && (
                 <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>

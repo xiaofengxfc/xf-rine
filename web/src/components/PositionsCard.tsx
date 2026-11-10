@@ -4,9 +4,9 @@ import {
   type Bracket, type CanceledTrades, type CloseResult, type LevelsResponse,
   type OpenOrder, type Position, type PriceOrder,
 } from '../lib/api.ts';
-import { fmtPrice, fmtUsd, fmtTime } from '../lib/format.ts';
-
-type Dir = 'long' | 'short';
+import { fmtMoney, fmtPrice, fmtPct, fmtUsd, fmtTime } from '../lib/format.ts';
+import { pnlOf } from '../lib/position.ts';
+import { bracketOf as findBracket, dirLabel, triggerKind, type Dir } from '../lib/protective.ts';
 
 interface Props {
   positions: Position[];
@@ -18,6 +18,10 @@ interface Props {
   priceRound: number;
   /** 每个合约的最小变动价。这张卡会列出别的合约的仓和委托，价格得按各自的来 */
   rounds?: ReadonlyMap<string, number>;
+  /** 每个合约的最新标记价（ws 推上来的）。已盈亏按它现算，交易所也是按标记价算的 */
+  marks?: ReadonlyMap<string, number>;
+  /** 私有数据停更时的信息：卡片上这些仓位是旧快照 */
+  stale?: { err: string; ageMs: number } | null;
   armed: boolean;
   token: string | null;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
@@ -35,7 +39,6 @@ interface BracketEdit {
 }
 
 const keyOf = (contract: string, dir: Dir) => contract + ':' + dir;
-const dirLabel = (d: Dir) => (d === 'long' ? '多' : '空');
 
 /** 平仓顺带撤掉的东西，写成一句能读的话 */
 function cleanupText(c: CanceledTrades | undefined): string {
@@ -46,19 +49,8 @@ function cleanupText(c: CanceledTrades | undefined): string {
   return parts.join(' · ');
 }
 
-/**
- * 一张触发单是止损还是止盈。
- * Gate 的 rule 只看价格走向：1 = 价格 >= 触发价，2 = 价格 <= 触发价。
- * 所以对多头 rule 1 是止盈、rule 2 是止损，对空头正好反过来。
- */
-function triggerKind(o: PriceOrder, dir: Dir): 'stop' | 'target' {
-  const up = o.triggerRule === 1;
-  if (dir === 'long') return up ? 'target' : 'stop';
-  return up ? 'stop' : 'target';
-}
-
 export default function PositionsCard({
-  positions, orders, priceOrders, currentContract, longBracket, shortBracket, priceRound, rounds,
+  positions, orders, priceOrders, currentContract, longBracket, shortBracket, priceRound, rounds, marks, stale,
   armed, token, onToast, onRefresh,
 }: Props) {
   /**
@@ -87,17 +79,8 @@ export default function PositionsCard({
     setOrderEdit((cur) => (cur && orders.some((o) => o.id === cur.id) ? cur : null));
   }, [orders]);
 
-  const triggersOf = (contract: string, dir: Dir) =>
-    priceOrders.filter((o) => o.contract === contract && o.direction === dir);
-
   /** 当前这一边的止损 / 止盈（最多各一张，挂的时候是覆盖的） */
-  const bracketOf = (contract: string, dir: Dir) => {
-    const rows = triggersOf(contract, dir);
-    return {
-      stop: rows.find((o) => triggerKind(o, dir) === 'stop') ?? null,
-      target: rows.find((o) => triggerKind(o, dir) === 'target') ?? null,
-    };
-  };
+  const bracketOf = (contract: string, dir: Dir) => findBracket(priceOrders, contract, dir);
 
   async function closePosition(contract: string, direction: Dir) {
     if (!token) return;
@@ -328,13 +311,24 @@ export default function PositionsCard({
         </div>
       </div>
       <div className="card-body">
+        {stale && (
+          <div className="warn-box" style={{ marginBottom: 8 }}>
+            持仓/委托数据已经 {Math.round(stale.ageMs / 1000)} 秒没更新了（{stale.err}）。
+            下面这些数字是那一刻的快照 —— 重新连上会自动恢复。
+          </div>
+        )}
         {tab === 'pos' && (
           <>
             {positions.length === 0 && <div className="empty">空仓</div>}
             {positions.map((p) => {
               const isLong = p.direction === 'long';
               const k = keyOf(p.contract, p.direction);
-              const pnlCls = p.unrealisedPnl >= 0 ? 'up' : 'down';
+              // 标记价用 ws 推上来的那一份，盈亏跟着它现算 —— 每 3 秒轮询回来的那个数，
+              // 价一动就已经旧了。算不出来（乘数没读到）才退回交易所给的值。
+              // 停更时用快照自己的标记价，不然「旧开仓 + 新价格」会算出一个不存在的盈亏
+              const mark = stale ? p.markPrice : marks?.get(p.contract) ?? p.markPrice;
+              const pnl = pnlOf(p, mark);
+              const pnlCls = pnl.pnl >= 0 ? 'up' : 'down';
               const cur = bracketOf(p.contract, p.direction);
               const round = roundOf(p.contract);
               const editing = edit && edit.contract === p.contract && edit.direction === p.direction;
@@ -342,12 +336,15 @@ export default function PositionsCard({
                 <div key={k} className={'pos ' + (isLong ? 'long' : 'short')}>
                   <div className="pos-top">
                     <span className="nm">{p.contract.replace('_USDT', '')} <span className="dim" style={{ fontSize: 10 }}>{isLong ? '多' : '空'} · {p.leverage}x</span></span>
-                    <span className={'num ' + pnlCls}>{fmtUsd(p.unrealisedPnl)}</span>
+                    <span className={'num ' + pnlCls}>
+                      {fmtMoney(pnl.pnl)}
+                      {pnl.pct !== null && <span className="dim"> ({fmtPct(pnl.pct, 2)})</span>}
+                    </span>
                   </div>
                   <div className="pos-grid">
                     <div><span>张数</span><span>{Math.abs(p.size)}</span></div>
                     <div><span>开仓价</span><span>{fmtPrice(p.entryPrice, round)}</span></div>
-                    <div><span>标记价</span><span>{fmtPrice(p.markPrice, round)}</span></div>
+                    <div><span>标记价</span><span>{fmtPrice(mark, round)}</span></div>
                     <div><span>强平价</span><span>{p.liqPrice > 0 ? fmtPrice(p.liqPrice, round) : '—'}</span></div>
                     <div><span>价值</span><span>{fmtUsd(p.value, 0)}</span></div>
                     <div><span>持仓模式</span><span>{p.mode === 'single' ? '单向' : p.mode === 'dual_long' ? '双向多' : p.mode === 'dual_short' ? '双向空' : p.mode}</span></div>

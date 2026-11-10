@@ -317,6 +317,51 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-size: 10.5px; color: var(--text-2); font-family: var(--mono);
 }
 
+/* 图上的持仓摘要：已盈亏、止损止盈，以及打到那里各平出多少钱。
+   纯展示，不接收鼠标 —— 挡在 K 线上方，但拖动、缩放、画线都照常。 */
+.chart-pos {
+  position: absolute; left: 10px; top: 26px;
+  display: grid; gap: 5px; pointer-events: none;
+  /* 图表的 canvas 自带 z-index，不给这一层压上去就会被盖住 */
+  z-index: 4;
+  max-width: min(340px, calc(100% - 96px));
+}
+.cp-row {
+  display: grid; gap: 1px;
+  padding: 5px 8px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line);
+  background: rgba(9, 11, 15, 0.84);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+.cp-row.long { border-left-color: var(--up); }
+.cp-row.short { border-left-color: var(--down); }
+.cp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.cp-dir { color: var(--text-1); }
+.cp-pnl { font-size: 12.5px; font-weight: 600; }
+.cp-mid { display: flex; gap: 12px; color: var(--text-2); }
+.cp-prot { display: flex; gap: 12px; flex-wrap: wrap; }
+.cp-prot .none { color: var(--warn); }
+
+/* 私有数据停更：图上的均价/止损止盈都是旧快照，先说清楚再让人看 */
+.chart-stale {
+  position: absolute; right: 78px; top: 8px; z-index: 5;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(240, 180, 41, 0.45);
+  background: rgba(240, 180, 41, 0.14);
+  color: var(--warn);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  pointer-events: none;
+  max-width: calc(100% - 96px);
+}
+.chart-pos.stale { opacity: 0.5; }
+
 /* 关键价位带 */
 .levels-strip {
   flex: none;
@@ -982,6 +1027,11 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     min-height: 300px;
   }
   .levels-strip { padding: 6px 10px 8px; }
+  /* 手机上图表矮，摘要再压一档，别把 K 线挡住 */
+  .chart-pos { top: 24px; gap: 4px; }
+  .cp-row { padding: 4px 7px 5px; font-size: 10px; }
+  .cp-pnl { font-size: 11px; }
+  .cp-mid { display: none; }
   /* 这句提示会被挤成一列竖排的字，把工具栏撑成 120 高。手机上看盘不需要它 */
   .chart-tools > .dim { display: none; }
 

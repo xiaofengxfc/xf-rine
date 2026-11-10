@@ -123,6 +123,8 @@ export interface Position {
   contract: string; size: number; direction: 'long' | 'short'; leverage: number;
   entryPrice: number; markPrice: number; liqPrice: number; unrealisedPnl: number;
   value: number; mode: string;
+  /** 合约乘数（每张多少币）。页面按它现算已盈亏，读不到就是 0 */
+  multiplier?: number;
 }
 
 export interface OpenOrder {
@@ -158,6 +160,24 @@ export interface CloseResult {
 }
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
+
+/** 账户这一坨一次取回来的快照，四个字段来自同一时刻 */
+export interface PrivateState {
+  account: Account;
+  positions: Position[];
+  orders: OpenOrder[];
+  priceOrders: PriceOrder[];
+}
+
+/** 行情推送上来的那一帧：最新价、标记价、24 小时涨跌、资金费 */
+export interface LiveTicker {
+  contract: string;
+  last: number;
+  mark: number;
+  change24h: number;
+  fundingRate: number;
+  volume24hUsd: number;
+}
 
 export interface AiSettings {
   configured: boolean;
@@ -217,3 +237,12 @@ export interface Pattern {
 export interface LiveBar {
   time: number; open: number; high: number; low: number; close: number; volume: number; closed: boolean;
 }
+
+/** 服务端 /ws 推下来的东西 */
+export type WsMessage =
+  | { type: 'candle'; contract: string; bar: LiveBar }
+  | ({ type: 'ticker' } & LiveTicker)
+  | { type: 'trade'; contract: string; price: number; size: number; ts: number }
+  | { type: 'hello'; ts: number }
+  | { type: 'subscribed'; contract: string; interval: string }
+  | { type: 'gate_down' };

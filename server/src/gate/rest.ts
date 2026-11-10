@@ -37,12 +37,15 @@ async function request<T>(
   params: Record<string, string | number | boolean | undefined> = {},
   body?: unknown,
   isPrivate = false,
+  /** 覆盖请求地址。只有一处需要：公共接口，但要问「下单环境」那台机器要合约参数 */
+  baseOverride?: string,
 ): Promise<T> {
   // 不能只给 GET/DELETE 拼 query：Gate 的「改杠杆」是 POST 但参数放在 query 上。
   const query = buildQuery(params);
   const bodyStr = body === undefined ? '' : JSON.stringify(body);
   const fullPath = PREFIX + path;
-  const url = (isPrivate ? restBaseUrl() : publicBaseUrl()) + fullPath + (query ? `?${query}` : '');
+  const base = baseOverride ?? (isPrivate ? restBaseUrl() : publicBaseUrl());
+  const url = base + fullPath + (query ? `?${query}` : '');
 
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (bodyStr) headers['Content-Type'] = 'application/json';
@@ -85,6 +88,15 @@ async function request<T>(
 
 export const gatePublic = <T>(path: string, params: Record<string, string | number | boolean | undefined> = {}) =>
   request<T>('GET', path, params);
+
+/**
+ * 公共接口，但走「下单环境」那台机器。
+ * 合约参数（最小变动价、杠杆范围）是交易所自己的规则，测试网和主网会不一样：
+ * 实测 ETH_USDT 的 order_price_round 主网 0.01、测试网 0.05。
+ * 拿主网的位数去挂测试网的触发单，交易所会回 trigger.price is not an integer multiple of a price unit。
+ */
+export const gatePublicTrade = <T>(path: string, params: Record<string, string | number | boolean | undefined> = {}) =>
+  request<T>('GET', path, params, undefined, false, restBaseUrl());
 
 export function requireKeys(): void {
   if (!config.key || !config.secret) {

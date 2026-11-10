@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint, type GateEnv } from './config.js';
-import { gatePublic, gatePrivate, GateError, requireKeys } from './gate/rest.js';
+import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
@@ -107,6 +107,29 @@ async function allContracts(): Promise<GateContract[]> {
   const list = await gatePublic<GateContract[]>('/futures/usdt/contracts');
   contractCache = { at: Date.now(), list };
   return list;
+}
+
+/**
+ * 合约参数按「下单环境」取。行情永远走主网，但最小变动价、杠杆范围这些是交易所
+ * 自己的规则，两个环境并不一样（实测 ETH_USDT：主网 order_price_round=0.01，测试网 0.05）。
+ * 拿主网的位数去挂测试网的触发单，交易所会回
+ *   trigger.price is not an integer multiple of a price unit
+ * 只有一边失败的时候，页面还写着「保护单已挂」—— 止损没挂上也不吭声。
+ */
+let tradeContractCache: { at: number; list: GateContract[] } | null = null;
+async function tradeContracts(): Promise<GateContract[]> {
+  if (tradeContractCache && Date.now() - tradeContractCache.at < 60_000) return tradeContractCache.list;
+  const list = await gatePublicTrade<GateContract[]>('/futures/usdt/contracts');
+  tradeContractCache = { at: Date.now(), list };
+  return list;
+}
+
+/** 下单要用的那份合约参数：最小变动、杠杆范围、偏离上限都按这台机器来 */
+async function tradeContract(name: string): Promise<GateContract> {
+  const list = await tradeContracts().catch(() => [] as GateContract[]);
+  const hit = list.find((c) => c.name === name);
+  if (hit) return hit;
+  return gatePublicTrade<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
 }
 
 router.get('/contracts', wrap(async (_req, res) => {
@@ -458,14 +481,18 @@ interface GatePosition {
   liq_price: string; unrealised_pnl: string; realised_pnl: string; mode: string; value: string;
 }
 
-router.get('/account', wrap(async (_req, res) => {
+async function readAccount() {
   const a = await gatePrivate<Record<string, string>>('GET', '/futures/usdt/accounts');
-  res.json({
+  return {
     total: Number(a.total ?? 0),
     available: Number(a.available ?? 0),
     unrealisedPnl: Number(a.unrealised_pnl ?? 0),
     currency: a.currency ?? 'USDT',
-  });
+  };
+}
+
+router.get('/account', wrap(async (_req, res) => {
+  res.json(await readAccount());
 }));
 
 /**
@@ -517,22 +544,34 @@ async function readSides(contract: string): Promise<Side[]> {
   return out;
 }
 
-router.get('/positions', wrap(async (_req, res) => {
+/**
+ * 当前所有持仓。
+ *
+ * 每一条都带上合约乘数：页面要按「(标记价 - 开仓价) × 张数 × 乘数，空头取负」自己现算已盈亏。
+ * 只靠每次轮询带回来的那个数，价一动它就已经旧了，而且多空两边看不到同一个口径。
+ * 这个式子和交易所的 unrealised_pnl 完全一致（模拟盘上多空各 1 张实测过），所以两边不会打架。
+ */
+async function readPositions() {
   const list = await gatePrivate<GatePosition[]>('GET', '/futures/usdt/positions');
-  res.json(list.filter((p) => p.size !== 0).map((p) => {
-    return {
-      contract: p.contract,
-      size: Math.abs(p.size),
-      direction: sideOf(String(p.mode ?? ''), p.size),
-      leverage: Number(p.leverage),
-      entryPrice: Number(p.entry_price),
-      markPrice: Number(p.mark_price),
-      liqPrice: Number(p.liq_price),
-      unrealisedPnl: Number(p.unrealised_pnl),
-      value: Math.abs(Number(p.value)),
-      mode: p.mode,
-    };
+  const contracts = await tradeContracts().catch(() => [] as GateContract[]);
+  const multOf = new Map(contracts.map((c) => [c.name, Number(c.quanto_multiplier)]));
+  return list.filter((p) => p.size !== 0).map((p) => ({
+    contract: p.contract,
+    size: Math.abs(p.size),
+    direction: sideOf(String(p.mode ?? ''), p.size),
+    leverage: Number(p.leverage),
+    entryPrice: Number(p.entry_price),
+    markPrice: Number(p.mark_price),
+    liqPrice: Number(p.liq_price),
+    unrealisedPnl: Number(p.unrealised_pnl),
+    value: Math.abs(Number(p.value)),
+    mode: p.mode,
+    multiplier: multOf.get(p.contract) ?? 0,
   }));
+}
+
+router.get('/positions', wrap(async (_req, res) => {
+  res.json(await readPositions());
 }));
 
 /**
@@ -549,10 +588,9 @@ function unixSeconds(v: unknown): number {
   return n;
 }
 
-router.get('/orders', wrap(async (req, res) => {
-  const contract = req.query.contract ? String(req.query.contract) : undefined;
+async function readOpenOrders(contract?: string) {
   const list = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/orders', { contract, status: 'open' });
-  res.json(list.map((o) => ({
+  return list.map((o) => ({
     id: String(o.id),
     contract: String(o.contract),
     size: Number(o.size),
@@ -564,7 +602,12 @@ router.get('/orders', wrap(async (req, res) => {
     reduceOnly: Boolean(o.is_reduce_only),
     createTime: unixSeconds(o.create_time),
     tif: String(o.tif),
-  })));
+  }));
+}
+
+router.get('/orders', wrap(async (req, res) => {
+  const contract = req.query.contract ? String(req.query.contract) : undefined;
+  res.json(await readOpenOrders(contract));
 }));
 
 interface Trigger {
@@ -611,6 +654,23 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
 
 router.get('/price-orders', wrap(async (_req, res) => {
   res.json(await readTriggers());
+}));
+
+/**
+ * 账户、持仓、委托、触发单一次取全。
+ *
+ * 页面每 3 秒刷一次这些私有数据。分开取要发四个请求，而且四个响应来自四个时刻 ——
+ * 持仓和它的止损单可能一个新一个旧，看上去就像「止损没挂上」。
+ * 合成一个接口顺带把一次刷新的延迟压到一个往返里。
+ */
+router.get('/private-state', wrap(async (_req, res) => {
+  const [account, positions, orders, priceOrders] = await Promise.all([
+    readAccount(),
+    readPositions(),
+    readOpenOrders(),
+    readTriggers(),
+  ]);
+  res.json({ account, positions, orders, priceOrders });
 }));
 
 // ---------- 平仓、反手之前要清掉的东西 ----------
@@ -730,7 +790,7 @@ router.post('/leverage', wrap(async (req, res) => {
   const { contract, leverage } = req.body ?? {};
   const lev = Math.round(Number(leverage));
   if (!contract || !Number.isFinite(lev)) throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 leverage');
-  const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
+  const c = await tradeContract(contract);
   if (lev < Number(c.leverage_min) || lev > Number(c.leverage_max)) {
     throw new GateError(400, 'LEVERAGE_RANGE', `该合约杠杆范围 ${c.leverage_min} - ${c.leverage_max}`);
   }
@@ -778,7 +838,8 @@ interface PreparedOrder {
  */
 async function prepareOrder(spec: PlaceSpec): Promise<PreparedOrder> {
   const contract = String(spec.contract);
-  const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
+  // 参数取自下单环境：价格位数、杠杆范围、偏离上限都按那台交易所的规则，不是主网行情的
+  const c = await tradeContract(contract);
 
   if (spec.autoSize) {
     if (Math.round(Number(spec.size)) !== 0) throw new GateError(400, 'BAD_INPUT', '整边平仓不能指定张数');
@@ -1101,7 +1162,7 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   }
   const otherOpen = sides.some((s) => s.direction !== dir && s.size > 0);
 
-  const c = await gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(contract)}`);
+  const c = await tradeContract(contract);
   const last = Number(c.last_price) || 0;
   const mark = mine && mine.markPrice > 0 ? mine.markPrice : last;
 
@@ -1177,7 +1238,10 @@ async function attachAfterEntry(contract: string, dir: Direction, stop: number, 
     const sides = await readSides(contract).catch(() => [] as Side[]);
     if (sides.some((s) => s.direction === dir && s.size > 0)) {
       try {
-        return { status: 'attached' as const, ...(await applyBracket(contract, dir, stop, target)) };
+        const r = await applyBracket(contract, dir, stop, target);
+        // 止损挂上、止盈没挂上也算「没挂全」。原来这里一律报 attached，
+        // 页面就显示「保护单已挂」，可实际上少了一边 —— 止损没挂上是会赔钱的。
+        return { status: r.errors.length > 0 ? ('partial' as const) : ('attached' as const), ...r };
       } catch (e) {
         return { status: 'failed' as const, error: e instanceof GateError ? `${e.label} ${e.detail}` : String(e) };
       }
