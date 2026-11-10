@@ -13,8 +13,96 @@ import { randomUUID } from 'node:crypto';
 
 export const router = Router();
 
-const barCache = new Map<string, { at: number; bars: Bar[] }>();
 const INTERVALS = new Set(['10s', '1m', '5m', '15m', '30m', '1h', '4h', '8h', '1d', '7d']);
+
+/** 每个周期一根 K 线占多少秒。判断缓存里那一段连不连得上要靠它 */
+const STEP_SEC: Record<string, number> = {
+  '10s': 10, '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
+  '1h': 3600, '4h': 14400, '8h': 28800, '1d': 86400, '7d': 604800,
+};
+
+/**
+ * K 线时间轴。
+ *
+ * 以前是按「合约:周期:根数:before」缓存整页，4 秒就过期 —— 往回拖每拖一屏
+ * 都要重新问一次交易所（一次一到三秒），拖回来的时候也是。
+ *
+ * 历史 K 线其实不会变，所以改成按 (合约, 周期) 攒成一条时间轴：
+ * 已经拉过的区间谁来要都直接切一段给他，只有要的窗口确实在时间轴外面才补。
+ * 最新那一页还在长，单独用 NEWEST_TTL 管过期。
+ */
+interface BarSeries {
+  /** 按时间升序，中间不断档（断档的页不会并进来） */
+  bars: Bar[];
+  /** 最新一页是什么时候拉的 */
+  newestAt: number;
+  /** 最后一次被用到的时间，用来淘汰最久没人看的 */
+  usedAt: number;
+  /** 交易所那条约一万个点的边界已经撞到了，别再往上打 */
+  exhausted: boolean;
+}
+const seriesCache = new Map<string, BarSeries>();
+const SERIES_MAX_BARS = 12000;
+const SERIES_KEEP = 8;
+const NEWEST_TTL = 4000;
+
+function seriesFor(key: string): BarSeries {
+  const hit = seriesCache.get(key);
+  if (hit) { hit.usedAt = Date.now(); return hit; }
+  const fresh: BarSeries = { bars: [], newestAt: 0, usedAt: Date.now(), exhausted: false };
+  if (seriesCache.size >= SERIES_KEEP) {
+    let victim = '';
+    let oldest = Infinity;
+    for (const [k, v] of seriesCache) {
+      if (v.usedAt < oldest) { oldest = v.usedAt; victim = k; }
+    }
+    if (victim) seriesCache.delete(victim);
+  }
+  seriesCache.set(key, fresh);
+  return fresh;
+}
+
+/** 第一个 time >= t 的位置（时间轴有序） */
+function lowerBoundTime(bars: Bar[], t: number): number {
+  let lo = 0;
+  let hi = bars.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (bars[mid]!.time < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * 从 end 往前数，取一段连续的 K 线（间隔正好 step），最多 limit 根。
+ * 遇到断档就停：中间真缺了一段的话，宁可少给、让调用方去补，也不要给一条假的时间轴。
+ */
+function contiguousRun(bars: Bar[], end: number, limit: number, step: number): Bar[] {
+  if (end <= 0) return [];
+  let start = end - 1;
+  while (start > 0 && bars[start - 1]!.time === bars[start]!.time - step) start -= 1;
+  return bars.slice(Math.max(start, end - limit), end);
+}
+
+/** 把一段 K 线并进时间轴：按时间对齐，同一时间以新的为准（最后一根还在走） */
+function mergeInto(s: BarSeries, add: Bar[]): void {
+  if (add.length === 0) return;
+  const a = s.bars;
+  const out: Bar[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < add.length) {
+    const x = a[i]!;
+    const y = add[j]!;
+    if (x.time < y.time) { out.push(x); i += 1; }
+    else if (x.time > y.time) { out.push(y); j += 1; }
+    else { out.push(y); i += 1; j += 1; }
+  }
+  while (i < a.length) out.push(a[i++]!);
+  while (j < add.length) out.push(add[j++]!);
+  s.bars = out.length > SERIES_MAX_BARS ? out.slice(out.length - SERIES_MAX_BARS) : out;
+}
 
 /** 会带出密钥或者会动真钱的接口，只认本机回环地址 */
 function requireLocal(req: Request, what: string): void {
@@ -211,21 +299,18 @@ router.get('/contracts/:name', wrap(async (req, res) => {
 
 interface GateCandle { t: number; o: string; h: string; l: string; c: string; v: number; sum: string }
 
-async function loadCandles(
-  contract: string,
-  interval: string,
-  limit: number,
-  fresh = false,
-  /** 只要早于这个时间的 K 线（秒）。不传就是取最新的 limit 根。 */
-  before?: number,
-): Promise<Bar[]> {
-  const key = `${contract}:${interval}:${limit}:${before ?? 0}`;
-  const hit = barCache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < 4000) return hit.bars;
+/**
+ * 去交易所要一页。
+ *
+ * Gate 的 to 是闭区间：给 to=X、limit=1000，拿到的是 [X-999根, X]，含 X 那根。
+ * 我们要的是「X 之前的 1000 根」，所以 to 得往前挪一根 —— 否则那 1000 根里有一根
+ * 是重复的 X，丢掉之后只剩 999 根，接缝处就少一根，图上看着是断的。
+ */
+async function fetchPage(contract: string, interval: string, limit: number, step: number, before?: number): Promise<Bar[]> {
   const params: Record<string, string | number> = { contract, interval, limit };
-  if (before) params.to = before;
+  if (before) params.to = before - step;
   const raw = await gatePublic<GateCandle[]>('/futures/usdt/candlesticks', params);
-  const bars: Bar[] = raw
+  return raw
     .map((c) => ({
       time: Number(c.t),
       open: Number(c.o),
@@ -234,11 +319,58 @@ async function loadCandles(
       close: Number(c.c),
       volume: Number(c.v),
     }))
-    // Gate 的 to 是闭区间，边界那根会重复出现，这里切掉
     .filter((b) => !before || b.time < before)
-    .sort((a, b) => a.time - b.time);
-  barCache.set(key, { at: Date.now(), bars });
-  return bars;
+    .sort((x, y) => x.time - y.time);
+}
+
+/**
+ * 取一段 K 线。
+ *
+ * before 有值：要早于它的 limit 根。先看时间轴里有没有 —— 有就切一段，一次上游都不打；
+ * 不够才补一页，补完再切（补的那页和原来的接上了，所以切出来的必然连续）。
+ * before 没值：要最新的 limit 根，tailTtl 之内直接用时间轴尾巴。
+ *
+ * tailTtl 是给「档位」那种慢半拍也无所谓的调用方的：它只看得上收盘的 K 线，
+ * 一根之内拿到的都算新，没必要每 45 秒就为它去交易所跑一趟。
+ */
+async function loadCandles(
+  contract: string,
+  interval: string,
+  limit: number,
+  fresh = false,
+  /** 只要早于这个时间的 K 线（秒）。不传就是取最新的 limit 根。 */
+  before?: number,
+  tailTtl = NEWEST_TTL,
+): Promise<Bar[]> {
+  const series = seriesFor(`${contract}:${interval}`);
+  const step = STEP_SEC[interval] ?? 60;
+
+  if (before) {
+    const cached = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
+    if (!fresh && cached.length >= limit) return cached;
+    const oldest = series.bars.length > 0 ? series.bars[0]!.time : Infinity;
+    if (!series.exhausted) {
+      try {
+        mergeInto(series, await fetchPage(contract, interval, limit, step, before));
+      } catch (e) {
+        if (!(e instanceof GateError)) throw e;
+        /**
+         * 交易所只留最近一万个点，翻过头它回 INVALID_PARAM_VALUE / too long ago。
+         * 那不是错，是到头了：记下来，此后直接给空页，前端就知道不用再往前要。
+         * 只有「要的比已经知道的最老那根还老」才算到头 —— 中途一次失败不能把
+         * 这条时间轴永久锁死，否则换个位置回来还是空的。
+         */
+        if (/too long ago|INVALID_PARAM_VALUE/i.test(e.message) && before <= oldest) series.exhausted = true;
+      }
+    }
+    return contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
+  }
+
+  const tailFresh = series.newestAt > 0 && Date.now() - series.newestAt < tailTtl;
+  if (!fresh && tailFresh && series.bars.length >= limit) return series.bars.slice(series.bars.length - limit);
+  mergeInto(series, await fetchPage(contract, interval, limit, step));
+  series.newestAt = Date.now();
+  return series.bars.slice(Math.max(0, series.bars.length - limit));
 }
 
 router.get('/candles', wrap(async (req, res) => {
@@ -256,7 +388,8 @@ router.get('/levels', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   const limit = Math.min(1000, Math.max(120, Number(req.query.limit ?? 500)));
-  const bars = await loadCandles(contract, interval, limit);
+  // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
+  const bars = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
   // 丢掉最后一根未走完的 K 线，避免用半根 K 线的影线判位
   const closed = bars.slice(0, -1);
   const set = detectLevels(closed, {

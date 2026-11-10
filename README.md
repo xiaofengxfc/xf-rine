@@ -55,7 +55,7 @@ Windows 上直接双击 `start.bat` 也行。
 ## 打包成安装包
 
 现成的安装包在 [Releases](https://github.com/xiaofengxfc/xf-rine/releases)：
-电脑端 `XunFeng-1.0.0-Setup.exe`、手机端 `XunFeng-1.0.0-arm64.apk`。
+电脑端 `XunFeng-1.0.1-Setup.exe`、手机端 `XunFeng-1.0.1-arm64.apk`。
 
 自己打就两条命令，产物落在本机（安装包不进 git，见上面的说明）。装完之后不用装 Node，也不用开黑框。
 
@@ -66,7 +66,7 @@ pnpm install
 pnpm pack:win
 ```
 
-产物：`desktop/release/XunFeng-1.0.0-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
+产物：`desktop/release/XunFeng-1.0.1-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
 
 装进去的是一个壳，不是把页面拷一份进去：Electron 自带 Node，服务端被 esbuild 打成一个
 2.8 MB 的 `server.cjs`，前端产物放在 `resources/web-dist`。启动时主进程先把服务端拉起来，
@@ -146,6 +146,13 @@ pnpm pack:android
 | APK 八十九兆 | Android 6 起原生库默认不压缩，Node 运行时那个 .so 八十三兆原样进包 | `jniLibs.useLegacyPackaging = true` + 清单 `extractNativeLibs`，压到 34 MB |
 | 三种架构都打进去 | nodejs-mobile 的原生库按 ABI 各一份 | `abiFilters 'arm64-v8a'`，只留现在手机用的那个（要装老设备再加回 `armeabi-v7a`） |
 | 按返回键直接退出程序 | 安卓默认行为 | 先关浮层（设置页、左上角抽屉），没人接手才退出 |
+| `pnpm pack:win` 报成功，`release/` 里还是上一次的安装包 | 脚本写的是 `-F desktop`，桌面端的包名其实叫 `xunfeng`。pnpm 找不到只警告一句，退出码照样 0 | 过滤条件改成按目录：`pnpm --filter ./desktop dist`（手机端同理用 `./mobile`）。改完看 `release/` 的时间戳，别信退出码 |
+| 手机端弹 `The Node.js runtime is already running.` | 页面重载、点重试、从后台回来都会再调一次 `Nodejs.start()`，插件第二次就回这句英文 | 这不是故障，运行时本来就在跑。代码里按「已经在跑」处理，照常等端口；端口真等不到才报错，并把启动时的原因带出来 |
+| 往回拖 K 线，一页要干等一两秒 | 服务端按「合约:周期:根数:before」缓存整页、四秒就过期，同一段历史拖回来还得再问一次交易所（实测 1.4~4 秒） | 改成按「合约:周期」攒一条时间轴：已经拉过的区间直接切一段出来，实测 4 毫秒；只有要的窗口确实在时间轴外面才去补一页 |
+| 往前翻一段后左边一直是空的，像 K 线残缺 | 前端一边并一边 `slice(-3000)`，刚补进来的那页当场被挤掉；补到上限后根数不再变，又掉进「只写最后两根」的增量分支，补来的历史根本没画 | 到上限就不补了（宁可不加也不删），并进来的一律整段重画；翻页改成一页 1000 根，上限一万二千根 |
+| 补历史时画面先「转移」一下才显示 K 线 | 两个来源：挤掉最老数据后视口稳不住，被弹回最新一屏；以及「拿到更旧快照」那条路会调 `fullLoad()` 重置视口 | 两种情况都不再动视口。拿 5.2.1 的库实测过：`setData` 前面插一千根，可见时间一秒不变（逻辑区间自己从 0~160 变成 1000~1160），所以任何「按根数平移」都是帮倒忙 |
+| 停一下再拖，接缝处少一根 K 线 | Gate 的 `to` 是闭区间：`to=X` 会带回 X 那根，把它当重复切掉，那一段就少一根 | 要「X 之前的 N 根」就把 `to` 往前挪一根（`to = X - 周期`），正好 N 根，接缝严丝合缝 |
+| 翻到最老报 400 `Candlestick too long ago` | 交易所只留最近一万个点（1m 约七天） | 服务端把这条当「到头了」：回空页并记住别再问，前端看到不满一页就收手，不再报错 |
 
 ## 第一次配置密钥
 

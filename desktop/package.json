@@ -2,13 +2,13 @@
   "name": "xunfeng",
   "productName": "巡风",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "巡风 · Gate 永续日内台（桌面端）",
   "author": "xf-rine",
   "main": "electron/main.cjs",
   "scripts": {
     "bundle": "node tools/bundle.mjs",
-    "dist": "node tools/bundle.mjs && node node_modules/electron-builder/cli.js --win --x64 --config electron-builder.yml",
+    "dist": "node tools/bundle.mjs && node tools/builder.mjs",
     "start": "electron ."
   },
   "devDependencies": {

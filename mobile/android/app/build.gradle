@@ -20,8 +20,8 @@ android {
         applicationId "com.xfrine.terminal"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // 只打 arm64：Node 运行时的原生库按架构各一份，全打进去光这一项就一百多兆，
         // 而现在的手机清一色 arm64。真要装到老设备上，这里加回 'armeabi-v7a'。

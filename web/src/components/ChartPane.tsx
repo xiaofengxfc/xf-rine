@@ -17,6 +17,7 @@ import {
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
 import type { Bar, Bracket, Level, OpenOrder, Pattern, Position, PriceOrder } from '../lib/api.ts';
+import { firstIndexAtOrAfter, normalizeBars } from '../lib/candles.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
@@ -52,18 +53,11 @@ function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
 }
 
 /**
- * 把 K 线整理成 lightweight-charts 能接受的形状：时间严格递增，重复时间只留最后一根。
- * setData 和 update 都要求时间有序，乱序会直接抛异常。
+ * 离最左边还有多少根就开始要历史。
+ * 交易所一页要一秒到四秒，贴到边缘再要，人就干等着；留出两屏多的余量，
+ * 通常还没拖到边，那一页已经落地了。
  */
-function normalize(bars: Bar[]): Bar[] {
-  const out: Bar[] = [];
-  for (const b of [...bars].sort((x, y) => x.time - y.time)) {
-    const prev = out[out.length - 1];
-    if (prev && prev.time === b.time) out[out.length - 1] = b;
-    else out.push(b);
-  }
-  return out;
-}
+const PREFETCH_BARS = 400;
 
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
 
@@ -122,6 +116,9 @@ export default function ChartPane({
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const patternsRef = useRef<Pattern[]>(patterns);
   const barsRef = useRef<Bar[]>(bars);
+  /** 补历史这件事要在 K 线落地之后再催一次，用 ref 拿最新的回调 */
+  const needOlderRef = useRef(onNeedOlder);
+  needOlderRef.current = onNeedOlder;
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
   const lastTimeRef = useRef<number | null>(null);
@@ -208,15 +205,29 @@ export default function ChartPane({
       setLegend({ o: d.open, h: d.high, l: d.low, c: d.close, v: v?.value ?? 0, t: Number(param.time) });
     });
 
+    /**
+     * 画线工具的吸附要拿 K 线做时间定位，鼠标每动一下它就会问一遍。
+     * 一万多根的话，每问一次就 map 一遍，拖着能明显发涩 —— 缓存一份，数据换了才重算。
+     */
+    let snapSrc: Bar[] | null = null;
+    let snapOut: { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number }[] = [];
+    const snapBars = () => {
+      if (snapSrc !== barsRef.current) {
+        snapSrc = barsRef.current;
+        snapOut = snapSrc.map((b) => ({
+          time: b.time as UTCTimestamp,
+          open: b.open, high: b.high, low: b.low, close: b.close,
+          volume: b.volume,
+        }));
+      }
+      return snapOut;
+    };
+
     const dm = new DrawingManager(chart, price, {
       magnet: 'weak',
       dragToPlace: false,
       clampToPane: true,
-      bars: () => barsRef.current.map((b) => ({
-        time: b.time as UTCTimestamp,
-        open: b.open, high: b.high, low: b.low, close: b.close,
-        volume: b.volume,
-      })),
+      bars: snapBars,
       timeInfo: () => ({ timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intraday: true }),
     });
 
@@ -298,7 +309,7 @@ export default function ChartPane({
       color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
     });
     const fullLoad = () => {
-      const clean = normalize(bars);
+      const clean = normalizeBars(bars);
       price.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
       })));
@@ -331,31 +342,58 @@ export default function ChartPane({
       }
     };
 
+    /**
+     * 整段重画，但**不碰视口**。
+     *
+     * 前面插进来一段历史、或者拿到一份更旧的快照（REST 的缓存可能落后于 WebSocket），
+     * 都走这里。setData 之后库会按时间把视口稳住，所以不动就对了；
+     * 以前这两种情况都调 fullLoad()，那会顺手把视口摆回最新的一屏 —— 正看着历史的人
+     * 会被弹回最右边，看着就是「画面转移了一下」。
+     */
+    const redraw = (clean: Bar[]) => {
+      price.setData(clean.map((b) => ({
+        time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
+      })));
+      vol.setData(clean.map((b) => ({
+        time: b.time as UTCTimestamp,
+        value: b.volume,
+        color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+      })));
+      lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
+      firstTimeRef.current = clean[0]?.time ?? null;
+      countRef.current = clean.length;
+    };
+
     try {
-      // 往前补了历史。整段 setData 就够了，视口不用管（见下面）
-      const cleanBars = normalize(bars);
+      const cleanBars = normalizeBars(bars);
       const prevFirst = firstTimeRef.current;
       const prevCount = countRef.current;
-      if (
-        lastKeyRef.current === resetKey
-        && prevFirst != null
-        && cleanBars.length > prevCount
-        && cleanBars[0]!.time < prevFirst
-      ) {
-        price.setData(cleanBars.map((b) => ({
-          time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-        })));
-        vol.setData(cleanBars.map((b) => ({
-          time: b.time as UTCTimestamp,
-          value: b.volume,
-          color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
-        })));
-        lastTimeRef.current = cleanBars[cleanBars.length - 1]?.time ?? null;
-        firstTimeRef.current = cleanBars[0]?.time ?? null;
-        countRef.current = cleanBars.length;
-        // 这里故意不平移视口。lightweight-charts 的 setData 是按时间对齐的：
-        // 前面插入 500 根之后，它自己就把视口挪到了同样那些 K 线上。
-        // 再按「补进来的根数」平移一次会多跳 500 根，直接飞到数据外面去。
+      /**
+       * 数据的「形状」变了：左边补进来一段，或者左边被裁掉一段。
+       *
+       * 以前只看「根数变多且最左时间更早」。可是往前补到上限时根数不再变，
+       * 那个条件就不成立，补进来的历史掉进增量分支 —— 而增量只写最后两根，
+       * 于是左边一直是空的，看着就是 K 线缺了一段。
+       * 现在只要最左那根的时间变了，就整段重画。
+       */
+      const headMoved = prevFirst != null && cleanBars[0]!.time !== prevFirst;
+      if (lastKeyRef.current === resetKey && (headMoved || cleanBars.length < prevCount)) {
+        /**
+         * 这里不动视口，一个像素都不动。
+         *
+         * 拿 5.2.1 的库实测过：setData 前面插进去一千根之后，视口里的时间是原封不动的
+         * （逻辑区间会自己从 0~160 变成 1000~1160，也就是同一批 K 线）。
+         * 以前那版按「补进来多少根」再平移一次，等于把画面往右推一整页 —— 那才是
+         * 「转移一下画面才显示 K 线」的来源。前面裁掉数据时同理，库也自己稳住。
+         */
+        redraw(cleanBars);
+        /**
+         * 人还贴着左边就接着要下一页。
+         * 一直翻到「离边缘还有两屏」或者交易所那头到头为止 —— 这样拖的时候是连着出，
+         * 而不是停下来等一页、再拖、再等一页。
+         */
+        const after = chart.timeScale().getVisibleLogicalRange();
+        if (after && after.from < PREFETCH_BARS) needOlderRef.current?.();
         return;
       }
 
@@ -372,22 +410,35 @@ export default function ChartPane({
       }
 
       // 拿到的是一份比图上更旧的快照（REST 有缓存，可能落后于 WebSocket 推来的那根），
-      // 增量写不进去，整段重设。
-      const newest = bars[bars.length - 1]!;
+      // 增量写不进去，整段重画 —— 但仍然不碰视口。
+      const newest = cleanBars[cleanBars.length - 1]!;
       const applied = lastTimeRef.current;
       if (applied != null && newest.time < applied) {
-        fullLoad();
+        redraw(cleanBars);
         return;
       }
+      // 中间漏了一大段（切币种、重连之后补回来的），整段重画比逐根 update 快得多
 
-      // 增量：只刷新最后两根。update() 只接受「不比图上最后一根更早」的时间，
-      // 早于它就会抛 Cannot update oldest data —— 这个异常会把整个 React 树卸掉。
-      for (const b of bars.slice(-2)) {
+      /**
+       * 增量：从图上最后一根开始往后写。
+       *
+       * 以前固定只写最后两根。WebSocket 掉线重连、或者连着几帧没收到的时候，
+       * 中间漏掉的那几根就永远补不上，最新那一段看着是缺的。
+       * 现在按时间找起点：正常情况只写一两根，漏了几根就补几根。
+       * update() 不接受比图上最后一根更早的时间，起点用 applied 兜住就不会抛。
+       */
+      const start = applied == null ? cleanBars.length - 1 : firstIndexAtOrAfter(cleanBars, applied);
+      if (cleanBars.length - start > 500) { redraw(cleanBars); return; }
+      for (let i = Math.max(0, start); i < cleanBars.length; i += 1) {
+        const b = cleanBars[i]!;
         if (applied != null && b.time < applied) continue;
         writePrice(b);
         writeVol(b);
         lastTimeRef.current = b.time;
       }
+      // 这两个也一起更新：不更新的话，下一次「左边是不是动过」会拿旧值比，判断全乱
+      firstTimeRef.current = cleanBars[0]!.time;
+      countRef.current = cleanBars.length;
     } catch (err) {
       // 任何写图表的异常都不能冒泡到 React，否则整页变黑
       console.warn('[chart] 写入 K 线失败，改为整段重设', err);
@@ -414,8 +465,8 @@ export default function ChartPane({
         try { localStorage.setItem(viewKey, JSON.stringify({ from: r.from, to: r.to })); } catch { /* 存不了就算了 */ }
       }, 400);
 
-      // from < 6 意味着最左边那几根已经贴到边缘了，该补了
-      if (r.from < 6) onNeedOlder();
+      // 离最左边还有一屏的距离就先要：贴到边缘再要，得干等交易所一秒多
+      if (r.from < PREFETCH_BARS) onNeedOlder();
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
     return () => {

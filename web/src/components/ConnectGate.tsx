@@ -39,6 +39,15 @@ function nodeToken(): string {
  */
 async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: string }> {
   const token = nodeToken();
+  /**
+   * 「已经在跑了」不是失败，是常态：页面重载、点重试、从后台回来、开发模式双调用，
+   * 都会走到这里，而运行时那一次启动本来就是好的。
+   *
+   * 插件抛的是 code=NODE_ALREADY_RUNNING、message="The Node.js runtime is already running."，
+   * 以前只拿下划线那个形状去匹配，空格版本匹配不上，于是这一句英文报错直接甩到用户脸上。
+   * 现在两种形状都认，而且不管它抛什么，都先等端口 —— 端口通了就说明没问题。
+   */
+  let startError = '';
   try {
     const { Nodejs } = await import('@capawesome/capacitor-nodejs');
     await Nodejs.start({
@@ -46,9 +55,10 @@ async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: str
       env: { REMOTE_TOKEN: token, XFRINE_REQUIRE_TOKEN: '1' },
     });
   } catch (e) {
-    // 已经起过一次（比如点了重试）不算失败，接着等它开端口就行
-    const msg = String((e as Error)?.message ?? e);
-    if (!/ALREADY_RUNNING/i.test(msg)) return { ok: false, token, error: msg || '内置服务端没起来' };
+    const err = e as { code?: string; message?: string };
+    const code = String(err?.code ?? '');
+    const msg = String(err?.message ?? e);
+    if (!/already[\s_-]*running/i.test(code + ' ' + msg)) startError = msg || '内置服务端没起来';
   }
 
   // Node 起来到端口能连上，一般一两秒
@@ -63,7 +73,12 @@ async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: str
   if (last.includes('口令')) {
     return { ok: false, token, error: '端口上有另一个实例在跑，口令对不上。把 App 彻底关掉（最近任务里划掉）再打开。' };
   }
-  return { ok: false, token, error: '内置服务端 20 秒内没开起端口' };
+  return {
+    ok: false,
+    token,
+    // 真起不来才把启动时报的原因说出来，不然只有一句「没开起端口」不好查
+    error: startError ? '内置服务端没起来：' + startError : '内置服务端 20 秒内没开起端口',
+  };
 }
 
 /**

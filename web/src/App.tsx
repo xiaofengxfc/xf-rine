@@ -6,6 +6,7 @@ import {
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
+import { mergeOlder } from './lib/candles.ts';
 import { wsUrl } from './lib/endpoint.ts';
 import ChartPane from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
@@ -35,6 +36,15 @@ interface MarketSnap {
 const EMPTY_BARS: Bar[] = [];
 const EMPTY_PATTERNS: Pattern[] = [];
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
+
+/** 往回翻一页要多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
+const OLDER_PAGE = 1000;
+/**
+ * 内存里最多留多少根。
+ * 交易所只留最近一万个点，所以再往前也翻不出新东西了；一万二够接住它给的全部，
+ * 整段重画一次也就三十毫秒的量级。
+ */
+const MAX_BARS = 12000;
 
 const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
@@ -166,28 +176,37 @@ export default function App() {
   const bars = fresh ? market.bars : EMPTY_BARS;
   const levels = fresh ? market.levels : null;
 
-  /** 往左拖到底时补一页历史。失败就静默，用户再拖一次会重试。 */
+  /**
+   * 往左拖到底时补一页更早的 K 线。失败就静默，用户再拖一次会重试。
+   *
+   * 这里以前是「先合并再 slice(-3000)」：真到三千根时，刚补进来的那一页
+   * 会被当场挤掉，图上左边那片反而变空，看着就像 K 线缺了一段。
+   * 现在到上限就不补了，已经画上去的一根都不动。
+   */
   const loadOlder = useCallback(async () => {
     if (olderBusyRef.current || noMoreOlderRef.current) return;
     const cur = marketRef.current;
     if (!cur.bars.length || cur.key === '') return;
+    if (cur.bars.length >= MAX_BARS) return;
     olderBusyRef.current = true;
     try {
       const [name, tf] = cur.key.split(':') as [string, string];
       const before = cur.bars[0]!.time;
       const r = await jget<{ bars: Bar[] }>(
-        `/api/candles?contract=${name}&interval=${tf}&limit=500&before=${before}`,
+        `/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}&before=${before}`,
       );
-      if (r.bars.length === 0) { noMoreOlderRef.current = true; return; }
+      // 不满一页就说明到头了，前端不用再往前要
+      if (r.bars.length < OLDER_PAGE) noMoreOlderRef.current = true;
+      const latest = marketRef.current;
+      if (latest.key !== cur.key) return;
+      const m = mergeOlder(latest.bars, r.bars, MAX_BARS);
+      if (m.full) noMoreOlderRef.current = true;
+      if (m.bars === latest.bars) return;
       setMarket((prev) => {
         if (prev.key !== cur.key) return prev;
-        const seen = new Set(prev.bars.map((b) => b.time));
-        const add = r.bars.filter((b) => !seen.has(b.time));
-        if (add.length === 0) { noMoreOlderRef.current = true; return prev; }
-        const merged = [...add, ...prev.bars].sort((a, b) => a.time - b.time);
-        // 内存里的历史别无限长，3000 根足够看几天
-        if (merged.length > 3000) noMoreOlderRef.current = true;
-        return { ...prev, bars: merged.slice(-3000) };
+        // 合并是纯函数，重算一遍是为了留住这期间 WebSocket 推来的那根
+        const mm = mergeOlder(prev.bars, r.bars, MAX_BARS);
+        return mm.bars === prev.bars ? prev : { ...prev, bars: mm.bars };
       });
     } catch {
       /* 静默失败，拖回去会再试 */

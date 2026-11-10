@@ -8,8 +8,8 @@
     "build": "pnpm -F web build",
     "start": "pnpm -F server start",
     "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck",
-    "pack:win": "pnpm -F web build && pnpm -F desktop dist",
-    "pack:android": "pnpm -F web build && pnpm -F mobile apk"
+    "pack:win": "pnpm -F web build && pnpm --filter ./desktop dist",
+    "pack:android": "pnpm -F web build && pnpm --filter ./mobile apk"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
