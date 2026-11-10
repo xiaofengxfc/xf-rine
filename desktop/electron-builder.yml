@@ -13,8 +13,12 @@ files:
 
 extraResources:
   # 前端产物：服务端启动时用 WEB_DIST 指过来
+  # （web/dist/nodejs 是手机端的内置运行时，电脑端用不上，别跟着进包）
   - from: ../web/dist
     to: web-dist
+    filter:
+      - '**/*'
+      - '!nodejs/**'
   - from: out/server.cjs
     to: server/server.cjs
 
