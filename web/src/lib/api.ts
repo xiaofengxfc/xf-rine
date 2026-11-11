@@ -245,6 +245,8 @@ export interface AppConfig {
   envPath?: string;
   /** 手机端要填的地址和口令。口令只在本机打开页面时才有值 */
   remote?: { enabled: boolean; urls: string[]; token: string | null };
+  /** 反馈寄到哪。信箱内嵌在服务端，页面只显示、不给改 */
+  feedback?: { to: string; from: string; ready: boolean };
 }
 
 export interface NewsItem {

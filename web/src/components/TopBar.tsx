@@ -1,5 +1,6 @@
 import { fmtPct, fmtPrice } from '../lib/format.ts';
 import type { Ticker } from '../lib/api.ts';
+import { toggleTheme, useTheme } from '../lib/theme.ts';
 
 interface Props {
   ticker: Ticker | undefined;
@@ -20,6 +21,7 @@ export default function TopBar({
   ticker, env, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured, onToggleArm, onOpenSettings, onOpenRail,
 }: Props) {
   const chg = ticker?.change24h ?? 0;
+  const theme = useTheme();
   return (
     <header className="topbar">
       <button className="icon-btn rail-btn" title="选合约（左栏）" aria-label="选合约" onClick={onOpenRail}>☰</button>
@@ -56,6 +58,16 @@ export default function TopBar({
       <button className={`arm-btn ${armed ? 'on' : ''}`} onClick={onToggleArm} title="解锁后 10 分钟内可以下单">
         <i className={`status-dot ${armed ? 'off' : ''}`} />
         {armed ? <><span className="wide-only">交易已解锁 · 点击</span>锁定</> : '解锁交易'}
+      </button>
+
+      {/* 主题开关放在这里：和设置挨着，随手就能切，不用翻进弹窗 */}
+      <button
+        className="icon-btn theme-btn"
+        onClick={toggleTheme}
+        title={theme === 'dark' ? '换成浅色模式' : '换成深色模式'}
+        aria-label={theme === 'dark' ? '换成浅色模式' : '换成深色模式'}
+      >
+        {theme === 'dark' ? '☀' : '☾'}
       </button>
 
       <button className="icon-btn" title="设置" onClick={onOpenSettings}>⚙</button>

@@ -2,9 +2,22 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 import { detectBrowserIp } from '../lib/ip.ts';
 import { isNative, apiBase, clearTarget } from '../lib/endpoint.ts';
+import { setTheme, useTheme } from '../lib/theme.ts';
+
+type FeedbackKind = 'bug' | 'idea' | 'other';
+
+/** 三种反馈的标签。顺序就是按钮顺序 */
+const FB_KIND_LABEL: Record<FeedbackKind, string> = {
+  bug: '功能异常',
+  idea: '功能建议',
+  other: '其他',
+};
 
 interface Props {
   config: AppConfig | null;
+  /** 反馈里要带上「当时在看哪个币、哪个周期」，排问题时最有用的一项 */
+  contract?: string;
+  interval?: string;
   onClose: () => void;
   onSaved: () => void;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
@@ -21,7 +34,7 @@ interface Diag {
   account?: Record<string, string>;
 }
 
-type Tab = 'testnet' | 'live' | 'ai';
+type Tab = 'testnet' | 'live' | 'ai' | 'theme' | 'feedback';
 
 const ENV_INFO: Record<'testnet' | 'live', { label: string; host: string; keyVar: string; secretVar: string; money: string }> = {
   testnet: {
@@ -40,7 +53,7 @@ const ENV_INFO: Record<'testnet' | 'live', { label: string; host: string; keyVar
   },
 };
 
-export default function SettingsDialog({ config, onClose, onSaved, onToast }: Props) {
+export default function SettingsDialog({ config, contract = '', interval = '', onClose, onSaved, onToast }: Props) {
   const [tab, setTab] = useState<Tab>(config?.env ?? 'testnet');
   // 两套密钥各存各的，互不覆盖：填实盘的不该把模拟盘那格冲掉
   const [testKey, setTestKey] = useState('');
@@ -65,6 +78,17 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
   /** 服务端直连出去的地址，和上面那个常常不是一个 */
   const [serverIp, setServerIp] = useState<IpInfo | null>(null);
   const [ipBusy, setIpBusy] = useState(false);
+  /** 窄屏顶栏藏了主题开关，这一页是手机上唯一的入口，所以深色浅色都放全 */
+  const theme = useTheme();
+
+  // ---- 反馈 ----
+  const [fbKind, setFbKind] = useState<FeedbackKind>('bug');
+  const [fbTitle, setFbTitle] = useState('');
+  const [fbBody, setFbBody] = useState('');
+  const [fbContact, setFbContact] = useState('');
+  const [fbSending, setFbSending] = useState(false);
+  /** 从服务端拿到的收件信箱：内嵌在服务端，页面只负责显示，不给改 */
+  const fbTo = config?.feedback?.to ?? '';
 
   const currentEnv = config?.env ?? 'testnet';
   /** 手机要填的那两行。口令只有在本机打开页面时才带回来 */
@@ -244,6 +268,44 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
     } finally { setBusy(false); }
   }
 
+  /**
+   * 发反馈。
+   *
+   * 校验放在前面：标题两个字的空信发出去，收到的只有一句「不好用」，
+   * 来回问一轮不如当场拦下来。
+   */
+  async function sendFeedback() {
+    const title = fbTitle.trim();
+    const text = fbBody.trim();
+    if (title.length < 2) { onToast('err', '标题太短', '至少写两个字，说清是什么问题'); return; }
+    if (text.length < 5) { onToast('err', '内容太短', '把当时的情况写下来再发'); return; }
+    setFbSending(true);
+    try {
+      const r = await jsend<{ ok: boolean; to: string; at: number }>('POST', '/api/feedback', {
+        kind: fbKind,
+        title,
+        body: text,
+        contact: fbContact.trim(),
+        // 服务端只认这几个键，别的字段会被丢掉
+        extra: {
+          合约: contract,
+          周期: interval,
+          窗口: `${window.innerWidth}×${window.innerHeight}`,
+          页面: navigator.userAgent,
+        },
+      });
+      setFbTitle('');
+      setFbBody('');
+      setFbContact('');
+      onToast('ok', '反馈已发出', '寄到 ' + r.to + '，谢谢');
+    } catch (e) {
+      const err = e as Error & { label?: string };
+      onToast('err', '没发出去', `${err.label ?? ''} ${err.message}`.trim() + ' —— 也可以点「复制信箱」手动发');
+    } finally {
+      setFbSending(false);
+    }
+  }
+
   function envTab(env: 'testnet' | 'live') {
     const info = ENV_INFO[env];
     const isCurrent = env === currentEnv;
@@ -415,18 +477,21 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
           <button className="x" onClick={onClose}>×</button>
         </header>
 
+        {/* 五格之后每格只剩七十来像素，所以「当前环境」只留一个小点，文字留给标签自己 */}
         <div className="set-tabs">
           <button className={tab === 'testnet' ? 'on' : ''} onClick={() => setTab('testnet')}>
-            模拟盘{currentEnv === 'testnet' ? ' ·当前' : ''}
+            模拟盘{currentEnv === 'testnet' && <i className="tab-dot" title="当前环境" />}
           </button>
           <button className={tab === 'live' ? 'on' : ''} onClick={() => setTab('live')}>
-            实盘{currentEnv === 'live' ? ' ·当前' : ''}
+            实盘{currentEnv === 'live' && <i className="tab-dot" title="当前环境" />}
           </button>
-          <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>AI 与接口</button>
+          <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>AI</button>
+          <button className={tab === 'theme' ? 'on' : ''} onClick={() => setTab('theme')}>外观</button>
+          <button className={tab === 'feedback' ? 'on' : ''} onClick={() => setTab('feedback')}>反馈</button>
         </div>
 
         <div className="body">
-          {tab !== 'ai' && envTab(tab)}
+          {(tab === 'testnet' || tab === 'live') && envTab(tab)}
 
           {tab === 'ai' && (
             <>
@@ -580,6 +645,112 @@ export default function SettingsDialog({ config, onClose, onSaved, onToast }: Pr
               )}
             </>
           )}
+          {tab === 'theme' && (
+            <>
+              <div className="hint" style={{ marginBottom: 10 }}>
+                主题记在这台设备上：电脑和手机各选各的，不会互相覆盖。
+              </div>
+
+              <div className="seg" style={{ width: '100%' }}>
+                <button className={theme === 'dark' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setTheme('dark')}>
+                  深色
+                </button>
+                <button className={theme === 'light' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setTheme('light')}>
+                  浅色
+                </button>
+              </div>
+
+              <div className="hint" style={{ marginTop: 10 }}>
+                点了立刻生效，不用重启。浅色下 K 线的底色、网格、坐标轴会一起换，
+                涨跌色和画线颜色保持不变。
+              </div>
+            </>
+          )}
+
+          {tab === 'feedback' && (
+            <>
+              <div className="hint" style={{ marginBottom: 10 }}>
+                说清楚「在做什么、看到什么、本来该是什么样」，比一句「用不了」有用得多。
+                反馈由服务端用这个信箱直接寄出，不经过任何表单服务。
+              </div>
+
+              <div className="fb-mail">
+                <span>收件信箱</span>
+                <code>{fbTo || '（服务端还没配好）'}</code>
+                {fbTo && (
+                  <button className="link-btn" onClick={() => void copyText(fbTo, '信箱已复制')}>复制</button>
+                )}
+              </div>
+
+              <div className="fb-kinds">
+                {(Object.keys(FB_KIND_LABEL) as FeedbackKind[]).map((k) => (
+                  <button key={k} className={`fb-kind${fbKind === k ? ' on' : ''}`} onClick={() => setFbKind(k)}>
+                    {FB_KIND_LABEL[k]}
+                  </button>
+                ))}
+              </div>
+
+              <div className="field">
+                <label>标题</label>
+                <input
+                  className="input"
+                  value={fbTitle}
+                  maxLength={80}
+                  onChange={(e) => setFbTitle(e.target.value)}
+                  placeholder="一句话说清问题"
+                  spellCheck={false}
+                />
+              </div>
+
+              <div className="field">
+                <label>详细描述</label>
+                <textarea
+                  className="textarea"
+                  value={fbBody}
+                  maxLength={4000}
+                  onChange={(e) => setFbBody(e.target.value)}
+                  placeholder="做了什么操作、看到了什么、期望是什么。涉及下单的话把币种和方向也写上。"
+                  spellCheck={false}
+                />
+                <div className="fb-meta">
+                  <span>至少 5 个字</span>
+                  <span>{fbBody.length}/4000</span>
+                </div>
+              </div>
+
+              <div className="field">
+                <label>联系方式（选填）</label>
+                <input
+                  className="input"
+                  value={fbContact}
+                  maxLength={120}
+                  onChange={(e) => setFbContact(e.target.value)}
+                  placeholder="邮箱或微信，想收回信就填"
+                  spellCheck={false}
+                />
+              </div>
+
+              <div className="fb-acts">
+                <button className="btn ghost" onClick={() => void copyText(fbTo, '信箱已复制')} disabled={!fbTo}>
+                  复制信箱
+                </button>
+                <button
+                  className="btn accent"
+                  onClick={() => void sendFeedback()}
+                  disabled={fbSending || fbTitle.trim().length < 2 || fbBody.trim().length < 5}
+                >
+                  {fbSending ? '发送中…' : '发送反馈'}
+                </button>
+              </div>
+
+              <div className="hint" style={{ marginTop: 9 }}>
+                发送时会顺手带上当前环境（合约、周期、窗口大小、系统版本），
+                这些只用来定位问题，不会带任何密钥。
+                {!config?.feedback?.ready && ' 服务端还没配好发件信箱，这一页暂时发不出去。'}
+              </div>
+            </>
+          )}
+
         </div>
       </div>
     </div>

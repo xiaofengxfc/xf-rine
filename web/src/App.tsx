@@ -845,6 +845,8 @@ export default function App() {
       {settingsOpen && (
         <SettingsDialog
           config={config}
+          contract={contract}
+          interval={interval}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => { void loadConfig(); void loadPrivate(); }}
           onToast={push}

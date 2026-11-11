@@ -119,7 +119,7 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
         <div
           key={`m-${p}`}
           className="lv"
-          style={{ color: '#8aa4ff', minWidth: 104 }}
+          style={{ color: 'var(--accent)', minWidth: 104 }}
           title="你手动画的水平线"
         >
           <div className="r1">

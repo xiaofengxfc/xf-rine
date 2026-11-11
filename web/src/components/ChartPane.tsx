@@ -24,6 +24,7 @@ import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
+import { chartColors, getTheme, useTheme } from '../lib/theme.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
@@ -215,30 +216,32 @@ export default function ChartPane({
     const host = hostRef.current;
     if (!host) return;
 
+    // canvas 里读不到 CSS 变量，配色只能从这份色板来（跟着当前主题）
+    const c = chartColors(getTheme());
     const chart = createChart(host, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: '#0c0e12' },
-        textColor: '#98a2b3',
+        background: { type: ColorType.Solid, color: c.background },
+        textColor: c.text,
         fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: 'rgba(30,35,44,0.55)' },
-        horzLines: { color: 'rgba(30,35,44,0.55)' },
+        vertLines: { color: c.grid },
+        horzLines: { color: c.grid },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: 'rgba(152,162,179,0.4)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#1e232d' },
-        horzLine: { color: 'rgba(152,162,179,0.4)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#1e232d' },
+        vertLine: { color: c.crosshair, width: 1, style: LineStyle.Dashed, labelBackgroundColor: c.crosshairLabel },
+        horzLine: { color: c.crosshair, width: 1, style: LineStyle.Dashed, labelBackgroundColor: c.crosshairLabel },
       },
       rightPriceScale: {
-        borderColor: '#1e232c',
+        borderColor: c.border,
         scaleMargins: { top: 0.08, bottom: 0.22 },
       },
       timeScale: {
-        borderColor: '#1e232c',
+        borderColor: c.border,
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 6,
@@ -257,7 +260,7 @@ export default function ChartPane({
       wickUpColor: UP,
       wickDownColor: DOWN,
       priceLineVisible: true,
-      priceLineColor: '#4c8dff',
+      priceLineColor: c.priceLine,
       priceLineStyle: LineStyle.Dotted,
       lastValueVisible: true,
     });
@@ -269,7 +272,7 @@ export default function ChartPane({
      * 折线把收盘价连起来，价格的台阶一眼能看出来 —— 它不假装有成交量，只是换一种画法。
      */
     const line = chart.addSeries(LineSeries, {
-      color: '#9aa7b8',
+      color: c.line,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
@@ -383,6 +386,28 @@ export default function ChartPane({
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
+
+  /**
+   * 换主题：canvas 不吃 CSS 变量，得把底色、网格、坐标轴重新贴一遍。
+   * 只改这些结构性颜色 —— K 线的涨跌色两套一样，数据一条都不用重画。
+   */
+  const theme = useTheme();
+  useEffect(() => {
+    const c = chartColors(theme);
+    chartRef.current?.applyOptions({
+      layout: { background: { type: ColorType.Solid, color: c.background }, textColor: c.text },
+      grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+      crosshair: {
+        vertLine: { color: c.crosshair, labelBackgroundColor: c.crosshairLabel },
+        horzLine: { color: c.crosshair, labelBackgroundColor: c.crosshairLabel },
+      },
+      rightPriceScale: { borderColor: c.border },
+      timeScale: { borderColor: c.border },
+    });
+    priceRef.current?.applyOptions({ priceLineColor: c.priceLine });
+    lineRef.current?.applyOptions({ color: c.line });
+    // 依赖里带 storageKey：切周期会重建整张图，新图也得贴成当前这套
+  }, [theme, storageKey]);
 
   /**
    * 画法要在「图重建之后」重新贴一次。

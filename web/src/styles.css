@@ -1,3 +1,8 @@
+/**
+ * 配色全在这一组变量里，深色是默认那套。
+ * 浅色模式只在下面 [data-theme='light'] 里换值，规则一条都不用重写。
+ * 图表是 canvas，读不到变量，另有一份色板在 lib/theme.ts 里跟着切。
+ */
 :root {
   --bg-0: #07080a;
   --bg-1: #0c0e12;
@@ -16,10 +21,77 @@
   --down: #ff5f6d;
   --down-dim: rgba(255, 95, 109, 0.12);
   --warn: #f0b429;
+  /* 深底上写红字要淡一档才不刺眼；浅底反过来，要深 */
+  --down-ink: #ffb3b8;
+  /* 实心按钮上的字：亮底配深字，白底配白字 */
+  --on-accent: #04122e;
+  --on-up: #05231a;
+  --on-down: #2a0508;
+  /* 遮罩、蒙层、阴影、滚动条 —— 浅色下全都要反过来，别再写死 */
+  --scrim: rgba(3, 5, 8, 0.72);
+  --scrim-soft: rgba(3, 5, 8, 0.62);
+  --veil: rgba(12, 14, 18, 0.5);
+  --overlay-1: rgba(9, 11, 15, 0.84);
+  --overlay-2: rgba(17, 20, 26, 0.88);
+  --toast-ok-bg: #0c1a16;
+  --toast-err-bg: #1d1013;
+  --scroll-thumb: #242a35;
+  --scroll-thumb-hover: #303845;
+  --dot-ring: rgba(255, 255, 255, 0.03);
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --shadow-rail: 0 0 44px rgba(0, 0, 0, 0.55);
   --radius: 8px;
   --radius-sm: 5px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
+}
+
+/**
+ * 浅色模式。
+ *
+ * 涨跌色在这里比深色版深一档：同样的 #2ed3a0 放在白底上当正文写就太浅了，
+ * 11.5px 的字看着发灰。图表里的 K 线实体反而保持原色 —— 它是色块不是字，
+ * 淡了也能看清，两套颜色差太多会让图例和 K 线像两个人的。
+ */
+[data-theme='light'] {
+  --bg-0: #eef1f6;
+  --bg-1: #ffffff;
+  --bg-2: #f6f8fb;
+  --bg-3: #eef2f8;
+  --bg-4: #e2e8f1;
+  --line: #dce2ec;
+  --line-soft: #e8edf4;
+  --text-0: #151b24;
+  --text-1: #4f5a6e;
+  --text-2: #7b8698;
+  --accent: #2563eb;
+  --accent-dim: rgba(37, 99, 235, 0.1);
+  --up: #0e8f62;
+  --up-dim: rgba(14, 143, 98, 0.1);
+  --down: #d92d4b;
+  --down-dim: rgba(217, 45, 75, 0.1);
+  --warn: #b45309;
+  --down-ink: #b91c1c;
+  --on-accent: #ffffff;
+  --on-up: #ffffff;
+  --on-down: #ffffff;
+  --scrim: rgba(15, 23, 42, 0.42);
+  --scrim-soft: rgba(15, 23, 42, 0.35);
+  --veil: rgba(244, 246, 249, 0.6);
+  --overlay-1: rgba(255, 255, 255, 0.92);
+  --overlay-2: rgba(255, 255, 255, 0.92);
+  --toast-ok-bg: #ecfdf5;
+  --toast-err-bg: #fef2f2;
+  --scroll-thumb: #c7cedb;
+  --scroll-thumb-hover: #aab4c4;
+  --dot-ring: rgba(15, 23, 42, 0.06);
+  --shadow-soft: 0 10px 28px rgba(15, 23, 42, 0.12);
+  --shadow-strong: 0 24px 60px rgba(15, 23, 42, 0.18);
+  --shadow-toast: 0 10px 30px rgba(15, 23, 42, 0.14);
+  --shadow-rail: 0 0 44px rgba(15, 23, 42, 0.18);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -48,8 +120,8 @@ html, body, #root { height: 100%; margin: 0; }
   padding: 12px 14px;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 95, 109, 0.35);
-  background: rgba(255, 95, 109, 0.08);
-  color: #ffb3b8;
+  background: var(--down-dim);
+  color: var(--down-ink);
   font-family: var(--mono);
   font-size: 12px;
   white-space: pre-wrap;
@@ -84,8 +156,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #242a35; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #303845; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .up { color: var(--up); }
@@ -163,7 +235,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .status-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--text-2); flex: none;
-  box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
+  box-shadow: 0 0 0 3px var(--dot-ring);
 }
 .status-dot.live { background: var(--up); box-shadow: 0 0 8px rgba(46,211,160,0.7); }
 .status-dot.off { background: var(--down); }
@@ -332,7 +404,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   border-left: 2px solid var(--line);
-  background: rgba(9, 11, 15, 0.84);
+  background: var(--overlay-1);
   font-family: var(--mono);
   font-size: 10.5px;
   line-height: 1.55;
@@ -368,7 +440,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   padding: 3px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(17, 20, 26, 0.88);
+  background: var(--overlay-2);
   color: var(--text-2);
   font-size: 10.5px;
   font-family: var(--mono);
@@ -382,7 +454,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   padding: 3px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(17, 20, 26, 0.88);
+  background: var(--overlay-2);
   color: var(--text-1);
   font-size: 10.5px;
   font-family: var(--mono);
@@ -608,8 +680,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   padding: 4px;
   border: 1px solid var(--bg-4);
   border-radius: 6px;
-  background: var(--bg-1, #14171c);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-soft);
 }
 .model-item {
   display: block;
@@ -753,11 +825,11 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   transition: filter 0.14s, background 0.14s;
 }
 .btn:hover { filter: brightness(1.12); }
-.btn.long { background: var(--up); color: #05231a; }
-.btn.short { background: var(--down); color: #2a0508; }
+.btn.long { background: var(--up); color: var(--on-up); }
+.btn.short { background: var(--down); color: var(--on-down); }
 .btn.ghost { background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line); }
 .btn.ghost:hover { color: var(--text-0); }
-.btn.accent { background: var(--accent); color: #04122e; }
+.btn.accent { background: var(--accent); color: var(--on-accent); }
 .btn.danger { background: var(--down-dim); color: var(--down); border: 1px solid rgba(255,95,109,0.35); }
 
 .confirm {
@@ -854,7 +926,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 /* 弹窗 */
 .modal-bg {
   position: fixed; inset: 0; z-index: 60;
-  background: rgba(3,5,8,0.72);
+  background: var(--scrim);
   backdrop-filter: blur(3px);
   display: grid; place-items: center;
   padding: 20px;
@@ -864,7 +936,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: 12px;
-  box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+  box-shadow: var(--shadow-strong);
   max-height: 86vh;
   overflow-y: auto;
 }
@@ -901,7 +973,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 /* 设置页分页：两套密钥各占一页，别挤在一起 */
 .set-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 1px;
   background: var(--line-soft);
   border-bottom: 1px solid var(--line);
@@ -918,6 +990,15 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 }
 .set-tabs button:hover { color: var(--text-0); background: var(--bg-2); }
 .set-tabs button.on { color: var(--text-0); background: var(--bg-3); box-shadow: inset 0 -2px 0 var(--accent); }
+/* 当前环境的小点：分页挤到五格以后，「·当前」四个字没地方放了 */
+.tab-dot {
+  display: inline-block;
+  width: 4px; height: 4px;
+  margin-left: 4px;
+  vertical-align: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .modal footer { padding: 0 15px 15px; display: grid; gap: 8px; }
 
 .hint { font-size: 10.5px; color: var(--text-2); line-height: 1.6; margin: 0; }
@@ -934,17 +1015,17 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   padding: 9px 12px; border-radius: var(--radius);
   background: var(--bg-3); border: 1px solid var(--line);
   font-size: 11.5px; line-height: 1.55;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  box-shadow: var(--shadow-toast);
   animation: toast-in 0.18s ease-out;
 }
-.toast.err { border-color: rgba(255,95,109,0.5); background: #1d1013; }
-.toast.ok { border-color: rgba(46,211,160,0.45); background: #0c1a16; }
+.toast.err { border-color: rgba(255,95,109,0.5); background: var(--toast-err-bg); }
+.toast.ok { border-color: rgba(46,211,160,0.45); background: var(--toast-ok-bg); }
 .toast b { font-weight: 600; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .loading {
   position: absolute; inset: 0; display: grid; place-items: center;
-  font-size: 12px; color: var(--text-2); background: rgba(12,14,18,0.5);
+  font-size: 12px; color: var(--text-2); background: var(--veil);
   pointer-events: none;
 }
 
@@ -991,7 +1072,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     width: min(78vw, 300px);
     display: flex;
     border-right: 1px solid var(--line);
-    box-shadow: 0 0 44px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--shadow-rail);
     transform: translateX(-102%);
     /* 藏起来的时候一并从可访问树和 Tab 顺序里拿掉；收起的动画还得看得见，所以 visibility 也过渡 */
     visibility: hidden;
@@ -1006,7 +1087,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     position: fixed;
     inset: 0;
     z-index: 71;
-    background: rgba(3, 5, 8, 0.62);
+    background: var(--scrim-soft);
     backdrop-filter: blur(1px);
     animation: scrim-in 0.14s ease-out;
     /* 在遮罩上上下划不要连带滚动后面的页面 */
@@ -1070,6 +1151,9 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .ws-dot { display: block; flex: none; }
   .topbar .spacer { flex: 1 1 auto; }
   .arm-btn { padding: 5px 8px; font-size: 11px; }
+  /* 手机上顶栏本来就刚好一行：再塞一个按钮就折行，图表白掉 30 多像素。
+     主题开关在「设置 → 外观」里，那一页一直有 */
+  .topbar .theme-btn { display: none; }
 
   /* ---- 图表：固定高度，别把整屏占满 ---- */
   .center {
@@ -1149,7 +1233,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--bg-1);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-strong);
 }
 .gate-card h1 {
   margin: 0 0 8px;
@@ -1164,7 +1248,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   border-radius: var(--radius-sm);
   border: 1px solid rgba(255, 95, 109, 0.35);
   background: var(--down-dim);
-  color: #ffb3b8;
+  color: var(--down-ink);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1177,3 +1261,66 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   line-height: 1.45;
   color: var(--warn);
 }
+
+/* ---------- 浅色模式的零星修补 ---------- */
+
+/* 这两枚环境角标写的是深色底上的亮色，白底上就看不清了 */
+[data-theme='light'] .env-badge.testnet { color: #b45309; border-color: rgba(180, 83, 9, 0.4); background: rgba(240, 180, 41, 0.18); }
+[data-theme='light'] .env-badge.live { color: #c2183b; border-color: rgba(194, 24, 59, 0.4); background: rgba(217, 45, 75, 0.12); }
+/* 交易台上的「实盘」红字和红底在白底上要收一点，不然像警告弹窗 */
+[data-theme='light'] .arm-btn.on { border-color: rgba(217, 45, 75, 0.35); }
+[data-theme='light'] .tool-btn.on { border-color: rgba(37, 99, 235, 0.28); }
+[data-theme='light'] .crash pre { border-color: rgba(217, 45, 75, 0.3); }
+
+/* ---------- 反馈 ---------- */
+
+.fb-kinds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 9px; }
+.fb-kind {
+  padding: 6px 0;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.fb-kind:hover { color: var(--text-0); border-color: var(--bg-4); }
+.fb-kind.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+
+.textarea {
+  width: 100%;
+  min-height: 104px;
+  resize: vertical;
+  padding: 7px 9px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  transition: border-color 0.14s;
+}
+.textarea:focus { border-color: var(--accent); }
+.textarea::placeholder { color: var(--text-2); }
+
+/* 反馈寄到哪个信箱：写在框里，省得用户去猜「到底发没发出去」 */
+.fb-mail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 10px;
+  padding: 8px 9px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+.fb-mail code { font-family: var(--mono); color: var(--text-0); word-break: break-all; }
+.fb-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--text-2); }
+.fb-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+

@@ -9,6 +9,7 @@ import { detectLevels, planBracket, type Bar, type Bracket, type Direction } fro
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
+import { sendFeedback, feedbackTarget, FeedbackError } from './feedback.js';
 import { randomUUID } from 'node:crypto';
 
 export const router = Router();
@@ -767,6 +768,8 @@ router.get('/config', (req, res) => {
       endpoint: aiEndpoint(),
     },
     armed: false,
+    // 反馈寄到哪个信箱，页面要能说清楚 —— 内嵌配置，用户不用自己填
+    feedback: feedbackTarget(),
   });
 });
 
@@ -825,6 +828,72 @@ router.post('/config/env', wrap(async (req, res) => {
     keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
   });
+}));
+
+// ---------- 反馈 ----------
+
+/**
+ * 最近发信的时刻，按来源地址各记一份。
+ *
+ * 这张表挡的是误连点（一次点击就是一封真邮件）和顺手压测；
+ * 正常用的人一分钟内不会发第二封，撞上这一条也只是等一会儿。
+ */
+const feedbackSent = new Map<string, number[]>();
+const FB_GAP_MS = 15_000;
+const FB_HOUR_MAX = 10;
+
+function checkFeedbackRate(ip: string): void {
+  const now = Date.now();
+  const list = (feedbackSent.get(ip) ?? []).filter((t) => now - t < 60 * 60_000);
+  const last = list[list.length - 1] ?? 0;
+  if (now - last < FB_GAP_MS) {
+    throw new GateError(429, 'TOO_FAST', '刚发过一封，' + Math.ceil((FB_GAP_MS - (now - last)) / 1000) + ' 秒后再发');
+  }
+  if (list.length >= FB_HOUR_MAX) {
+    throw new GateError(429, 'TOO_MANY', '这一小时已经发了 ' + list.length + ' 封，稍后再试');
+  }
+  feedbackSent.set(ip, [...list, now]);
+  // 表别只涨不消：攒到一定量就把过期的整批清掉
+  if (feedbackSent.size > 200) {
+    for (const [k, v] of feedbackSent) {
+      if (v.every((t) => now - t >= 60 * 60_000)) feedbackSent.delete(k);
+    }
+  }
+}
+
+/** 用户反馈：服务端用内嵌的 163 信箱直接寄出去，页面上不出现任何邮箱配置 */
+router.post('/feedback', wrap(async (req, res) => {
+  const body = req.body ?? {};
+  const kind = typeof body.kind === 'string' && ['bug', 'idea', 'other'].includes(body.kind) ? body.kind : 'other';
+  const title = String(body.title ?? '').trim();
+  const text = String(body.body ?? '').trim();
+  const contact = String(body.contact ?? '').trim();
+  if (title.length < 2 || title.length > 80) throw new GateError(400, 'BAD_TITLE', '标题写 2 到 80 个字');
+  if (text.length < 5 || text.length > 4000) throw new GateError(400, 'BAD_BODY', '内容写 5 到 4000 个字');
+  if (contact.length > 120) throw new GateError(400, 'BAD_CONTACT', '联系方式太长了');
+
+  // 只带白名单里的几个字段：整包上报什么都能塞，信就成了一坨没法读的东西
+  const extra: Record<string, string> = {};
+  const raw = body.extra;
+  if (raw && typeof raw === 'object') {
+    for (const k of ['合约', '周期', '窗口', '页面', '版本']) {
+      const v = (raw as Record<string, unknown>)[k];
+      if (typeof v === 'string' && v.trim()) extra[k] = v.trim().slice(0, 200);
+    }
+  }
+
+  // 校验放在限流前面：填错的人不该被自己刚才那次错填卡住 15 秒。
+  // 校验不过根本不会发信，所以这里攒不出邮件洪水
+  checkFeedbackRate(req.socket.remoteAddress ?? '');
+
+  try {
+    const out = await sendFeedback({ kind, title, body: text, contact, extra });
+    console.log('[feedback] 已发出：' + title.slice(0, 40));
+    res.json({ ok: true, to: out.to, at: out.at });
+  } catch (e) {
+    if (e instanceof FeedbackError) throw new GateError(502, e.label, e.message);
+    throw e;
+  }
 }));
 
 /**
