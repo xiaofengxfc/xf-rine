@@ -19,7 +19,7 @@
 
 - 图上标出真实持仓的成本均价、挂着的止损止盈，以及左上角那块的已盈亏：多少张、开仓价、标记价、赚亏多少、
   打到止损止盈各平出多少钱。
-- 往回拖到最左边会自动补更早的 K 线，一次 500 根，视口不跳。
+- 往回拖到最左边会自动补更早的 K 线，一次 1000 根，视口不跳。
 - 把技术面和新闻面一起交给大模型，给一个偏多、偏空或观望的判断，并指出矛盾在哪。
 - 深色、浅色两套配色，一键切换，K 线图的底色和网格跟着换。
 
@@ -56,7 +56,7 @@ Windows 上直接双击 `start.bat` 也行。
 ## 打包成安装包
 
 现成的安装包在 [Releases](https://github.com/xiaofengxfc/xf-rine/releases)：
-电脑端 `XunFeng-1.0.2-Setup.exe`、手机端 `XunFeng-1.0.2-arm64.apk`。
+电脑端 `XunFeng-1.0.3-Setup.exe`、手机端 `XunFeng-1.0.3-arm64.apk`。
 
 自己打就两条命令，产物落在本机（安装包不进 git，见上面的说明）。装完之后不用装 Node，也不用开黑框。
 
@@ -67,7 +67,7 @@ pnpm install
 pnpm pack:win
 ```
 
-产物：`desktop/release/XunFeng-1.0.2-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
+产物：`desktop/release/XunFeng-1.0.3-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
 
 装进去的是一个壳，不是把页面拷一份进去：Electron 自带 Node，服务端被 esbuild 打成一个
 2.8 MB 的 `server.cjs`，前端产物放在 `resources/web-dist`。启动时主进程先把服务端拉起来，
@@ -94,6 +94,9 @@ pnpm pack:android
 
 产物：`mobile/android/app/build/outputs/apk/release/app-release.apk`（约 34 MB，arm64）。拷到手机上装。
 系统要求 Android 7.0（API 24）及以上，且只打 arm64（Android 包里的架构由 `build.gradle` 的 `abiFilters` 决定）。
+
+打包机要有 JDK 17 以上和 Android SDK。脚本按 `JAVA_HOME` / `ANDROID_HOME` → 仓库里的 `.toolchain/jdk`、`.toolchain/sdk`
+→ Android Studio 自带 jbr 的顺序找，都没有才报错，并说清该设哪个变量（见 `mobile/tools/gradle.mjs`）。
 
 装进去的是整个程序，不是一块连电脑的屏幕。Node 运行时（nodejs-mobile）跟着 App 一起装，
 服务端就在手机上算：K 线、支撑阻力、形态、新闻、AI、下单，全在本地完成。电脑可以关着，
@@ -151,10 +154,12 @@ pnpm pack:android
 | `pnpm pack:win` 报成功，`release/` 里还是上一次的安装包 | 脚本写的是 `-F desktop`，桌面端的包名其实叫 `xunfeng`。pnpm 找不到只警告一句，退出码照样 0 | 过滤条件改成按目录：`pnpm --filter ./desktop dist`（手机端同理用 `./mobile`）。改完看 `release/` 的时间戳，别信退出码 |
 | 手机端弹 `The Node.js runtime is already running.` | 页面重载、点重试、从后台回来都会再调一次 `Nodejs.start()`，插件第二次就回这句英文 | 这不是故障，运行时本来就在跑。代码里按「已经在跑」处理，照常等端口；端口真等不到才报错，并把启动时的原因带出来 |
 | 往回拖 K 线，一页要干等一两秒 | 服务端按「合约:周期:根数:before」缓存整页、四秒就过期，同一段历史拖回来还得再问一次交易所（实测 1.4~4 秒） | 改成按「合约:周期」攒一条时间轴：已经拉过的区间直接切一段出来，实测 4 毫秒；只有要的窗口确实在时间轴外面才去补一页 |
-| 往前翻一段后左边一直是空的，像 K 线残缺 | 前端一边并一边 `slice(-3000)`，刚补进来的那页当场被挤掉；补到上限后根数不再变，又掉进「只写最后两根」的增量分支，补来的历史根本没画 | 到上限就不补了（宁可不加也不删），并进来的一律整段重画；翻页改成一页 1000 根，上限一万二千根 |
+| 往前翻一段后左边一直是空的，像 K 线残缺 | 前端一边并一边 `slice(-3000)`，刚补进来的那页当场被挤掉；补到上限后根数不再变，又掉进「只写最后两根」的增量分支，补来的历史根本没画 | 到上限就不补了（宁可不加也不删），并进来的一律整段重画；翻页改成一页 1000 根，上限两万根 |
 | 补历史时画面先「转移」一下才显示 K 线 | 两个来源：挤掉最老数据后视口稳不住，被弹回最新一屏；以及「拿到更旧快照」那条路会调 `fullLoad()` 重置视口 | 两种情况都不再动视口。拿 5.2.1 的库实测过：`setData` 前面插一千根，可见时间一秒不变（逻辑区间自己从 0~160 变成 1000~1160），所以任何「按根数平移」都是帮倒忙 |
 | 停一下再拖，接缝处少一根 K 线 | Gate 的 `to` 是闭区间：`to=X` 会带回 X 那根，把它当重复切掉，那一段就少一根 | 要「X 之前的 N 根」就把 `to` 往前挪一根（`to = X - 周期`），正好 N 根，接缝严丝合缝 |
 | 翻到最老报 400 `Candlestick too long ago` | 交易所只留最近一万个点（1m 约七天） | 服务端把这条当「到头了」：回空页并记住别再问，前端看到不满一页就收手，不再报错 |
+| `pnpm pack:android` 一上来就报 `JAVA_HOME is not set` 或 `SDK location not found` | gradlew 只认 `JAVA_HOME`（或 PATH 上的 java），而 `android/local.properties` 不进版本库；仓库里其实带着 `.toolchain/jdk` 和 `.toolchain/sdk`，只是没告诉 Gradle | `mobile/tools/gradle.mjs` 按 `JAVA_HOME` → 仓库 `.toolchain` → Android Studio 自带 jbr 的顺序找 JDK，SDK 按 `ANDROID_HOME` → `local.properties` → 仓库 `.toolchain` 的顺序找，顺手把 `local.properties` 补上；找不到就直说该设哪个变量 |
+| `pnpm pack:win` 报 `connect ETIMEDOUT 20.205.243.166:443` | electron-builder 从 GitHub 取 Electron 压缩包和 winCodeSign，用它自己的 got；Node 不读系统代理，机器上代理开着也帮不上 | `desktop/tools/builder.mjs` 读一次 Windows 系统代理（和 `server/src/net.ts` 同一个来源）塞进 `HTTPS_PROXY` 和 `ELECTRON_GET_USE_PROXY`；第一次失败原样再来一次 |
 
 ## 第一次配置密钥
 
@@ -522,6 +527,6 @@ pnpm check:candles --api=http://127.0.0.1:8787  # 改问本地服务端，看 Ap
 - 形态识别只看单根和相邻两根 K 线，不理解更大级别的结构。它标出来的是「这根 K 线里多空谁更用力」，不是买卖点。
 - AI 分析的结论同样只是参考。模型看不到盘口和挂单簿，也看不到你现在的持仓，它只根据上面那些数字说话。
 - **模拟盘只有几十个合约能交易**（实测 53 个），主网有一千多个。左栏列的是主网行情，能下单的那几行带一个绿点。选中模拟盘没有的合约时下单面板会直接说明，不用等交易所回一句 CONTRACT_NOT_FOUND。
-- 历史 K 线一次补 500 根，内存里最多留 3000 根。再往前不加载 —— 日内用不上几年前的分钟线，留着只会拖慢图表。
+- 历史 K 线一页补 1000 根，内存里最多留 20000 根。再往前不加载 —— 日内用不上几年前的分钟线，留着只会拖慢图表。
 - 图上的价位标签按优先级抢位子（真实止损止盈 > 持仓均价 > 挂着的限价单 > 计划入场/计划止损止盈 > 离现价近的档位），挤在一起时低优先级那条只画线不写字。哪条能说话取决于当时的可视价格跨度，所以缩放后重新加载一次结论可能变。
 - 真实挂着的止损止盈画实线、线宽 2；自动方案算出来的那三条画虚线、线宽 1，标题多了「计划」两个字 —— 一个交易所里真有单，一个只是打算。
