@@ -333,6 +333,61 @@ async function fetchPage(contract: string, interval: string, limit: number, step
  * tailTtl 是给「档位」那种慢半拍也无所谓的调用方的：它只看得上收盘的 K 线，
  * 一根之内拿到的都算新，没必要每 45 秒就为它去交易所跑一趟。
  */
+/** 同一个位置正在拉的时候别拉第二遍：预热和用户拖动常常撞在同一页上 */
+const inflight = new Map<string, Promise<Bar[]>>();
+
+/** 正在预热的时间轴，避免同一个位置被同时拉两次 */
+const warming = new Set<string>();
+
+/**
+ * 提前把下一段历史拉进时间轴。
+ *
+ * 用户往回拖是一页一页来的：这一页刚看到手，下一页马上就会被要。与其让人在边缘等
+ * 一秒多，不如这一页给出去之后就去把下一页取回来 —— 等真的拖动时命中的是缓存，几毫秒。
+ * 不 await、失败不吵：这纯粹是为了下一步更顺，慢一点、拉不到都不影响当前这一页。
+ */
+function warmOlder(contract: string, interval: string, limit: number, before: number): void {
+  if (!before) return;
+  const key = `${contract}:${interval}:${before}`;
+  if (warming.has(key)) return;
+  warming.add(key);
+  void loadCandles(contract, interval, limit, false, before)
+    .catch(() => {})
+    .finally(() => warming.delete(key));
+}
+
+/**
+ * 上游同时最多发几条 K 线请求。
+ *
+ * 预热和用户自己的请求一叠，再加上频繁拖动，交易所和本地代理会一起排队，
+ * 单条就能拖到八秒以上、直接被判超时。这里只放两条进去，其余排队等。
+ */
+const FETCH_SLOTS = 2;
+let fetchActive = 0;
+const fetchWaiting: (() => void)[] = [];
+
+async function withFetchSlot<T>(fn: () => Promise<T>): Promise<T> {
+  while (fetchActive >= FETCH_SLOTS) await new Promise<void>((resolve) => fetchWaiting.push(resolve));
+  fetchActive += 1;
+  try {
+    return await fn();
+  } finally {
+    fetchActive -= 1;
+    fetchWaiting.shift()?.();
+  }
+}
+
+/** 同一页在飞就复用那一次请求，回来各自并进时间轴（合并是幂等的） */
+function fetchOnce(contract: string, interval: string, limit: number, step: number, before?: number): Promise<Bar[]> {
+  const key = `${contract}:${interval}:${before ?? 0}`;
+  const had = inflight.get(key);
+  if (had) return had;
+  const p = withFetchSlot(() => fetchPage(contract, interval, limit, step, before));
+  inflight.set(key, p);
+  void p.finally(() => inflight.delete(key)).catch(() => {});
+  return p;
+}
+
 async function loadCandles(
   contract: string,
   interval: string,
@@ -351,7 +406,7 @@ async function loadCandles(
     const oldest = series.bars.length > 0 ? series.bars[0]!.time : Infinity;
     if (!series.exhausted) {
       try {
-        mergeInto(series, await fetchPage(contract, interval, limit, step, before));
+        mergeInto(series, await fetchOnce(contract, interval, limit, step, before));
       } catch (e) {
         if (!(e instanceof GateError)) throw e;
         /**
@@ -368,7 +423,7 @@ async function loadCandles(
 
   const tailFresh = series.newestAt > 0 && Date.now() - series.newestAt < tailTtl;
   if (!fresh && tailFresh && series.bars.length >= limit) return series.bars.slice(series.bars.length - limit);
-  mergeInto(series, await fetchPage(contract, interval, limit, step));
+  mergeInto(series, await fetchOnce(contract, interval, limit, step));
   series.newestAt = Date.now();
   return series.bars.slice(Math.max(0, series.bars.length - limit));
 }
@@ -380,6 +435,8 @@ router.get('/candles', wrap(async (req, res) => {
   const beforeRaw = Number(req.query.before);
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
   const bars = await loadCandles(contract, interval, limit, false, before);
+  // 这一页给出去之后，顺手把再往前的一页取回来：下一步多半就是往那边拖
+  if (bars.length > 0) warmOlder(contract, interval, limit, bars[0]!.time);
   // 返不满一页就说明到头了，前端不用再往前要
   res.json({ contract, interval, bars, hasMore: bars.length >= limit });
 }));

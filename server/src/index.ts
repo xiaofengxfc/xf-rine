@@ -7,7 +7,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { config, keyHint, restBaseUrl, envLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
 import { router } from './routes.js';
 import { MarketHub } from './gate/market.js';
-import { refreshProxy, proxyState } from './net.js';
+import { refreshProxy, proxyState, routeStats } from './net.js';
 
 const app = express();
 app.use(express.json({ limit: '256kb' }));
@@ -110,6 +110,11 @@ if (apiOnly) {
 void refreshProxy(true).then((p) => {
   console.log('  出网      ' + (p.on ? '走代理 ' + p.url + '（' + p.source + '）' : '直连') + (p.error ? '  ' + p.error : ''));
 });
+// 两条路谁快，量出来再决定每次请求走哪条（这里只打印，决策在 net.ts 里）
+setTimeout(() => {
+  const s = routeStats();
+  console.log('  出网实测  直连 ' + (s.direct || '-') + 'ms / 代理 ' + (s.proxy || '-') + 'ms');
+}, 6000).unref();
 setInterval(() => { void refreshProxy(); }, 60_000).unref();
 
 const server = createServer(app);

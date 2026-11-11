@@ -86,18 +86,73 @@ let state: ProxyState = { on: false, url: '', source: 'direct', at: 0 };
 /** 连续失败次数。代理进程关了但注册表还写着的时候，靠它自动退回直连 */
 let failures = 0;
 
-/** 代理配着不代表能用：代理进程可能已经退出，注册表还没清。探一次真的能不能出网。 */
-async function probe(agent: Dispatcher): Promise<boolean> {
+/**
+ * 两条路各自要多久（毫秒，指数平均）。
+ *
+ * 不写死「直连最快」：这台机器直连 Gate 要两三秒，走本地代理只要三四百毫秒；
+ * 换成别的网络又可能反过来。所以谁快走谁，一边用一边继续量，慢了就自己换边。
+ */
+const routeMs: { direct: number; proxy: number } = { direct: 0, proxy: 0 };
+/** 一次尝试最多等多久。某条路被黑洞住的时候，不能让整个请求跟着卡死 */
+const ATTEMPT_MS = 8000;
+
+function noteMs(route: 'direct' | 'proxy', ms: number): void {
+  const old = routeMs[route];
+  routeMs[route] = old > 0 ? Math.round(old * 0.6 + ms * 0.4) : Math.round(ms);
+}
+
+/** 失败的那条先按「很慢」记：下一次自然换另一条，成功时会把真实耗时再拉回来 */
+function noteFailure(route: 'direct' | 'proxy'): void {
+  routeMs[route] = routeMs[route] > 0 ? Math.max(routeMs[route], ATTEMPT_MS) : ATTEMPT_MS;
+}
+
+function pickRoute(preferDirect: boolean): 'direct' | 'proxy' {
+  if (!state.on) return 'direct';
+  const d = routeMs.direct;
+  const p = routeMs.proxy;
+  if (d > 0 && p > 0) return d <= p ? 'direct' : 'proxy';
+  if (d > 0) return 'direct';
+  if (p > 0) return 'proxy';
+  // 都还没量过：配了代理就先走代理（一般就是因为直连不通或者太慢），量出来会自己纠正
+  return preferDirect ? 'direct' : 'proxy';
+}
+
+function dispatcherFor(route: 'direct' | 'proxy'): Dispatcher {
+  return route === 'proxy' && state.on ? current : direct;
+}
+
+/** 走一条路发一次，顺手记下这次花了多久 */
+async function attempt(
+  route: 'direct' | 'proxy',
+  url: string,
+  init: FetchInit,
+): Promise<Awaited<ReturnType<typeof undiciFetch>>> {
+  const timeout = AbortSignal.timeout(ATTEMPT_MS);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  const started = Date.now();
+  const res = await undiciFetch(url, { ...init, signal, dispatcher: dispatcherFor(route) });
+  noteMs(route, Date.now() - started);
+  return res;
+}
+
+/**
+ * 代理配着不代表能用：代理进程可能已经退出，注册表还没清。探一次真的能不能出网。
+ * 探的时候顺手记下这条路多快 —— 起服务的时候两条路都量一次，第一次刷行情就能走对。
+ */
+async function probe(agent: Dispatcher, route: 'direct' | 'proxy'): Promise<boolean> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 5000);
+  const started = Date.now();
   try {
     const res = await undiciFetch(`${restBaseUrl()}/api/v4/futures/usdt/contracts/BTC_USDT`, {
       dispatcher: agent,
       signal: ac.signal,
       headers: { accept: 'application/json' },
     });
+    if (res.ok) noteMs(route, Date.now() - started);
     return res.ok;
   } catch {
+    noteFailure(route);
     return false;
   } finally {
     clearTimeout(timer);
@@ -121,7 +176,11 @@ export async function refreshProxy(force = false): Promise<ProxyState> {
 
   // 代理地址不让它连自己，避免把本地代理进程搅进循环
   const agent = new ProxyAgent(found.url);
-  const ok = await probe(agent);
+  // 两条路各探一次：谁快就用谁。这是一分钟一次的小请求，换来后面每次刷行情都走对路。
+  // 直连那次不等它 —— 它可能要好几秒，等它只会把第一个页面也拖住；量完自己记进 routeMs。
+  const directProbe = probe(direct, 'direct').catch(() => false);
+  const ok = await probe(agent, 'proxy');
+  void directProbe;
   current = ok ? agent : direct;
   failures = 0;
   state = {
@@ -135,6 +194,11 @@ export async function refreshProxy(force = false): Promise<ProxyState> {
   // 一次探不通多半是代理刚启动或者节点在切换，15 秒后再试，别一整天都直连
   if (!ok) setTimeout(() => { void refreshProxy(true); }, 15_000).unref();
   return state;
+}
+
+/** 两条路各自的耗时，单位毫秒；0 表示还没量到 */
+export function routeStats(): { direct: number; proxy: number } {
+  return { ...routeMs };
 }
 
 export function proxyState(): ProxyState {
@@ -157,43 +221,41 @@ export async function netFetch(
   opts: { private?: boolean; direct?: boolean; preferDirect?: boolean } = {},
 ): Promise<ReturnType<typeof undiciFetch>> {
   const blocked = opts.private === true && blockedAt > 0 && Date.now() - blockedAt < BLOCK_TTL_MS;
-  if (opts.direct === true || !state.on || blocked) return undiciFetch(url, { ...init, dispatcher: direct });
+  if (opts.direct === true || !state.on || blocked) return attempt('direct', url, init);
 
-  // 优先直连：Gate 这类目标直连最快，代理只当直连不通时的后路。
-  // 只有查询类请求可以这样重试：下单、撤单重发一遍可能变成两单。
-  if (opts.preferDirect === true) {
-    const method = (init.method ?? 'GET').toUpperCase();
-    if (method !== 'GET') return undiciFetch(url, { ...init, dispatcher: direct });
-    try {
-      return await undiciFetch(url, { ...init, dispatcher: direct });
-    } catch (err) {
-      if (init.signal?.aborted) throw err;
-      return await undiciFetch(url, { ...init, dispatcher: current });
-    }
-  }
+  const method = (init.method ?? 'GET').toUpperCase();
+  /** 下单、撤单这类不能重发：换个路重试一遍可能变成两单，所以只对查询类这么做 */
+  const canRetry = method === 'GET';
+  const first = pickRoute(opts.preferDirect === true);
 
-  let res: Awaited<ReturnType<typeof undiciFetch>>;
   try {
-    res = await undiciFetch(url, { ...init, dispatcher: current });
+    const res = await attempt(first, url, init);
     failures = 0;
+    // 403 是「这一单没被受理」，改直连重发不会重复成交
+    if (res.status === 403 && dispatcherFor(first) !== direct) {
+      const text = await res.clone().text().catch(() => '');
+      if (/not in whitelist/i.test(text)) {
+        blockedAt = Date.now();
+        noteFailure('proxy');
+        state = { ...state, blockedAt, at: Date.now() };
+        return attempt('direct', url, init);
+      }
+    }
+    return res;
   } catch (err) {
+    noteFailure(first);
+    if (init.signal?.aborted) throw err;
     failures += 1;
-    if (failures >= 2) {
+    if (failures >= 2 && dispatcherFor(first) !== direct) {
+      // 连着失败：整体退回直连，30 秒后再探。别让接下来每个请求都先撞一次墙
       current = direct;
       state = { ...state, on: false, error: err instanceof Error ? err.message : String(err), at: Date.now() };
       setTimeout(() => { void refreshProxy(true); }, 30_000).unref();
     }
-    return undiciFetch(url, { ...init, dispatcher: direct });
+    const other: 'direct' | 'proxy' = first === 'direct' ? 'proxy' : 'direct';
+    if (!canRetry || (other === 'proxy' && !state.on)) throw err;
+    const res = await attempt(other, url, init);
+    failures = 0;
+    return res;
   }
-
-  // 403 是「这一单没被受理」，改直连重发不会重复成交
-  if (res.status === 403) {
-    const text = await res.clone().text().catch(() => '');
-    if (/not in whitelist/i.test(text)) {
-      blockedAt = Date.now();
-      state = { ...state, blockedAt, at: Date.now() };
-      return undiciFetch(url, { ...init, dispatcher: direct });
-    }
-  }
-  return res;
 }

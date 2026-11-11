@@ -119,6 +119,8 @@ export default function ChartPane({
   /** 补历史这件事要在 K 线落地之后再催一次，用 ref 拿最新的回调 */
   const needOlderRef = useRef(onNeedOlder);
   needOlderRef.current = onNeedOlder;
+  /** 正在把视口从负区间拉回来，防止 setVisibleLogicalRange 把回调再触发一遍 */
+  const clampingRef = useRef(false);
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
   const lastTimeRef = useRef<number | null>(null);
@@ -465,7 +467,22 @@ export default function ChartPane({
         try { localStorage.setItem(viewKey, JSON.stringify({ from: r.from, to: r.to })); } catch { /* 存不了就算了 */ }
       }, 400);
 
-      // 离最左边还有一屏的距离就先要：贴到边缘再要，得干等交易所一秒多
+      /**
+       * 别让人拖到数据左边去。
+       *
+       * 逻辑区间允许负数，拖过头左边就是一整片空白 —— 数据其实一根没少，
+       * 但看着就是「K 线缺了一大段」。挡住之后，翻到最老那根就停住，
+       * 补页到位再接着往左走。
+       */
+      if (r.from < 0 && !clampingRef.current) {
+        clampingRef.current = true;
+        try {
+          ts.setVisibleLogicalRange({ from: 0, to: Math.max(60, r.to - r.from) });
+        } catch { /* 区间不合法就算了，别把拖动卡死 */ }
+        clampingRef.current = false;
+      }
+
+      // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多
       if (r.from < PREFETCH_BARS) onNeedOlder();
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
