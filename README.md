@@ -56,7 +56,7 @@ Windows 上直接双击 `start.bat` 也行。
 ## 打包成安装包
 
 现成的安装包在 [Releases](https://github.com/xiaofengxfc/xf-rine/releases)：
-电脑端 `XunFeng-1.0.3-Setup.exe`、手机端 `XunFeng-1.0.4-arm64.apk`。
+电脑端 `XunFeng-1.0.3-Setup.exe`、手机端 `XunFeng-1.0.5-arm64.apk`。
 
 自己打就两条命令，产物落在本机（安装包不进 git，见上面的说明）。装完之后不用装 Node，也不用开黑框。
 
