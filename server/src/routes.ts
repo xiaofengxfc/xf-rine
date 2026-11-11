@@ -197,12 +197,35 @@ const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
   (req: Request, res: Response) => { fn(req, res).catch((e) => fail(res, translate(e))); };
 
 /**
- * 交易所拒单时的两句英文，对用户没有任何意义。在 fail 之前翻译成人话：
- *   CONTRACT_NOT_FOUND       测试网只上架了几十个合约，主网有一千多个
+ * 交易所拒单时的几句英文，对用户没有任何意义。在 fail 之前翻译成人话：
+ *   READ_ONLY                 这把密钥只开了读权限，下单/设杠杆一律被拒
+ *   CONTRACT_NOT_FOUND        测试网只上架了几十个合约，主网有一千多个
  *   MARKET_PRICE_TOO_DEVIATED 盘口另一边没有能成交的价，市价单被滑点保护拒了
  */
-function translate(e: unknown): unknown {
+export function translate(e: unknown): unknown {
   if (!(e instanceof GateError)) return e;
+
+  /**
+   * 密钥没有「合约交易」写权限。
+   *
+   * 这种钥匙读行情、读账户都是好的，页面上一切正常，只有到点下单才被交易所拒 ——
+   * 所以必须在这里说清是权限没勾对、去哪儿改，而不是把
+   *   Request API key does not have futures write permission
+   * 原样甩给用户。以前那两句英文还会连着弹两次（先设杠杆、再下单）。
+   *
+   * 认两处：Gate 的 label（READ_ONLY），和它的英文原文 —— 没有 label 的接口
+   * 会把 message 直接顶到 label 上（见 gate/rest.ts）。
+   */
+  if (e.label === 'READ_ONLY' || /does not have futures write permission/i.test(`${e.label} ${e.detail}`)) {
+    return new GateError(
+      403,
+      'KEY_NO_WRITE',
+      '这把 API 密钥没有「合约交易」写权限，设杠杆、下单、平仓都会被交易所拒掉'
+      + '（读行情、看账户是好的，所以页面上看不出问题）。'
+      + '到 Gate 的「API 管理」里把这把钥匙的权限改成「合约交易 · 读写」并保存，密钥本身不用换，改完重下一次就行。'
+      + `现在用的是${envLabel()}那套密钥，改的也是它。`,
+    );
+  }
 
   if (e.label === 'MARKET_PRICE_TOO_DEVIATED' || e.label === 'PRICE_TOO_DEVIATED') {
     // 这句最常出现在平仓上：盘口是空的，市价平不掉，用户会以为程序坏了

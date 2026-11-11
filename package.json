@@ -10,6 +10,8 @@
     "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck",
     "check:paint": "pnpm -F server exec tsx ../web/scripts/check-paint.ts",
     "check:candles": "pnpm -F server exec tsx ../web/scripts/check-candles.ts",
+    "check:viewport": "pnpm -F server exec tsx ../web/scripts/check-viewport.ts",
+    "check:errors": "pnpm -F server exec tsx scripts/check-errors.ts",
     "pack:win": "pnpm -F web build && pnpm --filter ./desktop dist",
     "pack:android": "pnpm -F web build && pnpm --filter ./mobile apk"
   },

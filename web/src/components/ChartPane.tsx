@@ -20,6 +20,7 @@ import {
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
 import type { Bar, Bracket, Level, OpenOrder, Pattern, Position, PriceOrder } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
+import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
@@ -67,6 +68,25 @@ function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
       text: p.name,
     }));
 }
+
+/**
+ * 右侧空位的默认根数：停在最新一屏时，图上右边空出来这么多格。
+ * 和建图时 timeScale.rightOffset 是同一个数 —— 恢复视口时要靠它把空位还回去。
+ */
+const DEFAULT_RIGHT_MARGIN = 6;
+
+/**
+ * 松手之后还要等这么久才算「手势结束」。
+ * 触摸屏松手后库还会惯性滑一段（KineticAnimation），那几帧里写视口一样会被顶掉。
+ */
+const GESTURE_HOLD_MS = 220;
+
+/**
+ * 手势看门狗：按下之后这么久还没等到抬起，就当作抬起事件丢了
+ * （切后台、被系统手势打断、指针捕获被抢走），把标记放掉。
+ * 没有它的话，一次丢事件就让视口校正永远不生效，补历史时画面会越走越歪。
+ */
+const GESTURE_LOST_MS = 3000;
 
 /**
  * 视口左边少于这么多根就催一次历史。
@@ -145,6 +165,40 @@ export default function ChartPane({
   needOlderRef.current = onNeedOlder;
   /** 这一帧已经排了一次「把视口拉回数据边缘」，别排队排成一串 */
   const clampingRef = useRef(false);
+  /** 手指还在图上（拖动、缩放、惯性滑动）。这期间一律不写视口，见 placeView */
+  const gestureRef = useRef(false);
+  /**
+   * 手势期间欠下的那次视口校正。
+   * 按时间记，不按下标：等手松开时可能又补进来几页，下标早就过期了。
+   */
+  const pendingViewRef = useRef<ViewSpan | null>(null);
+
+  /**
+   * 按时间把视口放到某一段上。手势期间只记账、不动手。
+   *
+   * 为什么不能动手：库的拖动是每帧按「按下那一刻的偏移 + 指头位移」现算位置的，
+   * 我们这时候写一次 setVisibleLogicalRange，它下一帧就按自己的算法盖回去 ——
+   * 手指明明还在往右滑，画面却在中间跳了一下。而且这一笔是排到下一帧才生效的，
+   * 就算按下之前就排好了队，也会落在手指拖动的过程里。
+   *
+   * 所以手势期间把要做的事记下来，等松手（再等惯性滑完）补一次。
+   */
+  const placeView = useCallback((span: ViewSpan, list: Bar[] = barsRef.current) => {
+    if (gestureRef.current) {
+      // 手还没松开：记下来，等松开（含惯性滑动）再补，见下面建图那段
+      pendingViewRef.current = span;
+      return;
+    }
+    pendingViewRef.current = null;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const range = viewportRange(list, span);
+    if (!range) return;
+    try { chart.timeScale().setVisibleLogicalRange(range); } catch { /* 区间不合法就算了 */ }
+  }, []);
+  /** 建图、数据那些 effect 只依赖 storageKey，拿的是那天的闭包，所以从这里取最新的 */
+  const placeViewRef = useRef(placeView);
+  placeViewRef.current = placeView;
   /**
    * 「把图上当前的横向画线报给上层」。
    *
@@ -365,6 +419,59 @@ export default function ChartPane({
       dm.on('tool', (k) => setTool(k as DrawingKind | null)),
     ];
 
+    /**
+     * 手势守卫：手指在图上就记一笔。
+     *
+     * 拖动、缩放期间不写视口（原因见 placeView）；松手之后还要多等一会儿：
+     * 触摸屏松开时库会接着惯性滑一段，那几帧同样不能被我们插进去。
+     *
+     * held 记的是「现在有几根手指按在图上」：别处（按钮、列表）的抬手事件也会冒到
+     * window 上，光看「有没有抬手」会把手势提前放掉 —— 一边拖着图、一边点了别处就中招。
+     */
+    const held = new Set<number>();
+    let releaseTimer = 0;
+    let lostTimer = 0;
+    /** 手势结束（或抬起事件丢了）：放开标记，把欠下的那次校正补上 */
+    const settle = () => {
+      window.clearTimeout(lostTimer);
+      lostTimer = 0;
+      held.clear();
+      gestureRef.current = false;
+      // 这段时间里数据可能又变了，所以还是按时间放，不按当时算出来的下标
+      const pending = pendingViewRef.current;
+      pendingViewRef.current = null;
+      if (pending) placeViewRef.current(pending);
+    };
+    const onDown = (e: PointerEvent) => {
+      held.add(e.pointerId);
+      window.clearTimeout(releaseTimer);
+      releaseTimer = 0;
+      window.clearTimeout(lostTimer);
+      gestureRef.current = true;
+      lostTimer = window.setTimeout(settle, GESTURE_LOST_MS);
+    };
+    const onMove = () => {
+      // 移动只说明手还在：把看门狗往后推一点，但别推太远（丢事件时要能自愈）
+      if (gestureRef.current && lostTimer !== 0) {
+        window.clearTimeout(lostTimer);
+        lostTimer = window.setTimeout(settle, GESTURE_LOST_MS);
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      held.delete(e.pointerId);
+      if (held.size > 0) return; // 还有手指在图上（双指缩放），没松手
+      window.clearTimeout(releaseTimer);
+      // 松手之后还有惯性滑动，那几帧同样不能插进去，等它滑完再结算
+      releaseTimer = window.setTimeout(settle, GESTURE_HOLD_MS);
+    };
+    // 用捕获阶段：画线工具按下时会自己 stopPropagation（挡住图上其它手势），
+    // 冒泡阶段的监听收不到那一次 —— 而那恰恰也是「手指正按在图上」的时候。
+    const CAPTURE = { capture: true, passive: true } as const;
+    host.addEventListener('pointerdown', onDown, CAPTURE);
+    host.addEventListener('pointermove', onMove, CAPTURE);
+    window.addEventListener('pointerup', onUp, CAPTURE);
+    window.addEventListener('pointercancel', onUp, CAPTURE);
+
     chartRef.current = chart;
     priceRef.current = price;
     lineRef.current = line;
@@ -374,6 +481,15 @@ export default function ChartPane({
     return () => {
       for (const u of unsubs) u();
       window.clearTimeout(saveTimer);
+      window.clearTimeout(releaseTimer);
+      window.clearTimeout(lostTimer);
+      // 摘监听时 capture 必须和挂的时候一致，否则摘不掉（会留着引用旧的 ref）
+      host.removeEventListener('pointerdown', onDown, true);
+      host.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onUp, true);
+      gestureRef.current = false;
+      pendingViewRef.current = null;
       dm.destroy();
       chart.remove();
       chartRef.current = null;
@@ -524,11 +640,15 @@ export default function ChartPane({
       try {
         const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as { fromTime?: number; toTime?: number } | null;
         if (saved && Number.isFinite(saved.fromTime) && Number.isFinite(saved.toTime)) {
-          const a = firstIndexAtOrAfter(clean, saved.fromTime as number);
-          const b = firstIndexAtOrAfter(clean, saved.toTime as number);
-          if (b - a >= 8) {
-            // 右边留一点空：上次停在最新一屏时，右侧有几根的空位
-            chart.timeScale().setVisibleLogicalRange({ from: a, to: b >= clean.length ? clean.length + 6 : b });
+          // 右边留一点空：上次停在最新一屏时，右侧就是那几根空位。
+          // 少于 8 根的窗口恢复出来和没有一样，不认这段记录。
+          const range = viewportRange(
+            clean,
+            { fromTime: saved.fromTime as number, toTime: saved.toTime as number, margin: DEFAULT_RIGHT_MARGIN },
+            8,
+          );
+          if (range) {
+            chart.timeScale().setVisibleLogicalRange(range);
             restored = true;
           }
         }
@@ -537,21 +657,33 @@ export default function ChartPane({
       if (!restored) {
         // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
         const from = Math.max(0, clean.length - 160);
-        chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + 6 });
+        chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + DEFAULT_RIGHT_MARGIN });
       }
     };
 
     /**
-     * 整段重画，但**不碰视口**。
+     * 整段重画。
      *
      * 前面插进来一段历史、或者拿到一份更旧的快照（REST 的缓存可能落后于 WebSocket），
-     * 都走这里。setData 之后库会按时间把视口稳住，所以不动就对了；
-     * 以前这两种情况都调 fullLoad()，那会顺手把视口摆回最新的一屏 —— 正看着历史的人
+     * 都走这里。setData 之后库会按时间把视口稳住，所以正常情况下一个像素都不用动 ——
+     * 以前这两种情况都调 fullLoad()，那会顺手把视口摆回最新的一屏，正看着历史的人
      * 会被弹回最右边，看着就是「画面转移了一下」。
+     *
+     * 但「正常情况下」得验一下再说：重画前后各读一次看得见的那段时间，真的变了才补一刀
+     * （见下面的比较）。之前是每次都照着记下的时间重设一遍，等于每补一页就动一次缩放。
      */
     const redraw = (clean: PaintedBar[]) => {
-      // 重画之前先记下「正在看哪一段时间」，重画完再按时间放回去
-      const span = chart.timeScale().getVisibleRange();
+      const ts = chart.timeScale();
+      // 重画之前先记下「正在看哪一段时间」，以及右边界之外还留了几根空位
+      const span = ts.getVisibleRange();
+      const logical = ts.getVisibleLogicalRange();
+      const beforeLen = countRef.current;
+      /**
+       * 空位只能从逻辑区间量：getVisibleRange() 会把右边界夹在最后一根 K 线上，
+       * 停在最新一屏时它看不出右边还空着几根。少了这几根，每补一页历史画面就往左挪。
+       */
+      const margin = logical && beforeLen > 0 ? Math.max(0, logical.to - (beforeLen - 1)) : 0;
+
       price.setData(clean.map(point));
       line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
@@ -562,22 +694,19 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+
+      if (!span || typeof span.from !== 'number' || typeof span.to !== 'number') return;
+      const now = ts.getVisibleRange();
       /**
-       * 按时间把视口放回去。
+       * 库自己把窗口稳住了（看得见的第一根、最后一根一根没变）：一个像素都别动。
        *
-       * 不能指望 setData 自己稳住：前面插进七千根之后，库把「逻辑下标 840~1006」原样留着，
-       * 而那已经是三个月前的一段。这里换算成时间再找回来，看历史的就不会被弹走，
-       * 第一次进来看到的也是最新那一屏。
+       * 以前每次都照着记下的时间再设一遍逻辑区间。问题是 setVisibleLogicalRange 按
+       * 「区间里有几根」反推缩放，于是每补一页历史就动一次缩放和右偏移；更麻烦的是这一笔
+       * 排在下一帧才生效 —— 用户正拖着的时候，手指刚拖到的位置就被它顶回去。
+       * 现在只在库真把窗口挪了（实测某些数据形状下会挪一整页）时，按时间放回去。
        */
-      if (span !== null) {
-        const a = firstIndexAtOrAfter(clean, span.from as number);
-        const b = firstIndexAtOrAfter(clean, span.to as number);
-        if (b - a >= 2) {
-          // 原来停在最新一屏（右边还有余量）的，重画后要留在原地，别把空隙吃掉
-          const to = b >= clean.length ? clean.length + 6 : b;
-          try { chart.timeScale().setVisibleLogicalRange({ from: a, to }); } catch { /* 区间不合法就算了 */ }
-        }
-      }
+      if (now && now.from === span.from && now.to === span.to) return;
+      placeViewRef.current({ fromTime: span.from, toTime: span.to, margin }, clean);
     };
 
     try {
@@ -585,7 +714,7 @@ export default function ChartPane({
       /**
        * 主题换了：平价线的中性灰和成交量那层淡色是**写在每根数据上**的，
        * applyOptions 只能换底色网格那些选项，换不掉它们 —— 不重画就会留着一半旧配色。
-       * 重画走 redraw：它按时间把视口放回去，正在看历史的人不会被弹回最新一屏。
+       * 重画走 redraw：换的只是颜色，视口该在哪儿还在哪儿。
        */
       if (paintThemeRef.current && paintThemeRef.current !== theme) {
         paintThemeRef.current = theme;
@@ -723,14 +852,19 @@ export default function ChartPane({
        *
        * 拖动中的在同一帧里改区间会被图库忽略，得挪到下一帧再拉回来；
        * 拉回来后停一小会儿，让下一批拖动事件重新触发，形成「到边就回弹」。
+       *
+       * 拉回来只挪右边界（scrollToPosition），不重设逻辑区间：后者会顺手把缩放改成
+       * 「刚好放下这么多根」，贴着边拖的时候画面会跟着一缩，看着又是一次跳。
        */
       // 一帧只拉一次：再密也救不了，反而会和用户的手感打架
       if ((r.from < -1 || r.to < 8) && !clampingRef.current) {
         clampingRef.current = true;
-        const span = Math.max(80, r.to - r.from);
+        // 左边界回到 0 还差这么多根，往右挪同样多根就贴回数据开头了
+        const back = Math.ceil(-r.from);
         requestAnimationFrame(() => {
           clampingRef.current = false;
-          try { ts.setVisibleLogicalRange({ from: 0, to: span }); } catch { /* 区间不合法就算了 */ }
+          if (!(back > 0)) return;
+          try { ts.scrollToPosition(ts.scrollPosition() + back, false); } catch { /* 位置不合法就算了 */ }
         });
       }
 

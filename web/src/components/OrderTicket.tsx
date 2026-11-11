@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
+import { ApiError, jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { protectionPrices, protectionRows, planWrongSide, type ProtectMode } from '../lib/protection.ts';
 import { riskSizing } from '../lib/sizing.ts';
@@ -204,12 +204,23 @@ export default function OrderTicket({
     if (!contract || !token) return;
     setBusy(true);
     try {
-      await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev }, token);
-    } catch (e) {
-      // 杠杆设置失败不阻断下单：可能本来就是目标杠杆，或者用户没有改过
-      onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
-    }
-    try {
+      try {
+        await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev }, token);
+      } catch (e) {
+        /**
+         * 密钥没有「合约交易」写权限时会先卡在设杠杆这一步。
+         * 这时候再往下打一次下单，只会多一条一模一样的报错 ——
+         * 以前页面连着弹「设置杠杆失败（继续下单）」和「下单失败」，
+         * 两句都是交易所的英文原文，看不出到底该改什么。这里直接说清原因就收手。
+         */
+        if (e instanceof ApiError && e.label === 'KEY_NO_WRITE') {
+          onToast('err', '这把密钥不能交易', (e as Error).message);
+          return;
+        }
+        // 别的原因（比如这一边已经有仓，杠杆改不了）不阻断下单
+        onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
+      }
+
       // 手动设和用方案都归到 effStop/effTarget 上，不设就是 0/0（不挂保护）
       type Attach =
         | { status: 'attached'; created: { kind: string }[] }
