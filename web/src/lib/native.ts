@@ -1,4 +1,5 @@
 import { isNative } from './endpoint.ts';
+import { syncSystemBars } from './theme.ts';
 
 /**
  * 安卓的返回键。
@@ -14,6 +15,8 @@ export async function installBackHandler(): Promise<void> {
   try {
     // 只在 App 里需要：浏览器和桌面端没有硬件返回键，别把这段塞进 PC 的包里
     const { App } = await import('@capacitor/app');
+    // 上面这一句 import 之后壳的插件表才齐，状态栏图标颜色这时再对一遍
+    syncSystemBars();
     await App.addListener('backButton', () => {
       const ev = new CustomEvent('xf-back', { cancelable: true });
       const handled = !window.dispatchEvent(ev);

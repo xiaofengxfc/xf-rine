@@ -2,7 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover：全面屏要画到状态栏和手势条底下。
+      不写这一句，App 里那些 env(safe-area-inset-*) 全是 0，
+      内容就整体缩在两条黑边里 —— 见 styles.css 里的 --inset-*。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0c0e12" />
     <title>巡风 · Gate 永续日内台</title>

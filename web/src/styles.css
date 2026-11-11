@@ -45,6 +45,19 @@
   --radius: 8px;
   --radius-sm: 5px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  /**
+   * 全面屏让位：顶部状态栏 / 刘海、两侧挖孔、底部手势条。
+   *
+   * 壳（Capacitor 8）在页面铺开之后把系统栏的尺寸写成 --safe-area-inset-*，
+   * 单位是 CSS 像素；浏览器和电脑端没有这几个变量，退回 env()，再没有就是 0。
+   * 页面里一律用下面这四个 --inset-*，别直接写 env()：
+   * 换壳、换设备的时候只有这一处要改。
+   */
+  --inset-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --inset-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --inset-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
   color-scheme: dark;
 }
 
@@ -170,8 +183,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .app {
   display: grid;
   grid-template-columns: 218px minmax(0, 1fr) 336px;
-  grid-template-rows: 46px minmax(0, 1fr);
-  height: 100%;
+  /* 顶栏那一行要连状态栏一起装下：顶栏自己顶着状态栏画（见 .topbar 的 padding-top） */
+  grid-template-rows: calc(46px + var(--inset-top)) minmax(0, 1fr);
+  /* 底部让出手势条：这里少算一截，露出来的是 body 的底色，看着才不是被裁掉 */
+  height: calc(100% - var(--inset-bottom));
   gap: 1px;
   background: var(--line-soft);
 }
@@ -181,7 +196,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 0 14px;
+  padding: var(--inset-top) calc(14px + var(--inset-right)) 0 calc(14px + var(--inset-left));
   background: var(--bg-1);
   min-width: 0;
 }
@@ -1055,7 +1070,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     flex-wrap: wrap;
     gap: 10px;
     row-gap: 4px;
-    padding-top: 6px;
+    padding-top: calc(6px + var(--inset-top));
     padding-bottom: 6px;
   }
   /* .brand 的 height:100% 会把第一行撑到整条顶栏那么高（宽屏上是给竖分隔线用的），
@@ -1077,7 +1092,10 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     /* 藏起来的时候一并从可访问树和 Tab 顺序里拿掉；收起的动画还得看得见，所以 visibility 也过渡 */
     visibility: hidden;
     transition: transform 0.18s ease, visibility 0.18s ease;
-    padding-top: env(safe-area-inset-top);
+    /* 抽屉是整屏高的浮层：上面避开状态栏，下面避开手势条，横屏时左右也可能是挖孔 */
+    padding-top: var(--inset-top);
+    padding-bottom: var(--inset-bottom);
+    padding-left: var(--inset-left);
     overscroll-behavior: contain;
   }
   .app.rail-open .rail { transform: none; visibility: visible; }
@@ -1132,7 +1150,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     z-index: 60;
     height: auto;
     min-height: 46px;
-    padding: calc(5px + env(safe-area-inset-top)) 8px 6px;
+    padding: calc(5px + var(--inset-top)) calc(8px + var(--inset-right)) 6px calc(8px + var(--inset-left));
     /* 6px 的时候 390 宽刚好差几像素，齿轮被挤到第二行；5px 留出价格位数变长的余量 */
     gap: 5px;
     /* 390 宽排一行；更窄的机器上允许折行，但不许横向溢出 */
@@ -1177,7 +1195,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .side {
     overflow: visible;
     max-height: none;
-    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    padding-bottom: calc(16px + var(--inset-bottom));
   }
   /* 「看多/看空」和下单面板里的按钮是一回事，手机上省掉这一格 */
   .side-pick { display: none; }
@@ -1205,10 +1223,10 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .toast-host {
     left: 10px;
     right: 10px;
-    bottom: calc(10px + env(safe-area-inset-bottom));
+    bottom: calc(10px + var(--inset-bottom));
     max-width: none;
   }
-  .modal-bg { padding: 10px; }
+  .modal-bg { padding: calc(10px + var(--inset-top)) 10px calc(10px + var(--inset-bottom)); }
   .modal { max-width: 100%; max-height: 92dvh; }
   .ip-row .input { font-size: 12px; }
 }
@@ -1223,7 +1241,8 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: calc(24px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
+  padding: calc(24px + var(--inset-top)) calc(16px + var(--inset-right)) calc(24px + var(--inset-bottom))
+    calc(16px + var(--inset-left));
   background: radial-gradient(120% 90% at 50% 0%, var(--bg-2) 0%, var(--bg-1) 55%, var(--bg-0) 100%);
 }
 .gate-card {
@@ -1251,6 +1270,38 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   color: var(--down-ink);
   font-size: 12px;
   line-height: 1.5;
+}
+/**
+ * 启动那一屏的进度，和失败时 Node 报上来的那几行。
+ *
+ * 这行小字一直在换，说明程序还活着 —— 比一个不动的转圈强。
+ */
+.gate-step {
+  margin: 6px 0 0;
+  font: 11.5px/1.55 var(--mono);
+  color: var(--text-2);
+  word-break: break-all;
+}
+/**
+ * Node 那边的启动记录：原样贴出来，不换行折叠。
+ *
+ * 里面是最底层的原因（哪一行抛的、端口被谁占了），
+ * 用户看不懂也没关系，截图发过来就能查。
+ */
+.gate-log {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  max-height: 190px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-0);
+  color: var(--text-2);
+  font: 11px/1.5 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-overflow-scrolling: touch;
+  user-select: text;
 }
 
 /* 仓没了还挂着的触发单：说清楚它现在没有主人 */

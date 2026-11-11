@@ -18,6 +18,20 @@ const config: CapacitorConfig = {
       // 手动启动：BootGate 要先定好数据目录再起引擎
       startMode: 'manual',
     },
+    /**
+     * 系统栏（状态栏、手势条）。
+     *
+     * 页面写了 viewport-fit=cover，意思是「我要画到系统栏底下，让位自己来」。
+     * 这里提前把这件事告诉壳：不然首帧会先按「缩进去」排一遍，再跳成整屏。
+     * 让位尺寸由壳注入成 --safe-area-inset-*（见 web/src/styles.css 的 --inset-*）。
+     *
+     * style 只是首帧用的：页面起来之后会按自己的主题改过来，
+     * 见 web/src/lib/theme.ts 的 syncSystemBars —— 系统和页面的深浅色不一定一致。
+     */
+    SystemBars: {
+      initialViewportFitValueHint: 'cover',
+      style: 'DARK',
+    },
   },
   server: {
     /**

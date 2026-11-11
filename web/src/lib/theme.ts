@@ -26,12 +26,41 @@ export function getTheme(): Theme {
   return current;
 }
 
+/**
+ * 状态栏和手势条的图标颜色，跟着页面走。
+ *
+ * 壳的默认值看的是**系统**的深色/浅色，而页面主题是用户自己选的，两者不一定一致：
+ * 系统深色 + 页面浅色时，默认值会让状态栏图标变成浅色贴在白底上，等于看不见。
+ *
+ * 这里不 import 插件包（浏览器和电脑端没有它），直接从壳上拿。
+ * 拿不到就什么也不做 —— 图标颜色不对总比页面崩了强。
+ */
+export function syncSystemBars(): void {
+  try {
+    const cap = (globalThis as {
+      Capacitor?: {
+        Plugins?: Record<string, unknown>;
+        registerPlugin?: (name: string) => unknown;
+      };
+    }).Capacitor;
+    if (!cap) return;
+    const plugin = (cap.Plugins?.SystemBars ?? cap.registerPlugin?.('SystemBars')) as
+      | { setStyle?: (options: { style: string }) => Promise<void> }
+      | undefined;
+    // LIGHT = 浅色底（用深色图标），DARK = 深色底（用浅色图标）
+    void plugin?.setStyle?.({ style: current === 'light' ? 'LIGHT' : 'DARK' });
+  } catch {
+    /* 插件没装进来、或者页面在普通浏览器里：不影响用 */
+  }
+}
+
 /** 把选择写到 `<html>` 上，顺带换掉浏览器地址栏那一条的颜色 */
 export function applyTheme(): void {
   const root = document.documentElement;
   root.dataset.theme = current;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', current === 'light' ? '#f4f6f9' : '#0c0e12');
+  syncSystemBars();
 }
 
 export function setTheme(next: Theme): void {
