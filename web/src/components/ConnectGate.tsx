@@ -1,9 +1,18 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { isNative, saveTarget, probeServer } from '../lib/endpoint.ts';
 
 /** 内置服务端固定这个端口：手机上没人和它抢 */
 const EMBEDDED = 'http://127.0.0.1:8787';
 const TOKEN_KEY = 'xf-rine:node-token';
+
+/**
+ * 等端口等多久。
+ *
+ * 第一次启动要先把服务端从 APK 里解出来再起运行时，慢机器上十几秒是正常的；
+ * 但也不必死等 —— Node 那边一旦确认失败（abort）会立刻报上来，这里跟着停。
+ */
+const WAIT_MS = 45_000;
+const STEP_MS = 500;
 
 type Stage = 'boot' | 'ok' | 'fail' | 'remote';
 
@@ -30,14 +39,26 @@ function nodeToken(): string {
   }
 }
 
+/** Node 那边报上来的一行启动记录 */
+interface BootLine {
+  stage: string;
+  line: string;
+}
+
 /**
  * 启动内置服务端。
  *
  * Node 运行时就在 App 进程里，起来之后在 127.0.0.1:8787 上开一个接口。
- * 起不来的时候（原生库没装上、脚本写错）要在这里说出来，
+ * 起不来的时候（原生库没装上、脚本写错、端口被占）要在这里说出来，
  * 不能让人对着一屏空图表猜是没行情还是没启动。
+ *
+ * 光说「没开起端口」不够 —— 真正的原因在 Node 那边的输出里。
+ * 所以 mobile/nodejs/index.js 会把启动过程一路喂上来（stage/line），
+ * 这里顺手记下来，失败时原样摆给用户看。
  */
-async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: string }> {
+async function bootEmbedded(
+  onLine: (line: BootLine) => void,
+): Promise<{ ok: boolean; token: string; error?: string }> {
   const token = nodeToken();
   /**
    * 「已经在跑了」不是失败，是常态：页面重载、点重试、从后台回来、开发模式双调用，
@@ -48,8 +69,21 @@ async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: str
    * 现在两种形状都认，而且不管它抛什么，都先等端口 —— 端口通了就说明没问题。
    */
   let startError = '';
+  /** Node 报上来的「起不来了」的原因，非空就别再等了 */
+  let aborted = '';
   try {
     const { Nodejs } = await import('@capawesome/capacitor-nodejs');
+    // 先挂监听再启动：启动过程里的话一句都不能漏
+    await Nodejs.addListener('message', (e) => {
+      const p = (e as { args?: unknown[] })?.args?.[0] as
+        | { kind?: string; stage?: string; line?: string }
+        | undefined;
+      if (!p || p.kind !== 'boot') return;
+      const line = { stage: String(p.stage ?? ''), line: String(p.line ?? '') };
+      onLine(line);
+      // Node 自己已经确认起不来了，别再让用户干等
+      if (line.stage === 'abort') aborted = line.line;
+    });
     await Nodejs.start({
       script: 'index.js',
       env: { REMOTE_TOKEN: token, XFRINE_REQUIRE_TOKEN: '1' },
@@ -61,23 +95,40 @@ async function bootEmbedded(): Promise<{ ok: boolean; token: string; error?: str
     if (!/already[\s_-]*running/i.test(code + ' ' + msg)) startError = msg || '内置服务端没起来';
   }
 
-  // Node 起来到端口能连上，一般一两秒
   let last = '';
-  for (let i = 0; i < 40; i += 1) {
+  for (let waited = 0; waited < WAIT_MS; waited += STEP_MS) {
     const r = await probeServer(EMBEDDED, token, 1500);
     if (r.ok) return { ok: true, token };
     last = r.error ?? '';
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // 口令对不上说明端口上跑的是上一次没退干净的实例，等下去也不会变
+    if (last.includes('口令')) break;
+    if (aborted) break;
+    await new Promise((resolve) => setTimeout(resolve, STEP_MS));
   }
   // 端口通但口令对不上：上一次没退干净，还带着旧口令在跑
   if (last.includes('口令')) {
     return { ok: false, token, error: '端口上有另一个实例在跑，口令对不上。把 App 彻底关掉（最近任务里划掉）再打开。' };
   }
+  /**
+   * 原因只留第一行。
+   *
+   * Node 报的是一整段堆栈，全塞进这个红框就变成一屏字，反而看不见最要紧那句；
+   * 完整的在下面那个日志块里，一字不少。
+   */
+  const headline = (text: string): string => {
+    const first = text.split('\n')[0]!.replace(/\s+$/, '');
+    return first.length > 140 ? first.slice(0, 140) + '…' : first;
+  };
+
   return {
     ok: false,
     token,
     // 真起不来才把启动时报的原因说出来，不然只有一句「没开起端口」不好查
-    error: startError ? '内置服务端没起来：' + startError : '内置服务端 20 秒内没开起端口',
+    error: startError
+      ? '内置服务端没起来：' + headline(startError)
+      : aborted
+        ? '内置服务端没起来：' + headline(aborted)
+        : '内置服务端没开起端口（' + WAIT_MS / 1000 + ' 秒）',
   };
 }
 
@@ -94,15 +145,31 @@ export default function ConnectGate({ children }: { children: ReactNode }) {
   const native = isNative();
   const [stage, setStage] = useState<Stage>(native ? 'boot' : 'ok');
   const [error, setError] = useState('');
+  /** 启动过程里 Node 报上来的话，失败时贴出来，成功就丢掉 */
+  const [log, setLog] = useState<string[]>([]);
+  const [tail, setTail] = useState('');
   // 手动连电脑时才用
   const [addr, setAddr] = useState('');
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 一次启动只跑一遍：StrictMode 会把 effect 走两次 */
+  const running = useRef(false);
 
   useEffect(() => {
     if (!native || stage !== 'boot') return;
+    if (running.current) return;
+    running.current = true;
     let alive = true;
-    void bootEmbedded().then((r) => {
+    // 失败前等着的那几十秒里，这一屏最好也在动，别让人以为死了
+    const pending: string[] = [];
+
+    void bootEmbedded(({ line }) => {
+      if (!alive) return;
+      pending.push(line);
+      setTail(line);
+      // 只留最后几十行：多了页面上的错误框撑爆，也没人看得完
+      setLog(pending.slice(-40));
+    }).then((r) => {
       if (!alive) return;
       if (r.ok) {
         // 地址和口令在这里定死，后面所有请求都拼到它前面、带上它
@@ -124,6 +191,7 @@ export default function ConnectGate({ children }: { children: ReactNode }) {
         <div className="gate-card">
           <h1>正在启动</h1>
           <p className="hint">第一次启动要解压服务端，慢一点正常。</p>
+          {tail && <div className="gate-step">{tail}</div>}
         </div>
       </div>
     );
@@ -148,8 +216,21 @@ export default function ConnectGate({ children }: { children: ReactNode }) {
         <h1>服务端没起来</h1>
         <p className="hint">程序自带的服务端没能启动，先把原因记下来：</p>
         {error && <div className="gate-err">{error}</div>}
+        {/* Node 那边说了什么，原样摆出来 —— 不然只有一句超时，没法查 */}
+        {log.length > 0 && (
+          <pre className="gate-log">{log.join('\n')}</pre>
+        )}
 
-        <button className="btn accent" style={{ width: '100%' }} onClick={() => { setError(''); setStage('boot'); }}>
+        <button
+          className="btn accent"
+          style={{ width: '100%' }}
+          onClick={() => {
+            setError('');
+            setTail('');
+            running.current = false;
+            setStage('boot');
+          }}
+        >
           再试一次
         </button>
 
