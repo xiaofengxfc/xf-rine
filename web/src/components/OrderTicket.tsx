@@ -66,16 +66,25 @@ export default function OrderTicket({
   }, [levMax]);
 
   /**
-   * 从「自动止盈止损」卡片套用过来：只带方向和这套方案的止损止盈。
-   * 限价框不动 —— 里面那个价是用户自己填的（或者自动填的现价），
-   * 方案里的 entry 只是「结构上理想的入场价」，拿它盖掉用户填的价，
-   * 等于悄悄地改了他要下的单。
+   * 从「自动止盈止损」卡片套用过来：方向、保护方式，还有入场价。
+   *
+   * 入场价要一起带过来。上一版只带方向不带价，框里留着的是打开页面时自动填的
+   * 现价 —— 过一阵就偏出去，点下单直接被「价格偏离现价」拒掉，而人以为自己
+   * 已经按方案挂上单了。所以：点「套用」就把限价换成方案入场价。
+   *
+   * 换完之后框里那个价仍然是可改的，改了就按改的挂（摘要和风险都跟着走）。
    */
   useEffect(() => {
     if (!applied) return;
     setSide(applied.bracket.direction);
     setProtect('plan');
     setPending(false);
+    if (applied.bracket.entry > 0) {
+      setPriceMode('limit');
+      setLimitStr(String(applied.bracket.entry));
+      // 这个价是点「套用」指定的，别让「限价框自动填现价」那一步再盖一次
+      autoLimitRef.current = true;
+    }
   }, [applied]);
 
   useEffect(() => {
@@ -392,7 +401,7 @@ export default function OrderTicket({
               <div className="edit-note" style={{ marginBottom: 6 }}>
                 成交后按下面的方案价挂，盈亏比 {planBracket.riskReward.toFixed(2)}。
                 限价单还没成交就先记着，等它成交页面自动补挂。
-                方案入场价 {fmtPrice(planBracket.entry, priceRound)} 只是参考，不会改上面填的限价。
+                方案入场价 {fmtPrice(planBracket.entry, priceRound)}，点「套用到下单面板」会把它填进上面的限价框。
               </div>
               {planWrong.stop && (
                 <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
