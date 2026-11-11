@@ -95,7 +95,9 @@ function parseFeed(xml: string, source: string): RawItem[] {
       desc: tag(block, 'description') || tag(block, 'summary') || tag(block, 'content'),
       url: linkOf(block),
       source,
-      publishedAt: Number.isFinite(at) ? at : Date.now(),
+      // 没有日期的条目按「最旧」算。填 Date.now() 会让一条几年前的老新闻排到最新一条前面，
+      // 而它多半正是那种缺字段的陈旧源。
+      publishedAt: Number.isFinite(at) ? at : 0,
     });
   }
   return out;
@@ -203,14 +205,27 @@ const NEGATORS = ['not', "n't", 'no', 'never', 'without', 'denies', 'deny'];
 
 function sentimentOf(text: string): number {
   const lower = ` ${text.toLowerCase()} `;
+  const hits: { at: number; dir: number }[] = [];
+  for (const w of BULLISH) {
+    const at = lower.indexOf(w);
+    if (at >= 0) hits.push({ at, dir: 1 });
+  }
+  for (const w of BEARISH) {
+    const at = lower.indexOf(w);
+    if (at >= 0) hits.push({ at, dir: -1 });
+  }
+  if (hits.length === 0) return 0;
+  /**
+   * 否定只在命中词前面一小段里算。以前是「整句里出现 not 就全部反向」，
+   * 于是「Bitcoin surges, no signs of slowing」被判成利空 —— 这种句子在新闻里很常见。
+   */
   let score = 0;
-  for (const w of BULLISH) if (lower.includes(w)) score += 1;
-  for (const w of BEARISH) if (lower.includes(w)) score -= 1;
-  if (score === 0) return 0;
-  // 简单否定处理：命中数量有限，按窗口内出现否定词就反向
-  const negated = NEGATORS.some((n) => lower.includes(` ${n} `));
-  const signed = negated ? -score : score;
-  return Math.max(-1, Math.min(1, signed / 3));
+  for (const h of hits) {
+    const near = lower.slice(Math.max(0, h.at - 40), h.at);
+    const negated = NEGATORS.some((n) => near.includes(` ${n} `));
+    score += negated ? -h.dir : h.dir;
+  }
+  return Math.max(-1, Math.min(1, score / 3));
 }
 
 // ---------- 组装 ----------

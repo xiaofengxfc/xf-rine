@@ -35,14 +35,17 @@ export default function TopBar({
       <div className="ticker-head">
         <span className="sym">{ticker?.contract.replace('_USDT', '') ?? '—'}</span>
         <span className="dim wide-only" style={{ fontSize: 11 }}>USDT 永续</span>
-        <span className={`px num ${chg >= 0 ? 'up' : 'down'}`}>
-          {fmtPrice(ticker?.last ?? 0, priceRound)}
+        {/* 还没有第一帧行情时写「—」：拿 0 去格式化会印出一个像模像样的 0.0 */}
+        <span className={`px num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
+          {ticker ? fmtPrice(ticker.last, priceRound) : '—'}
         </span>
-        <span className={`chg num ${chg >= 0 ? 'up' : 'down'}`}>{fmtPct(chg)}</span>
+        <span className={`chg num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
+          {ticker ? fmtPct(chg) : '—'}
+        </span>
       </div>
 
-      <span className="pill wide-only">标记 {fmtPrice(ticker?.mark ?? 0, priceRound)}</span>
-      <span className="pill wide-only">资金费 {fmtPct((ticker?.fundingRate ?? 0) * 100, 4)}</span>
+      <span className="pill wide-only">标记 {ticker ? fmtPrice(ticker.mark, priceRound) : '—'}</span>
+      <span className="pill wide-only">资金费 {ticker ? fmtPct(ticker.fundingRate * 100, 4) : '—'}</span>
       <span className="pill wide-only">周期 {interval}</span>
       <span className="pill wide-only">24h {ticker ? (ticker.volume24hUsd / 1e6).toFixed(1) + 'M' : '—'}</span>
 

@@ -64,16 +64,45 @@ async function request<T>(
 
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  /**
+   * 一次尝试的等待上限不能小于这次请求的截止时间。
+   *
+   * net.ts 的默认是 8 秒，而私有接口（下单、撤单、改杠杆）声明的截止是 15 秒 ——
+   * 不传的话 8 秒先到，15 秒那个永远轮不到。后果不是「慢一点」：页面看到的是 500，
+   * 而交易所那边很可能已经受理了，再点一次就是两单。
+   */
+  const perTry = attemptMs && attemptMs > 0 ? attemptMs : timeoutMs;
+  /** 出网被掐断时给一句能照着做的话，别让它落到 INTERNAL 上 */
+  const failed = (e: unknown): unknown => {
+    const name = e instanceof Error ? e.name : '';
+    if (name !== 'TimeoutError' && name !== 'AbortError') return e;
+    const secs = Math.round(timeoutMs / 1000);
+    if (method === 'GET') {
+      return new GateError(504, 'UPSTREAM_TIMEOUT', `${path} 在 ${secs} 秒内没有答复，过一会儿再试`);
+    }
+    return new GateError(
+      504,
+      'UNKNOWN_RESULT',
+      `${path} 超时（${secs} 秒）：不确定交易所是否已经受理这一单。`
+      + '先到「委托 / 持仓」里核对，别直接重点 —— 重复下单会变成两单。',
+    );
+  };
   try {
     // Gate 优先直连：直连最快，交易用的白名单也是直连出口。直连不通时才退回代理，
     // 这样代理只是后路，不会给每次下单、每次刷持仓都加上几秒。
-    const res = await netFetch(url, {
-      method,
-      headers,
-      body: bodyStr || undefined,
-      signal: ac.signal,
-    }, { preferDirect: true, private: isPrivate, attemptMs });
-    const text = await res.text();
+    let res: Awaited<ReturnType<typeof netFetch>>;
+    let text: string;
+    try {
+      res = await netFetch(url, {
+        method,
+        headers,
+        body: bodyStr || undefined,
+        signal: ac.signal,
+      }, { preferDirect: true, private: isPrivate, attemptMs: perTry });
+      text = await res.text();
+    } catch (e) {
+      throw failed(e);
+    }
     // Gate 的订单号和触发单号是 17 位整数，超过 JS 安全整数范围。
     // 直接 JSON.parse 会被 double 截断，拿去撤单就会 ORDER_NOT_FOUND。
     // 先把超长整数字面量包成字符串，再解析。

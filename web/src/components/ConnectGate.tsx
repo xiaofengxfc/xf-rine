@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { isNative, saveTarget, probeServer } from '../lib/endpoint.ts';
 
 /** 内置服务端固定这个端口：手机上没人和它抢 */
@@ -141,6 +141,12 @@ async function bootEmbedded(
  * 还剩一条后路：内置服务端怎么都起不来时，可以改成连电脑上跑的那个。
  * 用不上最好，但比让人对着一个打不开的 App 强。
  */
+/**
+ * 内置服务端只启一次，但它的结果要能被每一次 effect 认领。
+ * 见下面那个 effect 里的说明：用组件内的 ref 挡重复启动，重挂载时会把结果弄丢。
+ */
+let bootOnce: Promise<{ ok: boolean; token: string; error?: string }> | null = null;
+
 export default function ConnectGate({ children }: { children: ReactNode }) {
   const native = isNative();
   const [stage, setStage] = useState<Stage>(native ? 'boot' : 'ok');
@@ -152,24 +158,26 @@ export default function ConnectGate({ children }: { children: ReactNode }) {
   const [addr, setAddr] = useState('');
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
-  /** 一次启动只跑一遍：StrictMode 会把 effect 走两次 */
-  const running = useRef(false);
 
   useEffect(() => {
     if (!native || stage !== 'boot') return;
-    if (running.current) return;
-    running.current = true;
     let alive = true;
     // 失败前等着的那几十秒里，这一屏最好也在动，别让人以为死了
     const pending: string[] = [];
-
-    void bootEmbedded(({ line }) => {
+    /**
+     * 用 ref 挡「重复启动」是错的：StrictMode 是 mount → cleanup → mount，
+     * 第二遍被 ref 挡掉，而第一遍的 alive 已经被 cleanup 置成 false ——
+     * 那个启动的 promise 就没人接了。而这个分支没有重试按钮，页面永远停在「正在启动」。
+     * 所以启动本身只跑一次（模块级 promise），结果谁都能接。
+     */
+    bootOnce ??= bootEmbedded(({ line }) => {
       if (!alive) return;
       pending.push(line);
       setTail(line);
       // 只留最后几十行：多了页面上的错误框撑爆，也没人看得完
       setLog(pending.slice(-40));
-    }).then((r) => {
+    });
+    void bootOnce.then((r) => {
       if (!alive) return;
       if (r.ok) {
         // 地址和口令在这里定死，后面所有请求都拼到它前面、带上它
@@ -227,7 +235,8 @@ export default function ConnectGate({ children }: { children: ReactNode }) {
           onClick={() => {
             setError('');
             setTail('');
-            running.current = false;
+            // 重新起一次：丢掉上一次那个 promise，否则点「再试一次」接到的还是它的结果
+            bootOnce = null;
             setStage('boot');
           }}
         >

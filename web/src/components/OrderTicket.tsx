@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, jsend, type Account, type ContractInfo } from '../lib/api.ts';
-import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
+import { fmtMoney, fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { protectionRows, wrongSide } from '../lib/protection.ts';
 import { percentSizing } from '../lib/sizing.ts';
+import { pnlFromCost } from '../lib/position.ts';
 
 /** 仓位比例的几个档。做日内的人只在这几个数之间选，比让他填一个百分比快 */
 const POS_STEPS = [25, 50, 75, 100];
@@ -131,6 +132,29 @@ export default function OrderTicket({
   const stopNum = Number(stopStr) || 0;
   const targetNum = Number(targetStr) || 0;
   const wantProtect = stopNum > 0 || targetNum > 0;
+
+  /**
+   * 止损 / 止盈价对应的盈亏，多空各算一遍。
+   *
+   * 为什么两个方向都写：同一个止损价，做多是亏、做空就是赚。只算当前选的那一边，
+   * 一换方向就看不到对照 —— 而「这个价对空头是好是坏」正是下单前最该确认的事。
+   *
+   * 入场价跟着这一单走：限价单用填的限价，市价单用现价（priceUsed 本来就是这口径）。
+   * 盈亏公式全站只有 pnlFromCost 一个（和持仓卡、交易所同口径），这里不另写一套。
+   */
+  const pnlBase = lev > 0 ? (priceUsed * size * mult) / lev : 0;
+  const pnlCell = (dir: 'long' | 'short', price: number) => {
+    const pnl = pnlFromCost(dir, priceUsed, size, mult, price);
+    return { pnl, roe: pnlBase > 0 ? (pnl / pnlBase) * 100 : null };
+  };
+  const pnlRows = size > 0 && mult > 0 && priceUsed > 0
+    ? [
+        ...(stopNum > 0 ? [{ key: 'stop', label: '止损', price: stopNum }] : []),
+        ...(targetNum > 0 ? [{ key: 'target', label: '止盈', price: targetNum }] : []),
+      ].map((r) => ({ ...r, long: pnlCell('long', r.price), short: pnlCell('short', r.price) }))
+    : [];
+  /** 开平各一次的手续费，按这一单的张数估。盈亏里不扣它，单独写一行说清楚 */
+  const feeRound = priceUsed * size * mult * feeRate * 2;
 
   // 触发单看的是最新成交价，标记价常常比它更靠里，所以 wrongSide 内部两边取更严格的那个
   // 触发单是成交之后才挂的，那一刻现价≈成交价。所以拿「这一单会成交在哪个价」判，
@@ -375,6 +399,50 @@ export default function OrderTicket({
         {!wantProtect && (
           <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
             两个价都空着，这一单不带保护。跳空的时候穿仓价就是强平价。
+          </div>
+        )}
+
+        {pnlRows.length > 0 && (
+          <div className="pnl-at">
+            <div className="pnl-at-head">
+              <span>
+                {priceMode === 'limit' ? '限价' : '现价'} {fmtPrice(priceUsed, priceRound)} · {size} 张
+              </span>
+              <span className="dim">{lev}x</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th />
+                  <th className={side === 'long' ? 'on' : ''}>做多</th>
+                  <th className={side === 'short' ? 'on' : ''}>做空</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pnlRows.map((r) => (
+                  <tr key={r.key}>
+                    <th>
+                      {r.label} <span className="mono">{fmtPrice(r.price, priceRound)}</span>
+                    </th>
+                    {(['long', 'short'] as const).map((d) => {
+                      const cell = d === 'long' ? r.long : r.short;
+                      return (
+                        <td key={d} className={(cell.pnl >= 0 ? 'up' : 'down') + (side === d ? ' on' : '')}>
+                          {cell.pnl >= 0 ? '+' : ''}{fmtMoney(cell.pnl)}
+                          {cell.roe !== null && (
+                            <span className="dim"> {fmtPct(cell.roe, Math.abs(cell.roe) >= 100 ? 0 : 1)}</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="pnl-at-note">
+              到价平掉这一笔的盈亏（{side === 'long' ? '当前做多' : '当前做空'}）
+              · 不含手续费（开平各一次约 {fmtUsd(feeRound)} USDT）
+            </div>
           </div>
         )}
 

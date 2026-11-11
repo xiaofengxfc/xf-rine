@@ -35,8 +35,19 @@ function saveRail(v: { q: string; tab: Tab; scroll: number }): void {
   try { localStorage.setItem(RAIL_KEY, JSON.stringify(v)); } catch { /* 存不了就算了 */ }
 }
 
+/**
+ * 这一行的价格位数。以前写死「1000 以上一位、其余四位」，
+ * SHIB / PEPE 这类一跳 1e-6 的合约会整排显示成 0.0000 —— 几个币看起来一模一样。
+ * 服务端把 priceRound 一起带回来了，用它；真拿不到才退回估算。
+ */
+function tickOf(last: number, round: number | undefined): number {
+  if (round && round > 0) return round;
+  return last >= 1000 ? 0.1 : 1e-6;
+}
+
 export default function ContractRail({ tickers, current, onSelect, showTradable = false, onClose }: Props) {
-  const rail0 = useRef(readRail()).current;
+  // useState 的初始值只算一次；useRef(readRail()) 会在每次渲染时都去读一遍 localStorage
+  const [rail0] = useState(readRail);
   const [q, setQ] = useState(rail0.q);
   const [tab, setTab] = useState<Tab>(rail0.tab);
   const listRef = useRef<HTMLDivElement>(null);
@@ -105,7 +116,7 @@ export default function ContractRail({ tickers, current, onSelect, showTradable 
             <span className="n">
               {t.contract.replace('_USDT', '')}<em> /USDT</em>
             </span>
-            <span className="p num">{fmtPrice(t.last, t.last >= 1000 ? 0.1 : 0.0001)}</span>
+            <span className="p num">{fmtPrice(t.last, tickOf(t.last, t.priceRound))}</span>
             <span className="c num dim">{compact(t.volume24hUsd)}</span>
             <span className={`c num ${t.change24h >= 0 ? 'up' : 'down'}`}>{fmtPct(t.change24h, 2)}</span>
           </button>

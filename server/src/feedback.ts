@@ -171,10 +171,25 @@ function openSocket(): Promise<TLSSocket> {
     const sock = tlsConnect({ host: SMTP_HOST, port: SMTP_PORT, servername: SMTP_HOST }, () => {
       sock.setTimeout(STEP_TIMEOUT);
       sock.removeListener('error', onError);
+      sock.removeListener('timeout', onTimeout);
       resolve(sock);
     });
-    const onError = (e: Error) => reject(new FeedbackError('SMTP_CONNECT', '连不上 ' + SMTP_HOST + '：' + e.message));
+    const onError = (e: Error) => {
+      sock.destroy();
+      reject(new FeedbackError('SMTP_CONNECT', '连不上 ' + SMTP_HOST + '：' + e.message));
+    };
+    /**
+     * 握手阶段也可能一声不响：465 被防火墙丢掉时连 FIN 都不回来，
+     * 回调永远不触发，Node 自己的握手超时要两分钟 —— 页面就一直转。
+     * 这里先压一个 20 秒的底。
+     */
+    const onTimeout = () => {
+      sock.destroy();
+      reject(new FeedbackError('SMTP_CONNECT', '连不上 ' + SMTP_HOST + '：' + Math.round(STEP_TIMEOUT / 1000) + ' 秒没回应'));
+    };
+    sock.setTimeout(STEP_TIMEOUT);
     sock.once('error', onError);
+    sock.once('timeout', onTimeout);
   });
 }
 

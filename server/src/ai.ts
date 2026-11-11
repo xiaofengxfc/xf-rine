@@ -39,10 +39,13 @@ export async function listModels(ai: AiConfig = config.ai): Promise<string[]> {
   const timer = setTimeout(() => ctrl.abort(), 15000);
   let res: FetchResponse;
   try {
-    res = await netFetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal });
+    // 单条出网路径的上限要给到这次请求的截止时间：net.ts 默认 8 秒，比这里声明的 15 秒短，
+    // 不传的话 15 秒永远轮不到，而且超时会被说成「连不上」
+    res = await netFetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal }, { attemptMs: 15_000 });
   } catch (e) {
     const err = e as Error;
-    if (err.name === 'AbortError') throw new AiError(504, 'AI_TIMEOUT', '拉模型列表超时，中转站可能不稳');
+    // AbortSignal.timeout 抛的是 TimeoutError，只认 AbortError 会把超时误报成连不上
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw new AiError(504, 'AI_TIMEOUT', '拉模型列表超时，中转站可能不稳');
     throw new AiError(502, 'AI_NETWORK', `连不上 ${url}：${err.message}`);
   } finally {
     clearTimeout(timer);
@@ -279,7 +282,8 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
         signal: ctl.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(payload),
-      });
+        // 模型回答本来就慢（四五十秒是常态），net.ts 的 8 秒上限必须按这里的截止时间放宽
+      }, { attemptMs: opts.timeoutMs ?? 45_000 });
     } finally {
       clearTimeout(timer);
     }
@@ -290,12 +294,15 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
     res = await send(body);
     // 不少中转站不认 response_format，去掉再试一次
     if (opts.jsonMode && (res.status === 400 || res.status === 422)) {
+      // 这一份回包不会再用：读掉它，连接才能还回池子（不读就一直占着一条）
+      await res.text().catch(() => '');
       const { response_format: _drop, ...plain } = body;
       res = await send(plain);
     }
   } catch (e) {
     const err = e as Error;
-    if (err.name === 'AbortError') throw new AiError(504, 'AI_TIMEOUT', '模型接口超时，中转站可能不稳');
+    // AbortSignal.timeout 抛的是 TimeoutError，只认 AbortError 会把超时误报成连不上
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw new AiError(504, 'AI_TIMEOUT', '模型接口超时，中转站可能不稳');
     throw new AiError(502, 'AI_NETWORK', `连不上模型接口：${err.message}`);
   }
 

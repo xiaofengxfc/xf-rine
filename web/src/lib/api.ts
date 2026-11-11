@@ -24,7 +24,9 @@ async function parse<T>(res: Response): Promise<T> {
 export function jget<T>(url: string, init?: RequestInit): Promise<T> {
   // 口令和地址都在这里补：调用方写的一律是 /api/xxx，手机端才会拼到电脑上
   const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() };
-  return fetch(apiUrl(url), { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
+  // 兜一个超时：没有它，一个卡住的请求会让面板一直停在上一帧，看着像「数据不动了」
+  const signal = init?.signal ?? AbortSignal.timeout(20_000);
+  return fetch(apiUrl(url), { ...init, signal, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
     .then(parse<T>);
 }
 
@@ -39,7 +41,10 @@ export function jsend<T>(
   const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['x-arm-token'] = token;
-  return fetch(apiUrl(url), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal }).then(parse<T>);
+  // 写接口的超时给得宽：服务端自己可能已经超时重试过两轮。这里只是别让按钮永远转下去；
+  // 真超时的时候服务端那边会给一句「不确定有没有受理」，页面照它说的去核对
+  const ctl = signal ?? AbortSignal.timeout(45_000);
+  return fetch(apiUrl(url), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: ctl }).then(parse<T>);
 }
 
 // ---------- 类型 ----------

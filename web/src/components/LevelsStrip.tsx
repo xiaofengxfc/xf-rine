@@ -12,7 +12,10 @@ interface Props {
 
 export default function LevelsStrip({ levels, manual, price, priceRound, atr }: Props) {
   const manualSet = new Set(manual.map((p) => p.toFixed(6)));
-  const manualOnly = manual.filter((p) => !levels.some((l) => Math.abs(l.price - p) < atr * 0.3));
+  // atr 还没算出来时（=0）不去重：阈值 0 会让「手动画的和算出来的刚好同一个价」画两遍
+  const manualOnly = atr > 0
+    ? manual.filter((p) => !levels.some((l) => Math.abs(l.price - p) < atr * 0.3))
+    : manual;
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [overflow, setOverflow] = useState(false);
   // 进度条按这批位里最高的那个分归一：分数本身没有上限，直接当百分比画会溢出
@@ -88,7 +91,7 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
       <div className="lv" style={{ color: 'var(--text-2)', minWidth: 96 }}>
         <div className="r1"><span className="px" style={{ fontSize: 11 }}>ATR</span></div>
         <div className="meta"><span>{fmtPrice(atr, priceRound)}</span></div>
-        <div className="meta"><span>{((atr / (price || 1)) * 100).toFixed(2)}% 波动</span></div>
+        <div className="meta"><span>{price > 0 ? ((atr / price) * 100).toFixed(2) + '% 波动' : '—'}</span></div>
       </div>
 
       {levels.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没识别出够格的价格带，换个周期看看</div>}
@@ -140,7 +143,7 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
             <span className="tag">手动</span>
           </div>
           <div className="meta">
-            <span>{fmtPct(((p - price) / (price || 1)) * 100, 2)}</span>
+            <span>{price > 0 ? fmtPct(((p - price) / price) * 100, 2) : '—'}</span>
             <span>{manualSet.size} 条</span>
           </div>
         </div>

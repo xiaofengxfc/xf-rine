@@ -239,8 +239,13 @@ export class MarketHub {
   }
 
   close(): void {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.heartbeat) clearInterval(this.heartbeat);
+    /**
+     * 先摘监听再关：ws.close() 会触发 'close'，那个处理器会顺手安排一次重连 ——
+     * 结果是「关掉了又自己连回来」。两个定时器也要清成 null，不然状态会一直显示成还挂着。
+     */
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+    this.ws?.removeAllListeners();
     this.ws?.close();
     this.ws = null;
   }

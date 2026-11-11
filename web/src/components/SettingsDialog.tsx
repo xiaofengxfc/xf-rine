@@ -143,7 +143,10 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
    *   2. 服务端 /api/ip —— Node 直连出去的地址，Gate 的 API 请求从那里发出。
    * 两者不一样时把服务端那个也写出来，白名单才不会填错。
    */
+  /** 后发先至的那一次才作数：进页面自动问一次，紧接着点「重新检测」会两个请求并行 */
+  const ipSeq = useRef(0);
   const loadIp = useCallback(async (fresh: boolean): Promise<IpInfo> => {
+    const seq = ++ipSeq.current;
     setIpBusy(true);
     try {
       // 手机上「浏览器 IP」是手机自己的，拿它填白名单等于把交易挡在门外，
@@ -152,12 +155,13 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
         isNative() ? Promise.resolve(null) : detectBrowserIp(),
         jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' }).catch(() => null),
       ]);
+      if (seq !== ipSeq.current) return (browser ?? server ?? { ok: false, ip: '', at: Date.now(), error: '没查到' }) as IpInfo;
       setIp(browser);
       setServerIp(server);
       // 调用方拿这个去弹提示，说清楚「抄的是哪一个」
       return (browser ?? server ?? { ok: false, ip: '', at: Date.now(), error: '没查到' }) as IpInfo;
     } finally {
-      setIpBusy(false);
+      if (seq === ipSeq.current) setIpBusy(false);
     }
   }, []);
 
@@ -180,8 +184,14 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
         ta.style.opacity = '0';
         document.body.appendChild(ta);
         ta.select();
-        document.execCommand('copy');
+        const ok = document.execCommand('copy');
         ta.remove();
+        // execCommand 失败只返回 false，不抛异常：不认返回值就会在「其实没复制上」的时候
+        // 报一句「已复制」，用户粘出来的是上一次剪贴板里的东西
+        if (!ok) {
+          onToast('err', '复制失败', '手动选中那串字复制');
+          return;
+        }
       }
       onToast('ok', okTitle, text);
     } catch {

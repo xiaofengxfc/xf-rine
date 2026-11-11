@@ -17,10 +17,38 @@ app.use(express.json({ limit: '256kb' }));
  *
  * 页面由 App 从 http://localhost 读出来，真正的服务端在电脑上，
  * 两者的源不一样 —— 少了这几个头，浏览器连请求都不发。
- * 接口不带 cookie，靠的是下面那道口令，所以 Allow-Origin 用 * 就够了。
+ *
+ * 但不能回 *：本机这个端口后面是下单、平仓、改密钥，而浏览器对 127.0.0.1 的
+ * 请求没有同源保护以外的任何防线 —— 别人的网页只要发一个跨域请求就能打到
+ * /api/trade/arm 和 /api/order（还有 /api/config/keys）。所以只回显「自己人」的源：
+ * 同源、回环地址（桌面窗口 / 本地 Vite / Capacitor 都是这个），或者和请求 Host 一致
+ * （局域网里直接用 IP 打开页面）。别的源一律不给头，写操作直接 403。
  */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+function allowedOrigin(req: express.Request): string {
+  const origin = String(req.header('origin') ?? '');
+  // 没有 Origin：同源导航、命令行、桌面端主进程发的请求，不需要这个头
+  if (!origin || origin === 'null') return '';
+  let u: URL;
+  try { u = new URL(origin); } catch { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  const host = u.hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return origin;
+  if (u.host.toLowerCase() === String(req.header('host') ?? '').toLowerCase()) return origin;
+  return '';
+}
+
 app.use('/api', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = String(req.header('origin') ?? '');
+  const allowed = allowedOrigin(req);
+  if (allowed) {
+    res.setHeader('Access-Control-Allow-Origin', allowed);
+    res.setHeader('Vary', 'Origin');
+  } else if (origin && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+    res.status(403).json({ error: 'BAD_ORIGIN', detail: '这个页面不是本机的，改数据的请求一律不办' });
+    return;
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type, x-arm-token, x-remote-token');
   res.setHeader('Access-Control-Max-Age', '600');

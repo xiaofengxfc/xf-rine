@@ -887,6 +887,40 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 
 .edit-note { font-size: 10px; color: var(--text-2); line-height: 1.55; }
 
+/* 止损止盈价对应的盈亏：一行一个价，多空两列并排 —— 同一个价对两边是反的，
+   所以两列都要写出来；当前这一单选的方向那列加粗，一眼能对上 */
+.pnl-at {
+  margin: 0 0 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.pnl-at-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  color: var(--text-2); font-size: 10px; margin-bottom: 4px;
+}
+.pnl-at table { width: 100%; border-collapse: collapse; }
+.pnl-at thead th {
+  font-weight: 500; font-size: 10px; color: var(--text-2);
+  text-align: right; padding: 0 0 2px;
+}
+.pnl-at thead th:first-child { text-align: left; }
+.pnl-at thead th.on { color: var(--text-0); }
+.pnl-at tbody th {
+  text-align: left; font-weight: 500; color: var(--text-1);
+  white-space: nowrap; padding: 1px 6px 1px 0;
+}
+.pnl-at tbody th .mono { font-family: var(--mono); color: var(--text-0); }
+.pnl-at tbody td {
+  text-align: right; white-space: nowrap; padding: 1px 0;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.pnl-at tbody td.on { font-weight: 650; }
+.pnl-at-note { margin-top: 4px; font-size: 10px; color: var(--text-2); }
+
 /* 按持仓成本算的方案预览：钱写在前面，百分比写在后面。结构破了整块换成告警色 */
 .plan-box {
   margin-top: 8px;
@@ -1221,6 +1255,7 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .input.sm { padding: 6px 8px; }
   .field > label { font-size: 11px; }
   .summary { font-size: 12px; }
+  .pnl-at { font-size: 11.5px; }
   /* 夹在说明文字里的「填方案价」按钮，窄屏上独占一行，别把句子挤断 */
   .edit-note .chip { display: block; width: 100%; margin: 0 0 6px; }
 

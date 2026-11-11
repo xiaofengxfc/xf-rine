@@ -238,10 +238,16 @@ export function writeEnv(patch: Record<string, string>): void {
     seen.add(name);
     return `${name}=${patch[name]}`;
   });
+  // 换行会把一行拆成两行：粘进来一段带换行的内容，等于偷偷改了下一次的配置
+  // （比如把 GATE_ENV 改成 live）。宁可直接拒掉，也不写一个自己都读不懂的文件。
+  for (const [k, v] of Object.entries(patch)) {
+    if (/[\r\n]/.test(String(v))) throw new Error(`${k} 里有换行，没法写进配置文件`);
+  }
   for (const [k, v] of Object.entries(patch)) {
     if (!seen.has(k)) out.push(`${k}=${v}`);
   }
-  writeFileSync(ENV_PATH, out.join('\n').replace(/\n+$/, '') + '\n', 'utf8');
+  // 这个文件里是 Gate 的私钥和 AI 密钥：只给自己读
+  writeFileSync(ENV_PATH, out.join('\n').replace(/\n+$/, '') + '\n', { encoding: 'utf8', mode: 0o600 });
   // dotenv 只在启动时读过一次文件，之后写进去的值进不了 process.env。
   // 不手动同步的话 reloadConfig() 读到的还是旧值：保存返回成功、文件也变了，
   // 但进程里一点没动，必须重启才生效。
