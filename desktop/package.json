@@ -2,7 +2,7 @@
   "name": "xunfeng",
   "productName": "巡风",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "巡风 · Gate 永续日内台（桌面端）",
   "author": "xf-rine",
   "main": "electron/main.cjs",

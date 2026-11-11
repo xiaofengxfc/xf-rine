@@ -82,6 +82,31 @@ async function detectProxy(): Promise<{ url: string; source: ProxyState['source'
 
 const direct: Dispatcher = new Agent({ connect: { timeout: 10_000 } });
 let current: Dispatcher = direct;
+
+/**
+ * 手上那个代理 agent，和它对应的地址。
+ *
+ * ProxyAgent 自带连接池。每次确认代理都新建一个、旧的直接扔，代理连着不通的时候
+ * （注册表还写着、代理进程已经退了）15 秒一轮的重试会一直漏下去 —— 挂一晚上就是几百个连接池。
+ * 地址没变就接着用同一个；地址变了才换，换的时候把旧的关掉。
+ */
+let proxyAgent: ProxyAgent | null = null;
+let proxyAgentUrl = '';
+
+function agentForProxy(url: string): ProxyAgent {
+  if (proxyAgent && proxyAgentUrl === url) return proxyAgent;
+  dropProxyAgent();
+  proxyAgent = new ProxyAgent(url);
+  proxyAgentUrl = url;
+  return proxyAgent;
+}
+
+function dropProxyAgent(): void {
+  const old = proxyAgent;
+  proxyAgent = null;
+  proxyAgentUrl = '';
+  if (old) { try { void old.close(); } catch { /* 关不掉就算了 */ } }
+}
 let state: ProxyState = { on: false, url: '', source: 'direct', at: 0 };
 /** 连续失败次数。代理进程关了但注册表还写着的时候，靠它自动退回直连 */
 let failures = 0;
@@ -149,6 +174,8 @@ async function probe(agent: Dispatcher, route: 'direct' | 'proxy'): Promise<bool
       signal: ac.signal,
       headers: { accept: 'application/json' },
     });
+    // 响应体读掉再放：没消费的 body 会把那条连接一直占着
+    await res.text().catch(() => '');
     if (res.ok) noteMs(route, Date.now() - started);
     return res.ok;
   } catch {
@@ -170,12 +197,14 @@ export async function refreshProxy(force = false): Promise<ProxyState> {
 
   if (!found.url) {
     current = direct;
+    // 代理关了就别攥着那个连接池
+    dropProxyAgent();
     state = { on: false, url: '', source: 'direct', at: Date.now() };
     return state;
   }
 
-  // 代理地址不让它连自己，避免把本地代理进程搅进循环
-  const agent = new ProxyAgent(found.url);
+  // 代理地址不让它连自己，避免把本地代理进程搅进循环；地址没变就复用同一个 agent
+  const agent = agentForProxy(found.url);
   // 两条路各探一次：谁快就用谁。这是一分钟一次的小请求，换来后面每次刷行情都走对路。
   // 直连那次不等它 —— 它可能要好几秒，等它只会把第一个页面也拖住；量完自己记进 routeMs。
   const directProbe = probe(direct, 'direct').catch(() => false);

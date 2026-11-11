@@ -55,7 +55,7 @@ Windows 上直接双击 `start.bat` 也行。
 ## 打包成安装包
 
 现成的安装包在 [Releases](https://github.com/xiaofengxfc/xf-rine/releases)：
-电脑端 `XunFeng-1.0.1-Setup.exe`、手机端 `XunFeng-1.0.1-arm64.apk`。
+电脑端 `XunFeng-1.0.2-Setup.exe`、手机端 `XunFeng-1.0.2-arm64.apk`。
 
 自己打就两条命令，产物落在本机（安装包不进 git，见上面的说明）。装完之后不用装 Node，也不用开黑框。
 
@@ -66,7 +66,7 @@ pnpm install
 pnpm pack:win
 ```
 
-产物：`desktop/release/XunFeng-1.0.1-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
+产物：`desktop/release/XunFeng-1.0.2-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
 
 装进去的是一个壳，不是把页面拷一份进去：Electron 自带 Node，服务端被 esbuild 打成一个
 2.8 MB 的 `server.cjs`，前端产物放在 `resources/web-dist`。启动时主进程先把服务端拉起来，
@@ -92,6 +92,7 @@ pnpm pack:android
 ```
 
 产物：`mobile/android/app/build/outputs/apk/release/app-release.apk`（约 34 MB，arm64）。拷到手机上装。
+系统要求 Android 7.0（API 24）及以上，且只打 arm64（Android 包里的架构由 `build.gradle` 的 `abiFilters` 决定）。
 
 装进去的是整个程序，不是一块连电脑的屏幕。Node 运行时（nodejs-mobile）跟着 App 一起装，
 服务端就在手机上算：K 线、支撑阻力、形态、新闻、AI、下单，全在本地完成。电脑可以关着，

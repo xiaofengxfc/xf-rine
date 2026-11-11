@@ -65,6 +65,19 @@ interface Prefs {
 const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', side: 'long', riskPct: 1 };
 
 /**
+ * 存下来的合约名还算不算数。
+ *
+ * 别用 [A-Z0-9_] 这种白名单：Gate 上有 牛逼_USDT、牛来_USDT 这类中文合约，
+ * 从左边栏选中之后，存进去的偏好下次读不回来 —— 刷新一下就悄悄跳回 BTC，
+ * 用户只会觉得「选的币丢了」。所以只挡明显不是合约名的东西：空白、控制字符、斜杠。
+ */
+function isContractName(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  return s.length >= 2 && s.length <= 40 && !/[\s/\\?#%]/.test(s);
+}
+
+/**
  * 记住上次在看什么：币种、周期、看多还是看空、风险百分比。
  * 刷新一次就跳回 BTC/15m/看多很烦，但这只是偏好，
  * 读坏了就当没存过，绝不能让页面因此起不来。
@@ -73,7 +86,7 @@ function readPrefs(): Prefs {
   try {
     const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
     return {
-      contract: typeof raw.contract === 'string' && /^[A-Z0-9_]{2,24}$/.test(raw.contract) ? raw.contract : DEFAULT_PREFS.contract,
+      contract: isContractName(raw.contract) ? raw.contract : DEFAULT_PREFS.contract,
       interval: typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : DEFAULT_PREFS.interval,
       side: raw.side === 'short' ? 'short' : 'long',
       riskPct: typeof raw.riskPct === 'number' && raw.riskPct > 0 && raw.riskPct <= 100 ? raw.riskPct : DEFAULT_PREFS.riskPct,
@@ -140,6 +153,8 @@ export default function App() {
   const pumpGenRef = useRef(0);
   /** 已经自动补过一轮的 key */
   const pumpedKeyRef = useRef('');
+  /** 「上游没给新页」自动重试了几次。留个上限，别一直空转 */
+  const nopageRetryRef = useRef(0);
   const marketRef = useRef(market);
   useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
@@ -237,6 +252,8 @@ export default function App() {
         },
       });
       if (stale()) return;
+      // 真拿到东西了就把重试计数清掉，下次抖动还有三次机会
+      if (r.stopped === 'exhausted' || r.stopped === 'full' || r.pages > 0) nopageRetryRef.current = 0;
       if (r.stopped === 'exhausted') {
         // 不弹提示：图上到了最左边会写一行，工具栏上也一直写着根数和最早那一天
         noMoreOlderRef.current = true;
@@ -247,6 +264,27 @@ export default function App() {
       } else if (r.stopped === 'error' && failures > 0) {
         // 不算到头：切回来或者往回拖一下会重新拉
         push('err', '历史 K 线没拉到', '服务端或交易所没有响应。往回拖一下会重新拉。');
+      } else if (r.stopped === 'nopage' || r.stopped === 'pagelimit') {
+        /**
+         * 上游这一会儿一直给重复的页（服务端连续失败会歇十秒，冷却期间回的也是空页），
+         * 或者一轮补到了页数上限。
+         *
+         * 这两种以前什么都不做：工具栏上「正在补历史」一消失就再没动静，
+         * 除了用户自己拖一下视口，这条时间轴就停在那儿了 —— 正是要修的「一次抖动就不再加载」。
+         * 现在过几秒自己再来一轮，连着三次都没进展才提示。
+         */
+        if (nopageRetryRef.current < 3) {
+          nopageRetryRef.current += 1;
+          const wait = 4000 * nopageRetryRef.current;
+          const gen0 = pumpGenRef.current;
+          window.setTimeout(() => {
+            if (pumpGenRef.current !== gen0 || marketRef.current.key !== key) return;
+            void backfillOlder();
+          }, wait);
+        } else {
+          nopageRetryRef.current = 0;
+          push('err', '历史 K 线拉不动了', '交易所那头连着几次没给新的页。往回拖一下会再试。');
+        }
       }
     } finally {
       if (pumpGenRef.current === gen) {

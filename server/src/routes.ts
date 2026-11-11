@@ -572,10 +572,24 @@ async function loadCandles(
   return { bars, exhausted: endedAt(bars) };
 }
 
+/**
+ * 读一个带上下限的数字参数。
+ *
+ * 不能直接 Math.min/max：Number('abc') 是 NaN，而 Math.min/max 会把 NaN 原样传出去。
+ * NaN 当 limit 用，下游的 slice 就退化成「切全部」；打给交易所还会换来一个
+ * INVALID_PARAM_VALUE 的 400 —— 一句「参数不对」的报错，看不出是自己传错了。
+ * 认不出数字就当没传，用默认值。
+ */
+function qnum(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw ?? fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 router.get('/candles', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '1m';
-  const limit = Math.min(1000, Math.max(50, Number(req.query.limit ?? 500)));
+  const limit = Math.round(qnum(req.query.limit, 500, 50, 1000));
   const beforeRaw = Number(req.query.before);
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
   const page = await loadCandles(contract, interval, limit, false, before);
@@ -596,18 +610,18 @@ router.get('/candles', wrap(async (req, res) => {
 router.get('/levels', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
-  const limit = Math.min(1000, Math.max(120, Number(req.query.limit ?? 500)));
+  const limit = Math.round(qnum(req.query.limit, 500, 120, 1000));
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
   const { bars } = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
   // 丢掉最后一根未走完的 K 线，避免用半根 K 线的影线判位
   const closed = bars.slice(0, -1);
   const set = detectLevels(closed, {
-    pivotWindow: Math.max(2, Math.round(Number(req.query.pivotWindow ?? 3))),
-    maxLevels: Math.min(16, Math.max(3, Number(req.query.maxLevels ?? 8))),
-    maxDistancePct: Math.min(50, Math.max(1, Number(req.query.maxDistancePct ?? 12))),
-    minStrength: Math.min(90, Math.max(0, Number(req.query.minStrength ?? 25))),
+    pivotWindow: Math.round(qnum(req.query.pivotWindow, 3, 2, 50)),
+    maxLevels: Math.round(qnum(req.query.maxLevels, 8, 3, 16)),
+    maxDistancePct: qnum(req.query.maxDistancePct, 12, 1, 50),
+    minStrength: qnum(req.query.minStrength, 25, 0, 90),
   });
-  const minRR = Math.max(0.5, Number(req.query.minRR ?? 1.5));
+  const minRR = qnum(req.query.minRR, 1.5, 0.5, 100);
   const live = bars[bars.length - 1]?.close ?? set.last;
   const setForPlan = { ...set, last: live };
   res.json({
@@ -627,7 +641,7 @@ router.get('/levels', wrap(async (req, res) => {
 
 router.get('/news', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT').toUpperCase();
-  const limit = Math.min(20, Math.max(1, Number(req.query.limit ?? 8)));
+  const limit = Math.round(qnum(req.query.limit, 8, 1, 20));
   res.json(await newsDigest(contract, limit));
 }));
 
@@ -1850,7 +1864,7 @@ router.get('/level-stats', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   const price = Number(req.query.price);
-  const horizon = Math.min(200, Math.max(10, Number(req.query.horizon ?? 60)));
+  const horizon = Math.round(qnum(req.query.horizon, 60, 10, 200));
   if (!Number.isFinite(price)) throw new GateError(400, 'BAD_INPUT', '缺少 price');
   const bars = (await loadCandles(contract, interval, 1000)).bars.slice(0, -1);
   const atrV = detectLevels(bars).atr;

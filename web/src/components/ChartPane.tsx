@@ -149,6 +149,15 @@ export default function ChartPane({
   needOlderRef.current = onNeedOlder;
   /** 这一帧已经排了一次「把视口拉回数据边缘」，别排队排成一串 */
   const clampingRef = useRef(false);
+  /**
+   * 「把图上当前的横向画线报给上层」。
+   *
+   * 图一重建（换币种、换周期）这个函数就换一个实例，所以放进 ref：
+   * 数据 effect 里导入本合约存档的画线之后，要靠它把带子上的「手动」重算一遍 ——
+   * 光靠 add/remove 那几个事件不行，importJSON 不发这些事件。
+   * 少了这一步，上一个币种画的线会挂在新币种的档位带上，还按新币的价格算百分比。
+   */
+  const collectRef = useRef<() => void>(() => {});
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
   const lastTimeRef = useRef<number | null>(null);
@@ -178,17 +187,16 @@ export default function ChartPane({
     setSparse(s.count >= SPARSE_MIN_BARS ? { count: s.count, flat: s.flat } : null);
   }, []);
 
+  /** 画线和视口按币种 + 周期各存一份，也是「图表实例」的身份 */
+  const storageKey = `xf-rine:drawings:${contract}:${interval}`;
+  const viewKey = `xf-rine:view:${contract}:${interval}`;
+
   /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
   const [mode, setMode] = useState<ChartMode>(readMode);
   const flatShare = sparse ? sparse.flat / Math.max(1, sparse.count) : 0;
   const drawMode: 'candle' | 'line' = mode === 'auto'
     ? (sparse !== null && flatShare >= SPARSE_SHARE ? 'line' : 'candle')
     : mode;
-
-  useEffect(() => {
-    priceRef.current?.applyOptions({ visible: drawMode === 'candle' });
-    lineRef.current?.applyOptions({ visible: drawMode === 'line' });
-  }, [drawMode]);
 
   const pickMode = useCallback((next: ChartMode) => {
     setMode(next);
@@ -199,9 +207,6 @@ export default function ChartPane({
   const [atEdge, setAtEdge] = useState(false);
   const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
 
-  const storageKey = `xf-rine:drawings:${contract}:${interval}`;
-  // 视口也按币种和周期各记一份，刷新后接着看同一段
-  const viewKey = `xf-rine:view:${contract}:${interval}`;
   barsRef.current = bars;
   patternsRef.current = patterns;
 
@@ -328,6 +333,7 @@ export default function ChartPane({
     });
 
     let saveTimer: number | undefined;
+    /** 把图上当前的横向画线报给上层。画线和导入之后都要走它 */
     const collect = () => {
       const prices: number[] = [];
       for (const d of dm.drawings()) {
@@ -335,6 +341,7 @@ export default function ChartPane({
       }
       onManualLevels(prices);
     };
+    collectRef.current = collect;
     const persist = () => {
       window.clearTimeout(saveTimer);
       saveTimer = window.setTimeout(() => {
@@ -365,6 +372,8 @@ export default function ChartPane({
       lineRef.current = null;
       volRef.current = null;
       dmRef.current = null;
+      // 图已经销毁：这时候再 collect 就是对着一个没了的画线管理器读
+      collectRef.current = () => {};
       markersRef.current = null;
       lineMarkersRef.current = null;
       levelLinesRef.current = [];
@@ -374,6 +383,21 @@ export default function ChartPane({
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
+
+  /**
+   * 画法要在「图重建之后」重新贴一次。
+   *
+   * 图表实例归 storageKey（币种 + 周期）管，切周期就整张重建：新建的 K 线序列默认可见、
+   * 折线序列默认藏着。只依赖 drawMode 的话，切周期时这个值没变、effect 不会重跑 ——
+   * 选了「折线」的人切一次周期，图就变回 K 线，而且不会自己变回来。
+   *
+   * 位置也有讲究：它必须在建图那个 effect 之后声明。同一个 commit 里 effect 按声明顺序执行，
+   * 摆在前面的话，贴的是马上要被销毁的旧图。
+   */
+  useEffect(() => {
+    priceRef.current?.applyOptions({ visible: drawMode === 'candle' });
+    lineRef.current?.applyOptions({ visible: drawMode === 'line' });
+  }, [drawMode, storageKey]);
 
   // ---- 形态标记 ----
   const patternSig = patterns.map((p) => `${p.kind}@${p.time}`).join('|');
@@ -560,6 +584,11 @@ export default function ChartPane({
           const saved = localStorage.getItem(storageKey);
           if (saved) dm.importJSON(saved);
         } catch { /* 数据坏了就当没有 */ }
+        /**
+         * 导入不发 add/remove 事件，这里补一次。
+         * 本合约没存过画线时会报一个空数组，正好把上一个币种留下的「手动」清掉。
+         */
+        collectRef.current();
         return;
       }
 
@@ -840,7 +869,9 @@ export default function ChartPane({
     chartRef.current?.applyOptions({
       localization: { locale: 'zh-CN', priceFormatter: (p: number) => fmtPrice(p, priceRound) },
     });
-  }, [priceRound]);
+    // storageKey 也是依赖：切周期会重建图表，新图得重新贴一次位数，否则轴上的
+    // 2056.7 和摘要里的 2056.65 又对不上了
+  }, [priceRound, storageKey]);
 
   /**
    * 价格轴的最小跨度。
@@ -862,7 +893,8 @@ export default function ChartPane({
     };
     priceRef.current?.applyOptions({ autoscaleInfoProvider: provider });
     lineRef.current?.applyOptions({ autoscaleInfoProvider: provider });
-  }, [priceRound]);
+    // 同上：重建后的图表要重新贴，不然稀疏币切周期又变成满屏竖条
+  }, [priceRound, storageKey]);
 
   // ---- 工具切换 ----
   useEffect(() => {
