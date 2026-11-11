@@ -27,6 +27,8 @@ const DOWN = '#ff5f6d';
 
 /** 真实持仓成本 */
 const HOLDING = '#ffcf4d';
+/** 强平价：仓位被交易所接管的那个价，比成本线更该看见 */
+const LIQ = '#ff7a45';
 /** 还挂着的限价单 */
 const PENDING = '#b58bff';
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
@@ -895,6 +897,20 @@ export default function ChartPane({
       });
     }
 
+    // 强平价：真到这儿仓位就不归你管了。交易所没报这个价就不画。
+    for (const p of positions) {
+      if (!p.liqPrice || p.liqPrice <= 0) continue;
+      items.push({
+        price: p.liqPrice,
+        rank: 1.2,
+        color: LIQ,
+        width: 1,
+        style: LineStyle.Dashed,
+        title: positions.length > 1 ? (p.direction === 'long' ? '多单强平' : '空单强平') : '强平价',
+        wants: true,
+      });
+    }
+
     // 挂着的限价单：成交之前它只是一个打算，用虚线跟已成交的持仓区分
     for (const o of pendingOrderLines(orders)) {
       items.push({
@@ -908,17 +924,22 @@ export default function ChartPane({
       });
     }
 
-    // 档位按离现价远近排，近的先说话。分数只决定线型：够格的画实线，其余虚线。
+    // 档位按离现价远近排，近的先说话。
     // 分数是相对强度（触及次数 + 陈旧度），不是概率，所以标签里不写百分比，只写次数。
+    // 一律画实线：这版算法算出来的分数没有上限（1.x 到 3.x 都常见），
+    // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
+    // 主次靠远近距离分：最近的两条加粗，其余正常。
     const byNear = [...levels].sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
     byNear.forEach((lv, i) => {
       items.push({
         price: lv.price,
         rank: 3 + i * 0.01,
-        color: lv.role === 'support' ? 'rgba(46,211,160,0.55)' : 'rgba(255,95,109,0.55)',
-        width: 1,
-        style: lv.score >= 2 ? LineStyle.Solid : LineStyle.Dashed,
-        title: (lv.role === 'support' ? '支撑 ' : '阻力 ') + lv.touches + ' 次 · 守住 ' + Math.round(lv.holdRate * 100) + '%',
+        color: lv.role === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)',
+        width: i < 2 ? 2 : 1,
+        style: LineStyle.Solid,
+        // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
+        title: (lv.role === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(lv.price, priceRound)
+          + ' · 触及 ' + lv.touches + ' 次 · 守住 ' + Math.round(lv.holdRate * 100) + '%',
         // 离得近的四条说价，其余只画线：一屏七八个标签会把图糊住
         wants: i < 4,
       });
@@ -945,7 +966,7 @@ export default function ChartPane({
       });
       levelLinesRef.current.push(line);
     }
-  }, [levels, positions, orders]);
+  }, [levels, positions, orders, priceRound]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
