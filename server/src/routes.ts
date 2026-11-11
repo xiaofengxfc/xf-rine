@@ -1569,9 +1569,11 @@ function explainMargin(e: unknown, prepared: PreparedOrder): unknown {
 async function ensureMarginMode(
   contract: string, side: Direction, lev: number, mode: 'isolated' | 'cross',
 ) {
+  // 只要这个合约上还有仓（哪一边都算），交易所就不让改模式 —— 硬试只会让加仓失败一场。
+  // 所以跳过并把现状说出去，页面照着提示：这一单是照着交易所现有的模式开的。
   const sides = await readSides(contract).catch(() => [] as Side[]);
-  if (sides.some((s) => s.direction === side && s.size > 0)) {
-    return { applied: false as const, mode, why: '这一边已经有持仓，模式沿用交易所现状' };
+  if (sides.some((s) => s.size > 0)) {
+    return { applied: false as const, mode, why: '这个合约上还有持仓，模式沿用交易所现状' };
   }
   const cross = mode === 'cross';
   try {
