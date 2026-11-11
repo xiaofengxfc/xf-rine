@@ -5,11 +5,7 @@ import {
 } from './config.js';
 import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
-import {
-  applyConfluence, detectLevels, planBracket, planPositionBracket, resampleBars,
-  type Bar, type Bracket, type Direction, type PositionPlan,
-} from './levels.js';
-import { analyzeStructure } from './structure.js';
+import { detectLevels, type Bar, type Direction, type Level, type LevelSet } from './levels.js';
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
@@ -635,122 +631,65 @@ router.get('/candles', wrap(async (req, res) => {
   });
 }));
 
+// ---------- 档位 ----------
+
+/**
+ * 把检测器算出来的距离改挂到「现价」上。
+ *
+ * detectLevels 只能看到已经收盘的 K 线，它嘴里的 last 是上一根收盘价；
+ * 界面上要的是「离现在这个价格有多远」，所以这里按最新成交价重算一遍距离和角色。
+ * 角色也要重算：现价穿过一条位之后，原来在头顶的阻力就变成脚下的支撑。
+ */
+function withLive(s: LevelSet, live: number): LevelSet {
+  if (!(live > 0)) return s;
+  const a = s.atr > 0 ? s.atr : 0;
+  const levels = s.levels.map((l) => ({
+    ...l,
+    distancePct: ((l.price - live) / live) * 100,
+    distAtr: a > 0 ? (l.price - live) / a : l.distAtr,
+    role: (l.zoneHigh < live ? 'support' : l.zoneLow > live ? 'resistance' : l.price <= live ? 'support' : 'resistance') as 'support' | 'resistance',
+  }));
+  const near = (role: 'support' | 'resistance'): Level | null => {
+    const pool = levels.filter((x) => x.role === role);
+    if (pool.length === 0) return null;
+    return pool.reduce((x, y) => (Math.abs(y.distAtr) < Math.abs(x.distAtr) ? y : x));
+  };
+  return { ...s, last: live, levels, nearestSupport: near('support'), nearestResistance: near('resistance') };
+}
+
+/** 合约的最小变动价。读不到就让检测器自己按收盘价估 */
+function priceTickOf(contract: string): number {
+  try {
+    const c = contractsNow().find((x) => x.name === contract);
+    return c ? Number(c.order_price_round) || 0 : 0;
+  } catch { return 0; }
+}
+
 router.get('/levels', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   const limit = Math.round(qnum(req.query.limit, 500, 120, 1000));
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
   const { bars } = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
-  // 丢掉最后一根未走完的 K 线，避免用半根 K 线的影线判位
+  // 丢掉最后一根未走完的 K 线：半根 K 线的影线不该参与判位
   const closed = bars.slice(0, -1);
-  const set = detectLevels(closed, {
-    pivotWindow: Math.round(qnum(req.query.pivotWindow, 3, 2, 50)),
-    maxLevels: Math.round(qnum(req.query.maxLevels, 8, 3, 16)),
-    maxDistancePct: qnum(req.query.maxDistancePct, 12, 1, 50),
-    minStrength: qnum(req.query.minStrength, 25, 0, 90),
-  });
-  const minRR = qnum(req.query.minRR, 1.5, 0.5, 100);
-  const live = bars[bars.length - 1]?.close ?? set.last;
-  // 多周期一致性：把同一批 K 线聚成 4 倍周期再算一遍。
-  // 不在两个周期上分别算的话，「5 分钟上碰了三次」和「5 分钟和 20 分钟上都碰过」是同一个强度。
-  const coarseSet = detectLevels(resampleBars(closed, 4), { pivotWindow: 3, maxLevels: 8 });
-  const weighted = applyConfluence(set.levels, coarseSet.levels, set.atr, live);
-  const setForPlan = { ...set, levels: weighted, last: live };
-  const structure = analyzeStructure(closed, { swing: 3 });
-  // 入场默认按限价回踩算；entry=market 只是留着对比和排查用的
-  const entryMode = String(req.query.entry ?? '') === 'market' ? 'market' as const : 'limit' as const;
+  const live = bars[bars.length - 1]?.close ?? 0;
+  const set = withLive(detectLevels(closed, {
+    tick: priceTickOf(contract),
+    lookback: Math.round(qnum(req.query.lookback, 250, 60, 1000)),
+    maxOut: Math.round(qnum(req.query.maxOut, 10, 2, 20)),
+    maxDistAtr: qnum(req.query.maxDistAtr, 5, 0.5, 20),
+    nmsGapAtr: qnum(req.query.nmsGapAtr, 0.9, 0.2, 5),
+  }), live);
   res.json({
     contract,
     interval,
     barsUsed: closed.length,
-    ...setForPlan,
-    structure,
-    entryMode,
+    ...set,
     patterns: detectPatterns(closed, { window: 30, limit: 6 }),
-    brackets: {
-      long: planBracket(setForPlan, 'long', { minRR, entryMode }),
-      short: planBracket(setForPlan, 'short', { minRR, entryMode }),
-    },
   });
 }));
 
-const roundPositionPlan = (p: PositionPlan): PositionPlan => ({
-  ...p,
-  entry: px(p.entry),
-  stop: px(p.stop),
-  target: px(p.target),
-  riskFromEntry: px(p.riskFromEntry),
-  rewardFromEntry: px(p.rewardFromEntry),
-});
-
-/**
- * 持仓的自动止盈止损：输入是这张仓，不是现价。
- *
- * 页面上的「套用方案」以前直接用 /api/levels 那份 brackets —— 那是「现在进场」的方案，
- * 锚在最新价上。套到一张已经拿着的仓上，等于按现价重新开一次来算止损，
- * 不看成本、不看已经浮亏多少，越是亏反而把止损放得越远。
- * 这里按持仓成本重算，并把「打到止损止盈各平出多少钱」一起算好 ——
- * 用户真正要看的是钱，不是一个百分比。
- */
-router.post('/position-plan', wrap(async (req, res) => {
-  const contract = String(req.body?.contract ?? '');
-  const direction = req.body?.direction;
-  if (!contract || !['long', 'short'].includes(String(direction))) {
-    throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
-  }
-  const dir = direction as Direction;
-  const interval = INTERVALS.has(String(req.body?.interval)) ? String(req.body.interval) : '15m';
-  const minRR = qnum(req.body?.minRR, 1.5, 0.5, 100);
-
-  const sides = await readSides(contract);
-  const mine = sides.find((s) => s.direction === dir && s.size > 0) ?? null;
-  if (!mine) {
-    throw new GateError(400, 'NO_POSITION', '当前没有' + (dir === 'long' ? '多' : '空') + '头持仓，没有可分析的仓');
-  }
-
-  // 和 /levels 一样：丢掉最后一根未走完的 K 线，别用半根 K 线的影线判位
-  const { bars } = await loadCandles(contract, interval, 500, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
-  const closed = bars.slice(0, -1);
-  const set = detectLevels(closed, {});
-  const live = bars[bars.length - 1]?.close ?? set.last;
-  const coarseSet = detectLevels(resampleBars(closed, 4), { pivotWindow: 3, maxLevels: 8 });
-  const weighted = applyConfluence(set.levels, coarseSet.levels, set.atr, live);
-  const structure = analyzeStructure(closed, { swing: 3 });
-  const plan = planPositionBracket({ ...set, levels: weighted, last: live }, {
-    direction: dir,
-    entry: mine.entryPrice,
-    last: live,
-    mark: mine.markPrice,
-  }, { minRR, trend: structure.trend });
-  if (!plan) throw new GateError(400, 'NO_PLAN', 'K 线不够或者价格读不出来，算不出方案');
-
-  // 乘数从交易所的持仓价值反推，和 readPositions 同一个口径
-  const multiplier = mine.size > 0 && mine.markPrice > 0 && mine.value > 0
-    ? mine.value / (mine.size * mine.markPrice) : 0;
-  const pnlAt = (price: number) => (multiplier > 0
-    ? (price - mine.entryPrice) * mine.size * multiplier * (dir === 'long' ? 1 : -1)
-    : 0);
-  const atStop = pnlAt(plan.stop);
-  const atTarget = pnlAt(plan.target);
-  const riskUsd = Math.max(0, -atStop);
-  // 权益读不到就不编一个占比出来
-  const equity = await readAccount().then((a) => a.total).catch(() => 0);
-
-  res.json({
-    contract, direction: dir, interval, barsUsed: closed.length,
-    entry: px(mine.entryPrice), mark: px(mine.markPrice), last: px(live),
-    size: mine.size, leverage: mine.leverage, multiplier,
-    structure,
-    plan: roundPositionPlan(plan),
-    money: {
-      atStop: Math.round(atStop * 100) / 100,
-      atTarget: Math.round(atTarget * 100) / 100,
-      atMark: Math.round(pnlAt(mine.markPrice > 0 ? mine.markPrice : live) * 100) / 100,
-      riskUsd: Math.round(riskUsd * 100) / 100,
-      riskOfEquityPct: equity > 0 ? Math.round((riskUsd / equity) * 10000) / 100 : null,
-    },
-  });
-}));
 
 // ---------- 新闻雷达 ----------
 
@@ -765,15 +704,12 @@ router.get('/news', wrap(async (req, res) => {
 /** 价格留 6 位有效数字就够了，原始浮点白烧 token 还容易被读错 */
 const px = (v: number): number => (Number.isFinite(v) ? Number(v.toPrecision(6)) : 0);
 
-const roundBracket = (b: Bracket | null): Bracket | null =>
-  b ? { ...b, entry: px(b.entry), stop: px(b.stop), target: px(b.target), riskReward: Number(b.riskReward.toFixed(2)) } : null;
 
 async function buildSnapshot(contract: string, interval: string): Promise<AiSnapshot> {
   const { bars } = await loadCandles(contract, interval, 300);
   const closed = bars.slice(0, -1);
-  const set = detectLevels(closed, {});
-  const live = bars[bars.length - 1]?.close ?? set.last;
-  const planSet = { ...set, last: live };
+  const live = bars[bars.length - 1]?.close ?? 0;
+  const set = withLive(detectLevels(closed, { tick: priceTickOf(contract) }), live);
   const news = await newsDigest(contract, 6).catch(() => null);
 
   let barHigh = live;
@@ -806,17 +742,17 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
     change24h: Number(change24h.toFixed(2)),
     levels: set.levels.map((l) => ({
       price: px(l.price),
+      zone: [px(l.zoneLow), px(l.zoneHigh)],
       // 模型读中文材料，角色也给它中文
       role: l.role === 'support' ? '支撑' : '阻力',
-      strength: Math.round(l.strength),
+      // 排序分只有两个因子，别让模型当成概率读；守住率是统计出来的
+      score: Number(l.score.toFixed(2)),
+      holdRate: Number(l.holdRate.toFixed(2)),
       touches: l.touches,
-      failures: l.failures,
+      holds: l.holds,
+      pStall: Number(l.pStall.toFixed(2)),
       distancePct: Number(l.distancePct.toFixed(2)),
     })),
-    brackets: {
-      long: roundBracket(planBracket(planSet, 'long', { minRR: 1.5 })),
-      short: roundBracket(planBracket(planSet, 'short', { minRR: 1.5 })),
-    },
     patterns: detectPatterns(closed, { window: 12, limit: 4 }).map((p) => ({
       name: p.name,
       direction: p.direction,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtPct, fmtPrice } from '../lib/format.ts';
-import type { Level, Structure } from '../lib/api.ts';
+import type { Level } from '../lib/api.ts';
 
 interface Props {
   levels: Level[];
@@ -8,16 +8,15 @@ interface Props {
   price: number;
   priceRound: number;
   atr: number;
-  /** 结构状态：趋势 / 最近的 BOS·CHoCH / 现价在区间里的位置 */
-  structure?: Structure;
 }
 
-export default function LevelsStrip({ levels, manual, price, priceRound, atr, structure }: Props) {
+export default function LevelsStrip({ levels, manual, price, priceRound, atr }: Props) {
   const manualSet = new Set(manual.map((p) => p.toFixed(6)));
   const manualOnly = manual.filter((p) => !levels.some((l) => Math.abs(l.price - p) < atr * 0.3));
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [overflow, setOverflow] = useState(false);
-
+  // 进度条按这批位里最高的那个分归一：分数本身没有上限，直接当百分比画会溢出
+  const topScore = levels.reduce((m, l) => Math.max(m, l.score), 0);
   // 这条带子放不下时会横向溢出，但滚动条是藏着的 —— 光靠默认行为鼠标根本滚不动。
   useEffect(() => {
     const el = stripRef.current;
@@ -89,50 +88,23 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr, st
       <div className="lv" style={{ color: 'var(--text-2)', minWidth: 96 }}>
         <div className="r1"><span className="px" style={{ fontSize: 11 }}>ATR</span></div>
         <div className="meta"><span>{fmtPrice(atr, priceRound)}</span></div>
-        <div className="meta"><span>{(atr / (price || 1) * 100).toFixed(2)}% 波动</span></div>
+        <div className="meta"><span>{((atr / (price || 1)) * 100).toFixed(2)}% 波动</span></div>
       </div>
 
-      {structure && (
-        <div
-          className={'lv struct ' + structure.trend}
-          title={structure.note}
-          style={{ minWidth: 118 }}
-        >
-          <div className="r1">
-            <span className="px" style={{ fontSize: 11 }}>结构</span>
-            <span className="tag">
-              {structure.trend === 'up' ? '上升' : structure.trend === 'down' ? '下降' : '区间'}
-            </span>
-          </div>
-          <div className="meta">
-            <span>{structure.event ? structure.event.kind : '暂无破位'}</span>
-            {structure.event && (
-              <span>{structure.event.direction === 'up' ? '向上' : '向下'}破 {fmtPrice(structure.event.price, priceRound)}</span>
-            )}
-          </div>
-          <div className="meta">
-            {structure.rangePct === null
-              ? <span>区间位置算不出来</span>
-              : (
-                <>
-                  <span>区间 {structure.rangePct.toFixed(0)}%</span>
-                  <span>
-                    {structure.zone === 'premium' ? '溢价' : structure.zone === 'discount' ? '折价' : '中间'}
-                  </span>
-                </>
-              )}
-          </div>
-        </div>
-      )}
-
-      {levels.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没有识别出够强的位，换个周期或调低最小强度</div>}
+      {levels.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没识别出够格的价格带，换个周期看看</div>}
 
       {levels.map((lv) => (
         // 这张卡上没有任何操作，就别用 button —— 能点、点下去却什么都不发生，比不给反馈更糟
         <div
           key={`${lv.role}-${lv.price}`}
           className={`lv ${lv.role === 'support' ? 'sup' : 'res'}`}
-          title={`触及 ${lv.touches} 次 · 假突破 ${lv.failures} 次 · 成交量占比 ${(lv.volumeRatio * 100).toFixed(0)}% · 区间 ${fmtPrice(lv.zoneLow, priceRound)} - ${fmtPrice(lv.zoneHigh, priceRound)}`}
+          title={
+            '价格带 ' + fmtPrice(lv.zoneLow, priceRound) + ' - ' + fmtPrice(lv.zoneHigh, priceRound)
+            + '（宽 ' + lv.widthAtr.toFixed(2) + ' ATR）'
+            + ' · 历史触及 ' + lv.touches + ' 次，守住 ' + lv.holds + ' 次'
+            + ' · 距离 ' + lv.distAtr.toFixed(2) + ' ATR'
+            + (lv.barsSinceTouch >= 0 ? ' · 最近一次在 ' + lv.barsSinceTouch + ' 根前' : ' · 这段里没碰到过')
+          }
         >
           <div className="r1">
             <span className="px">{fmtPrice(lv.price, priceRound)}</span>
@@ -140,16 +112,19 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr, st
           </div>
           <div className="meta">
             <span>{fmtPct(lv.distancePct, 2)}</span>
-            <span>
-              强度 {Math.round(lv.strength)}
-              {lv.confluence === 2 && <b className="mtf" title="更粗的周期上也认这条位"> ×2</b>}
+            <span title="历史上触及这个价格带之后守住的比例，样本少时给的是保守下界">
+              守住 {Math.round(lv.holdRate * 100)}%
             </span>
           </div>
           <div className="meta">
             <span>{lv.touches} 次触及</span>
-            <span>假破 {lv.failures}</span>
+            <span>{lv.widthAtr.toFixed(1)} ATR 宽</span>
           </div>
-          <i className="bar" style={{ width: `${lv.strength}%` }} />
+          <i
+            className="bar"
+            style={{ width: `${topScore > 0 ? (lv.score / topScore) * 100 : 0}%` }}
+            title={'相对分数 ' + lv.score.toFixed(2) + '（触及次数 + 陈旧度，不是概率）'}
+          />
         </div>
       ))}
 

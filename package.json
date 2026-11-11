@@ -12,9 +12,7 @@
     "check:candles": "pnpm -F server exec tsx ../web/scripts/check-candles.ts",
     "check:viewport": "pnpm -F server exec tsx ../web/scripts/check-viewport.ts",
     "check:errors": "pnpm -F server exec tsx scripts/check-errors.ts",
-    "check:plan": "pnpm -F server exec tsx scripts/check-position-plan.ts",
     "check:protect": "pnpm -F server exec tsx ../web/scripts/check-protection.ts",
-    "check:struct": "pnpm -F server exec tsx scripts/check-structure.ts",
     "check:levels": "pnpm -F server exec tsx scripts/check-levels.ts",
     "pack:win": "pnpm -F web build && pnpm --filter ./desktop dist",
     "pack:android": "pnpm -F web build && pnpm --filter ./mobile apk"

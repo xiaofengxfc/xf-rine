@@ -18,20 +18,17 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Bar, Bracket, Level, OpenOrder, Pattern, Position, PriceOrder } from '../lib/api.ts';
+import type { Bar, Level, OpenOrder, Pattern, Position } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
-import { bracketOf, protectionState } from '../lib/protective.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
 const NEUTRAL = '#8b98a5';
-/** 计划入场：虚线，和跟着价格跑的最新价线区分开 */
-const ENTRY = '#7aa2ff';
 /** 真实持仓成本 */
 const HOLDING = '#ffcf4d';
 /** 还挂着的限价单 */
@@ -115,13 +112,12 @@ interface Props {
   bars: Bar[];
   levels: Level[];
   patterns: Pattern[];
-  bracket: Bracket | null;
+
   /** 当前合约的真实持仓，用来在图上标出成本线（双向模式可能多空各一条） */
   positions: Position[];
   /** 当前合约还挂着的委托，限价单在图上画一条线，成交或撤掉就消失 */
   orders: OpenOrder[];
-  /** 当前合约真实挂着的止损止盈。这是交易所里的单，不是算出来的方案价 */
-  priceOrders: PriceOrder[];
+
   /** 每张多少币。把价格差换算成 USDT 只有它能做 */
   multiplier: number;
   /** 实时标记价：交易所按它算已盈亏，图上的盈亏也按它算 */
@@ -147,7 +143,7 @@ interface Props {
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, patterns, bracket, positions, orders, priceOrders, multiplier, markPrice, priceRound,
+  contract, interval, bars, levels, patterns, positions, orders, multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
   canClose, onClosePosition,
 }: Props) {
@@ -159,7 +155,7 @@ export default function ChartPane({
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const dmRef = useRef<DrawingManager | null>(null);
   const levelLinesRef = useRef<IPriceLine[]>([]);
-  const bracketLinesRef = useRef<IPriceLine[]>([]);
+
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   /** 折线模式下形态标记挂在折线上：同一个数组，曲线上一模一样的位置 */
   const lineMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
@@ -509,7 +505,6 @@ export default function ChartPane({
       markersRef.current = null;
       lineMarkersRef.current = null;
       levelLinesRef.current = [];
-      bracketLinesRef.current = [];
       lastTimeRef.current = null;
     };
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
@@ -903,15 +898,13 @@ export default function ChartPane({
     return () => cancelAnimationFrame(id);
   }, [bars, resetKey, refreshSparse]);
 
-  // ---- 图上的横线：方案止损止盈、持仓均价、挂着的限价单、支撑阻力 ----
+  // ---- 图上的横线：持仓均价、挂着的限价单、支撑阻力 ----
   useEffect(() => {
     const price = priceRef.current;
     if (!price) return;
 
     for (const line of levelLinesRef.current) price.removePriceLine(line);
-    for (const line of bracketLinesRef.current) price.removePriceLine(line);
     levelLinesRef.current = [];
-    bracketLinesRef.current = [];
 
     // 线可以多，字不能挤。每条线都留着，但右侧轴标签和标题按优先级抢位子：
     // 同一段价位上只让一条说话，剩下的只画线不写字。
@@ -946,38 +939,6 @@ export default function ChartPane({
 
     const items: Item[] = [];
 
-    /** 同一个合约多空两边都持有时，标签上得写清楚是哪一边的止损止盈 */
-    const twoSides = positions.length > 1;
-
-    // 真实挂着的止损止盈排最前：这是交易所里已经存在的单，到价会真的把仓平掉。
-    // 方案价只是「打算」，排在持仓成本和挂单后面。
-    for (const p of positions) {
-      const cur = bracketOf(priceOrders, p.contract, p.direction);
-      const tag = twoSides ? (p.direction === 'long' ? '多' : '空') : '';
-      if (cur.stop) {
-        items.push({
-          price: cur.stop.triggerPrice, rank: 0, color: DOWN, width: 2, style: LineStyle.Solid,
-          title: tag + '止损', wants: true,
-        });
-      }
-      if (cur.target) {
-        items.push({
-          price: cur.target.triggerPrice, rank: 0, color: UP, width: 2, style: LineStyle.Solid,
-          title: tag + '止盈', wants: true,
-        });
-      }
-    }
-
-    if (bracket) {
-      // 计划入场不是现价线：现价线跟着价格跑，价格一走开就看不出原本打算在哪进了。
-      // 这三条是算出来的，没有一张单对应它，所以画虚线、抢标签也排在真单后面。
-      items.push(
-        { price: bracket.stop, rank: 2.2, color: DOWN, width: 1, style: LineStyle.Dashed, title: '计划止损', wants: true },
-        { price: bracket.target, rank: 2.2, color: UP, width: 1, style: LineStyle.Dashed, title: '计划止盈', wants: true },
-        { price: bracket.entry, rank: 2.4, color: ENTRY, width: 1, style: LineStyle.Dashed, title: '计划入场', wants: true },
-      );
-    }
-
     for (const p of positions) {
       if (!p.entryPrice || !p.size) continue;
       items.push({
@@ -991,9 +952,7 @@ export default function ChartPane({
       });
     }
 
-    // 挂着的限价单：成交之前它只是一个打算，用虚线跟已成交的持仓区分。
-    // 抢标签排在持仓均价之后、计划入场之前 —— 止损止盈和成本比它要紧，
-    // 但它是交易所里真挂着的单，比算出来的计划和档位更该报出价来。
+    // 挂着的限价单：成交之前它只是一个打算，用虚线跟已成交的持仓区分
     for (const o of pendingOrderLines(orders)) {
       items.push({
         price: o.price,
@@ -1006,25 +965,24 @@ export default function ChartPane({
       });
     }
 
-    // 档位按离现价远近排，近的先说话
+    // 档位按离现价远近排，近的先说话。分数只决定线型：够格的画实线，其余虚线。
+    // 分数是相对强度（触及次数 + 陈旧度），不是概率，所以标签里不写百分比，只写次数。
     const byNear = [...levels].sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
     byNear.forEach((lv, i) => {
-      const strong = lv.strength >= 55;
       items.push({
         price: lv.price,
         rank: 3 + i * 0.01,
         color: lv.role === 'support' ? 'rgba(46,211,160,0.55)' : 'rgba(255,95,109,0.55)',
         width: 1,
-        style: strong ? LineStyle.Solid : LineStyle.Dashed,
-        title: `${lv.role === 'support' ? '支撑' : '阻力'} ${Math.round(lv.strength)}`,
-        // 强度不够的档位本来就不该喊，只留一条虚线
-        wants: strong,
+        style: lv.score >= 2 ? LineStyle.Solid : LineStyle.Dashed,
+        title: (lv.role === 'support' ? '支撑 ' : '阻力 ') + lv.touches + ' 次 · 守住 ' + Math.round(lv.holdRate * 100) + '%',
+        // 离得近的四条说价，其余只画线：一屏七八个标签会把图糊住
+        wants: i < 4,
       });
     });
 
     items.sort((a, b) => a.rank - b.rank);
 
-    const board: IPriceLine[] = [];
     for (const it of items) {
       let label = false;
       if (it.wants) {
@@ -1042,13 +1000,9 @@ export default function ChartPane({
         axisLabelVisible: label,
         title: label ? it.title : '',
       });
-      board.push(line);
+      levelLinesRef.current.push(line);
     }
-
-    // 分两个 ref 只是为了记录要清理的线，这里一起收
-    levelLinesRef.current = [];
-    bracketLinesRef.current = board;
-  }, [levels, bracket, positions, orders, priceOrders]);
+  }, [levels, positions, orders]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
@@ -1096,20 +1050,13 @@ export default function ChartPane({
    * 图左上角那块持仓摘要：张数、开仓、标记、已盈亏，以及打到止损止盈各平出多少钱。
    * 数字全部由 pnlOf 现算 —— 和持仓卡、和交易所是同一个口径，多空两边也一样。
    */
-  const positionViews = positions.map((p) => {
-    const cur = bracketOf(priceOrders, p.contract, p.direction);
-    return {
-      p,
-      cur,
-      // 裸仓和「保护还有多久到期」都在这里算：到期是交易所自己撤单，不提醒就是静默裸仓
-      prot: protectionState(cur),
-      // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
-      // 看着就是个自相矛盾的数字。停更时整块退回快照自己的价。
-      live: pnlOf(p, stale ? 0 : markPrice, multiplier),
-      atStop: cur.stop ? pnlOf(p, cur.stop.triggerPrice, multiplier).pnl : null,
-      atTarget: cur.target ? pnlOf(p, cur.target.triggerPrice, multiplier).pnl : null,
-    };
-  });
+  // 图上只算张数、均价、标记价和已盈亏 —— 止损止盈不画在图上（持仓卡里看得到）
+  const positionViews = positions.map((p) => ({
+    p,
+    // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
+    // 看着就是个自相矛盾的数字。停更时整块退回快照自己的价。
+    live: pnlOf(p, stale ? 0 : markPrice, multiplier),
+  }));
 
   // 仓没了就把「确认平掉」收掉，别让人对着已经不在的数字点确认
   useEffect(() => {
@@ -1206,12 +1153,12 @@ export default function ChartPane({
         )}
         {stale && (
           <div className="chart-stale">
-            持仓数据停更 {Math.round(stale.ageMs / 1000)} 秒 · 图上的均价和止损止盈是旧快照
+            持仓数据停更 {Math.round(stale.ageMs / 1000)} 秒 · 图上的均价是旧快照
           </div>
         )}
         {positionViews.length > 0 && (
           <div className={'chart-pos' + (stale ? ' stale' : '')}>
-            {positionViews.map(({ p, cur, prot, live, atStop, atTarget }) => {
+            {positionViews.map(({ p, live }) => {
               const isLong = p.direction === 'long';
               const asking = closing === p.direction;
               return (
@@ -1229,24 +1176,7 @@ export default function ChartPane({
                     <span>开仓 {fmtPrice(p.entryPrice, priceRound)}</span>
                     <span>标记 {fmtPrice(live.price, priceRound)}</span>
                   </div>
-                  <div className="cp-prot">
-                    <span className={cur.stop ? 'down' : 'none'}>
-                      {cur.stop
-                        ? `止损 ${fmtPrice(cur.stop.triggerPrice, priceRound)} → ${fmtMoney(atStop ?? 0)}`
-                        : '止损 未设'}
-                    </span>
-                    <span className={cur.target ? 'up' : 'none'}>
-                      {cur.target
-                        ? `止盈 ${fmtPrice(cur.target.triggerPrice, priceRound)} → ${fmtMoney(atTarget ?? 0)}`
-                        : '止盈 未设'}
-                    </span>
-                  </div>
-                  {prot.naked && <div className="cp-flag naked">裸仓 · 止损止盈一张都没有</div>}
-                  {!prot.naked && prot.expiresAt > 0 && (
-                    <div className={'cp-flag' + (prot.urgent ? ' urgent' : '')}>
-                      保护 {prot.left}后到期（交易所到点会自己撤掉）
-                    </div>
-                  )}
+
                   <div className="cp-acts">
                     {asking ? (
                       <>

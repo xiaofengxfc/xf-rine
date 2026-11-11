@@ -82,66 +82,30 @@ export interface Bar {
 }
 
 export interface Level {
+  /** 区中枢 */
   price: number;
-  role: 'support' | 'resistance';
-  strength: number;
-  touches: number;
-  failures: number;
-  volumeRatio: number;
-  distancePct: number;
-  lastTouch: number;
   zoneLow: number;
   zoneHigh: number;
-  /** 1 = 只有当前周期认这条位，2 = 更粗的周期也认（多周期一致） */
-  confluence?: number;
-}
-
-/**
- * 结构状态（服务端 structure.ts 算的）。
- * 术语是 BOS / CHoCH 那一套，含义写在服务端的注释里。
- */
-export interface Structure {
-  trend: 'up' | 'down' | 'range';
-  lastHigh: { price: number; index: number } | null;
-  lastLow: { price: number; index: number } | null;
-  event: {
-    kind: 'BOS' | 'CHoCH';
-    direction: 'up' | 'down';
-    price: number;
-    index: number;
-    time: number;
-  } | null;
-  rangePct: number | null;
-  zone: 'premium' | 'equilibrium' | 'discount' | null;
-  note: string;
-}
-
-/**
- * 入场价怎么来的。market = 就是现价；level = 回踩结构位；range = 区间中位；
- * atr = 附近没有能等的位，按波动率让一点。
- */
-export type EntryKind = 'market' | 'level' | 'range' | 'atr';
-
-export interface Bracket {
-  direction: 'long' | 'short';
-  entry: number;
-  entryKind: EntryKind;
-  /** 入场价怎么定出来的，一句话，带价位和强度 */
-  entrySource: string;
-  /** 入场价相对现价的偏离（%，带符号）。负数＝要等价格回落才成交 */
-  entryDistancePct: number;
-  /** 同一个偏离折算成 ATR 倍数 */
-  entryDistanceAtr: number;
-  stop: number;
-  target: number;
-  riskReward: number;
-  stopSource: string;
-  targetSource: string;
-  stopDistancePct: number;
-  targetDistancePct: number;
-  riskPct: number;
-  acceptable: boolean;
-  minRR: number;
+  role: 'support' | 'resistance';
+  /** 排序分（触及次数 + 陈旧度）。是相对强度，不是概率，别当守住的可能性读 */
+  score: number;
+  /** 历史上触及后守住的比例（Wilson 下界，0-1）。样本不足时给 0.25 */
+  holdRate: number;
+  /** 触及事件数 / 其中守住几次 */
+  touches: number;
+  holds: number;
+  /** 越久没被碰过越强（0-1） */
+  stale: number;
+  /** 「价格容易在这里停」的倾向，不参与排序 */
+  pStall: number;
+  /** 区宽 / ATR */
+  widthAtr: number;
+  /** 距现价（%，带符号，负=在下方） */
+  distancePct: number;
+  /** 距现价 / ATR */
+  distAtr: number;
+  /** 最近一次触及距今多少根 bar，从没碰过是 -1 */
+  barsSinceTouch: number;
 }
 
 export interface LevelsResponse {
@@ -155,12 +119,10 @@ export interface LevelsResponse {
   rangeLow: number;
   nearestSupport: Level | null;
   nearestResistance: Level | null;
-  brackets: { long: Bracket | null; short: Bracket | null };
+  /** 回看的 bar 数，以及用到的已确认枢轴数（自查用） */
+  lookback: number;
+  pivots: number;
   patterns: Pattern[];
-  /** 结构状态。老服务端不返回这个字段，读的时候兜一下 */
-  structure?: Structure;
-  /** 这一份方案是按限价回踩算的还是按现价算的 */
-  entryMode?: 'limit' | 'market';
 }
 
 export interface Position {
@@ -192,59 +154,6 @@ export interface PriceOrder {
   createTime: number;
   /** 交易所会在这一刻把它撤掉（unix 秒）。0 = 读不出来或没有过期 */
   expiresAt: number;
-}
-
-/**
- * 按持仓成本算的止盈止损（POST /api/position-plan）。
- * 和开仓前的 Bracket 不是一回事：那份锚在最新价，这份锚在成本上，
- * 所以它答的是「这笔已经开的单要亏多少」，不是「现在进场止损放哪」。
- */
-export interface PositionPlan {
-  direction: 'long' | 'short';
-  entry: number;
-  stop: number;
-  target: number;
-  /** 正数 = 从成本算要亏多少；负数 = 止损已在成本上方、锁住了利润 */
-  riskFromEntry: number;
-  rewardFromEntry: number;
-  riskPct: number;
-  rewardPct: number;
-  /** 止损已在成本上方时没有意义，服务端给 null */
-  riskReward: number | null;
-  acceptable: boolean;
-  minRR: number;
-  stopSource: string;
-  targetSource: string;
-  broken: boolean;
-  locksProfit: boolean;
-  tooWide: boolean;
-  mountable: { stop: boolean; target: boolean };
-  notes: string[];
-}
-
-export interface PositionPlanResponse {
-  contract: string;
-  direction: 'long' | 'short';
-  interval: string;
-  barsUsed: number;
-  entry: number;
-  mark: number;
-  last: number;
-  size: number;
-  leverage: number;
-  multiplier: number;
-  structure: Structure;
-  plan: PositionPlan;
-  money: {
-    /** 打到止损平出多少 USDT（负数就是亏损） */
-    atStop: number;
-    atTarget: number;
-    /** 按现价平仓的已盈亏 */
-    atMark: number;
-    riskUsd: number;
-    /** 占账户权益的百分比；权益读不到时是 null */
-    riskOfEquityPct: number | null;
-  };
 }
 
 /** 平仓、反手时连带撤掉的东西 */

@@ -1,27 +1,29 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, jsend, type Account, type Bracket, type ContractInfo } from '../lib/api.ts';
+import { ApiError, jsend, type Account, type ContractInfo } from '../lib/api.ts';
 import { fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
-import { protectionPrices, protectionRows, planWrongSide, type ProtectMode } from '../lib/protection.ts';
-import { riskSizing } from '../lib/sizing.ts';
+import { protectionRows, wrongSide } from '../lib/protection.ts';
+import { percentSizing } from '../lib/sizing.ts';
+
+/** 仓位比例的几个档。做日内的人只在这几个数之间选，比让他填一个百分比快 */
+const POS_STEPS = [25, 50, 75, 100];
 
 interface Props {
   contract: ContractInfo | null;
-  bracket: Bracket | null;
-  applied: { bracket: Bracket; at: number } | null;
   armed: boolean;
   token: string | null;
   account: Account | null;
   liveTrading: boolean;
   keysConfigured: boolean;
   env: 'testnet' | 'live';
-  riskPct: number;
-  onRiskPctChange: (v: number) => void;
+  /** 用可用余额的百分之几开仓 */
+  posPct: number;
+  onPosPctChange: (v: number) => void;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
   onRefresh: () => void;
   /**
    * 限价单还没成交、保护单挂不上时，把要挂的价交给页面记着。
    * 带上委托号：回踩单可能挂上几个小时，页面要靠它判断「入场单还在不在」，
-   * 不能再用固定时长判过期（30 分钟就丢，成交之后保护不补挂，等于裸仓开进去）。
+   * 不能再用固定时长判过期（半小时就丢，成交之后保护不补挂，等于裸仓开进去）。
    */
   onQueueProtect: (p: {
     contract: string; direction: 'long' | 'short'; stop: number; target: number; orderId: string;
@@ -29,12 +31,13 @@ interface Props {
 }
 
 export default function OrderTicket({
-  contract, bracket, applied, armed, token, account, liveTrading, keysConfigured, env,
-  riskPct, onRiskPctChange, onToast, onRefresh, onQueueProtect,
+  contract, armed, token, account, liveTrading, keysConfigured, env,
+  posPct, onPosPctChange, onToast, onRefresh, onQueueProtect,
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
   const [sizeStr, setSizeStr] = useState('');
-  const [protect, setProtect] = useState<ProtectMode>('plan');
+  /** 用户自己改过张数之后，就不再让「按比例算」覆盖他的输入 */
+  const [sizeTouched, setSizeTouched] = useState(false);
   const [stopStr, setStopStr] = useState('');
   const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
@@ -46,17 +49,9 @@ export default function OrderTicket({
   /** 限价框自动填过一次就不再管，用户自己清空是用户的事 */
   const autoLimitRef = useRef(false);
 
-  /**
-   * 风险百分比自己拿着字符串。直接绑 number 的话，输入「1.」会被
-   * Number("1.") 抹成 1 再写回输入框，小数点当场消失 —— 小数风险根本打不进去。
-   */
-  const [riskStr, setRiskStr] = useState(String(riskPct));
-  useEffect(() => {
-    setRiskStr((cur) => (Number(cur) === riskPct ? cur : String(riskPct)));
-  }, [riskPct]);
-
   const mult = contract?.multiplier ?? 0;
   const last = contract?.price ?? 0;
+  const mark = contract?.markPrice ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
   // Gate 有些合约把 order_size_min 报成 0（意思是没单独要求），
   // 但张数只能是正整数，照抄 0 会让「最小」按钮填个 0 进去，校验也拦不住。
@@ -71,35 +66,12 @@ export default function OrderTicket({
     setLeverage((v) => Math.min(Math.max(1, v), levMax));
   }, [levMax]);
 
-  /** 吸附到最小变动单位。方案入场价是算出来的，不是交易所的 tick */
+  /** 吸附到最小变动单位 */
   const snapPrice = (p: number) => (priceRound > 0 ? Number((Math.round(p / priceRound) * priceRound).toFixed(10)) : p);
-
-  /**
-   * 从「自动止盈止损」卡片套用过来：方向、保护方式，还有入场价。
-   *
-   * 入场价要一起带过来。上一版只带方向不带价，框里留着的是打开页面时自动填的
-   * 现价 —— 过一阵就偏出去，点下单直接被「价格偏离现价」拒掉，而人以为自己
-   * 已经按方案挂上单了。所以：点「套用」就把限价换成方案入场价。
-   *
-   * 换完之后框里那个价仍然是可改的，改了就按改的挂（摘要和风险都跟着走）。
-   */
-  useEffect(() => {
-    if (!applied) return;
-    setSide(applied.bracket.direction);
-    setProtect('plan');
-    setPending(false);
-    if (applied.bracket.entry > 0) {
-      setPriceMode('limit');
-      // 方案入场价是「支撑价 + 一点垫子」算出来的，不一定落在最小变动单位上；
-      // 下单接口会按 PRICE_ROUND 拒掉（不是 tick 的整数倍），这里先吸附
-      setLimitStr(String(snapPrice(applied.bracket.entry)));
-      // 这个价是点「套用」指定的，别让「限价框自动填现价」那一步再盖一次
-      autoLimitRef.current = true;
-    }
-  }, [applied]);
 
   useEffect(() => {
     setSizeStr('');
+    setSizeTouched(false);
     setPending(false);
     setStopStr('');
     setTargetStr('');
@@ -109,7 +81,7 @@ export default function OrderTicket({
   }, [contract?.name]);
 
   // 限价框空着的时候，提交上去的其实是市价单（price 0），摘要里全是「—」，
-  // 按风险也会按一个不会真正发出去的价算。所以第一次切到限价就把现价填进去。
+  // 按比例算张数也会按一个不会真正发出去的价算。所以第一次切到限价就把现价填进去。
   useEffect(() => {
     if (autoLimitRef.current || priceMode !== 'limit' || !(last > 0)) return;
     autoLimitRef.current = true;
@@ -117,43 +89,48 @@ export default function OrderTicket({
   }, [priceMode, last, priceRound]);
 
   const priceUsed = priceMode === 'limit' ? Number(limitStr) || 0 : last;
-  const size = Math.round(Number(sizeStr) || 0);
-  const notional = size * mult * priceUsed;
-  const margin = lev > 0 ? notional / lev : 0;
   const avail = account?.available ?? 0;
   // 交易所按「保证金 + 手续费 ≤ 可用」放行。满仓如果只算保证金，
   // 差的正好是那几块钱手续费，点满仓必然被拒。
   const feeRate = Math.max(contract?.takerFee ?? 0, 0);
+
+  /**
+   * 按比例算张数。分母里带上手续费，所以点 100% 时算出来的张数刚好卡在
+   * 「保证金 + 手续费 = 可用余额」上，不会因为差几毛钱被交易所拒掉。
+   */
+  const sizing = useMemo(() => percentSizing({
+    available: avail,
+    pct: posPct,
+    price: priceUsed,
+    multiplier: mult,
+    leverage: lev,
+    feeRate,
+    sizeMin,
+    sizeMax,
+  }), [avail, posPct, priceUsed, mult, lev, feeRate, sizeMin, sizeMax]);
+
+  // 没自己改过张数，就让比例说了算（换价、换杠杆、换比例都跟着变）
+  useEffect(() => {
+    if (sizeTouched) return;
+    setSizeStr(sizing.size > 0 ? String(sizing.size) : '');
+  }, [sizing.size, sizeTouched]);
+
+  const size = Math.round(Number(sizeStr) || 0);
+  const notional = size * mult * priceUsed;
+  const margin = lev > 0 ? notional / lev : 0;
   const need = margin + notional * feeRate;
   const marginShort = need > avail ? need - avail : 0;
-  const maxAffordable = mult > 0 && priceUsed > 0 && lev > 0
-    ? Math.floor(avail / (1 / lev + feeRate) / (mult * priceUsed))
-    : 0;
-  /** 按同样的杠杆和可用余额，这笔最多能做多少张 */
-  const affordableNow = need > 0 ? Math.floor((size * avail) / need) : 0;
 
   const stopNum = Number(stopStr) || 0;
   const targetNum = Number(targetStr) || 0;
-  // 方案是分方向的，看多的方案不能填进卖出的单里
-  const planBracket = bracket && bracket.direction === side ? bracket : null;
+  const wantProtect = stopNum > 0 || targetNum > 0;
 
-  // 三种保护来源最终都落成这两个价：留 0 表示这一边不挂
-  const wanted = protectionPrices(protect, planBracket, stopNum, targetNum);
-  // 方案价按方案入场价算，现价可能已经跑过去了，那一侧的触发单一挂上就成交。
-  // 这种情况只剔掉跑过头的那一边：另一边往往还是对的，一起丢掉等于白算。
-  // 判断要连标记价一起看：触发单看的是最新成交价，止损夹在两个价中间时照样一挂就成交。
-  const mark = contract?.markPrice ?? 0;
-  const lowRef = mark > 0 && priceUsed > 0 ? Math.min(priceUsed, mark) : priceUsed;
-  const highRef = mark > 0 && priceUsed > 0 ? Math.max(priceUsed, mark) : priceUsed;
-  // 触发单是成交之后才挂的，那一刻现价≈成交价。所以这里拿「这一单会成交在哪个价」判，
-  // 而不是拿此刻的现价：回踩挂单时现价离入场还远得很，用现价判会把合法的止盈
-  // 误判成「现价已跑过」然后悄悄不挂（回踩进场的止盈常常正好夹在入场价和现价之间）。
+  // 触发单看的是最新成交价，标记价常常比它更靠里，所以 wrongSide 内部两边取更严格的那个
+  // 触发单是成交之后才挂的，那一刻现价≈成交价。所以拿「这一单会成交在哪个价」判，
+  // 而不是拿此刻的现价：回踩挂单时现价离入场还远，用现价判会把合法的止盈误判成跑过头。
   // 标记价那道保险只在按市价进的时候才需要 —— 那时成交价就是现价。
   const fillAtMarket = !(priceUsed > 0) || Math.abs(priceUsed - last) / (last || 1) < 0.0005;
-  const planWrong = planWrongSide(side, planBracket, priceUsed, fillAtMarket ? mark : 0);
-  const effStop = protect === 'plan' && planWrong.stop ? 0 : wanted.stop;
-  const effTarget = protect === 'plan' && planWrong.target ? 0 : wanted.target;
-  const wantProtect = effStop > 0 || effTarget > 0;
+  const wrong = wrongSide(side, stopNum, targetNum, priceUsed, fillAtMarket ? mark : 0);
 
   const liqEstimate = useMemo(() => {
     if (!priceUsed || lev <= 0) return 0;
@@ -161,30 +138,7 @@ export default function OrderTicket({
     return side === 'long' ? priceUsed * (1 - move) : priceUsed * (1 + move);
   }, [priceUsed, lev, side]);
 
-  /**
-   * 按风险算仓位。止损用这一单真会挂上去的那个价；
-   * 「不设保护」或者方案这一边已经跑过头时退回方案算出来的止损价 ——
-   * 那仍然是「这笔交易打算亏多少」唯一的依据，没有止损就谈不上按风险。
-   */
-  const riskStop = effStop > 0 ? effStop : (planBracket?.stop ?? 0);
-  // 限价框还空着的时候也要能按风险算：用方案入场价，没有方案就用现价
-  const sizingPrice = priceUsed > 0 ? priceUsed : (planBracket?.entry ?? last);
-  const sizing = useMemo(() => riskSizing({
-    budget: avail * (riskPct / 100),
-    price: sizingPrice,
-    stop: riskStop,
-    multiplier: mult,
-    available: avail,
-    leverage: lev,
-    feeRate,
-    leverageMax: levMax,
-    sizeMin,
-    sizeMax,
-  }), [avail, riskPct, sizingPrice, riskStop, mult, lev, feeRate, levMax, sizeMin, sizeMax]);
-
-  const capByMax = (n: number) => (sizeMax > 0 ? Math.min(n, sizeMax) : n);
-
-  // 拦下的第一条原因就写在按钮上。保护方式多了以后三元表达式套不下了，改成按顺序返回
+  // 拦下的第一条原因就写在按钮上，按顺序返回
   const blocked = (() => {
     if (!contract) return '没有选中合约';
     if (contract.tradable === false) return '模拟盘没有这个合约';
@@ -194,34 +148,30 @@ export default function OrderTicket({
     if (size < sizeMin) return `张数至少 ${sizeMin}`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
     if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
-    if (protect === 'manual' && stopNum > 0 && priceUsed > 0 && (side === 'long' ? stopNum >= lowRef : stopNum <= highRef)) {
-      return '止损价方向不对';
+    if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
+      return side === 'long' ? '止损要在现价下方' : '止损要在现价上方';
     }
-    if (protect === 'manual' && targetNum > 0 && priceUsed > 0 && (side === 'long' ? targetNum <= highRef : targetNum >= lowRef)) {
-      return '止盈价方向不对';
+    if (targetNum > 0 && priceUsed > 0 && wrong.target) {
+      return side === 'long' ? '止盈要在现价上方' : '止盈要在现价下方';
     }
     return '';
   })();
 
   // 摘要下方那一小截：只列这一单真会挂上去的保护
-  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed, fillAtMarket ? mark : 0);
+  const protectRows = protectionRows(side, stopNum, targetNum, priceUsed, fillAtMarket ? mark : 0);
 
-  /** 止损很窄时每张只亏零点几 USDT，两位小数会全变成 0.00，按量级补位数 */
-  const money = (v: number) => fmtUsd(v, v !== 0 && Math.abs(v) < 1 ? 4 : 2);
-
-  /** 按风险开不满时把账写清楚：想要多少、能下多少、真能下的那些亏多少、差在哪 */
+  /** 比例算出来的张数被夹住时，把账写清楚：想要多少、能下多少、为什么 */
   const sizingNote = (() => {
-    if (!sizing.cappedByMargin) return '';
-    if (sizing.feasible <= 0) {
-      return `按风险 ${riskPct}% 要 ${sizing.wanted} 张，可用 ${fmtUsd(avail)} USDT 连一张都开不下。先降张数或换一个止损更宽的方向。`;
+    if (sizing.clamped === 'afford') {
+      return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连 ${sizeMin} 张都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
     }
-    const head = `按风险 ${riskPct}% 要 ${sizing.wanted} 张（每张到止损亏 ${money(sizing.perContract)} USDT），`
-      + `按 ${lev}x 杠杆和可用 ${fmtUsd(avail)} USDT 只开得下 ${sizing.feasible} 张。`;
-    const tail = sizing.overMaxLeverage
-      ? ` 这是止损太窄（盈亏比 ${planBracket ? planBracket.riskReward.toFixed(2) : '很高'}）造成的：`
-        + `要开满得 ${Number.isFinite(sizing.leverageNeeded) ? `${sizing.leverageNeeded} 倍杠杆，` : ''}这个合约最多 ${levMax} 倍，开不满。`
-      : ` 杠杆提到 ${sizing.leverageNeeded} 倍就能开满。`;
-    return head + tail + ` 按 ${sizing.feasible} 张算，真实最大亏损 ${money(sizing.riskAtFeasible)} USDT，比预算 ${fmtUsd(sizing.budget)} USDT 少。`;
+    if (sizing.clamped === 'min') {
+      return `${posPct}% 的可用余额算不到 ${sizeMin} 张，已经提到最小下单量 ${sizeMin} 张。`;
+    }
+    if (sizing.clamped === 'max') {
+      return `按 ${posPct}% 能开 ${Math.floor(sizing.raw)} 张，但合约上限是 ${sizeMax} 张，已经夹回去。`;
+    }
+    return '';
   })();
 
   async function submit() {
@@ -245,7 +195,6 @@ export default function OrderTicket({
         onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
       }
 
-      // 手动设和用方案都归到 effStop/effTarget 上，不设就是 0/0（不挂保护）
       type Attach =
         | { status: 'attached'; created: { kind: string }[] }
         /** 止损止盈只挂上了一边，另一边被交易所拒了 */
@@ -261,8 +210,8 @@ export default function OrderTicket({
           side,
           price: priceMode === 'limit' ? priceUsed : 0,
           tif: priceMode === 'market' ? 'ioc' : 'gtc',
-          stop: wantProtect ? effStop : 0,
-          target: wantProtect ? effTarget : 0,
+          stop: wantProtect ? stopNum : 0,
+          target: wantProtect ? targetNum : 0,
         },
         token,
       );
@@ -278,10 +227,10 @@ export default function OrderTicket({
       // 一边挂上、一边没挂上是最危险的情况：看着有保护，实际少了一半
       if (b?.status === 'partial') onToast('err', '保护只挂上了一边', b.errors.join(' · '));
       if (b?.status === 'pending') {
-        onQueueProtect({ contract: contract.name, direction: side, stop: effStop, target: effTarget, orderId: r.order.id });
+        onQueueProtect({ contract: contract.name, direction: side, stop: stopNum, target: targetNum, orderId: r.order.id });
       }
       setPending(false);
-      setSizeStr('');
+      setSizeTouched(false);
       onRefresh();
     } catch (e) {
       onToast('err', '下单失败', (e as Error).message);
@@ -289,7 +238,6 @@ export default function OrderTicket({
       setBusy(false);
     }
   }
-
   return (
     <section className="card">
       <div className="card-head">
@@ -309,73 +257,44 @@ export default function OrderTicket({
         </div>
 
         <div className="field">
-          <label>张数（{mult ? fmtUsd(mult * 1, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} 币/张）</label>
+          <label>
+            张数（{mult ? fmtUsd(mult, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} 币/张）
+            <span className="dim"> · 按 {posPct}% 可用余额算得 {sizing.size} 张</span>
+          </label>
           <input
             className="input"
             inputMode="numeric"
             placeholder={`最小 ${sizeMin}`}
             value={sizeStr}
-            onChange={(e) => { setSizeStr(e.target.value.replace(/[^0-9]/g, '')); setPending(false); }}
+            onChange={(e) => { setSizeStr(e.target.value.replace(/[^0-9]/g, '')); setSizeTouched(true); setPending(false); }}
           />
         </div>
 
         <div className="row4" style={{ marginBottom: 10 }}>
-          <button className="chip" onClick={() => { setSizeStr(String(sizeMin)); setPending(false); }}>最小</button>
-          <button
-            className="chip"
-            disabled={riskStop <= 0 || sizing.feasible <= 0}
-            title={riskStop <= 0
-              ? '先设一个止损价（或者用方案价）才能按风险算张数'
-              : `风险 ${riskPct}% = ${fmtUsd(sizing.budget)} USDT，止损 ${fmtPrice(riskStop, priceRound)}，每张到止损亏 ${money(sizing.perContract)}，按风险要 ${sizing.wanted} 张，现在开得下 ${sizing.feasible} 张`}
-            onClick={() => { setSizeStr(String(Math.max(sizeMin, sizing.feasible))); setPending(false); }}
-          >
-            按风险
-          </button>
-          <button
-            className="chip"
-            title={`按当前杠杆和可用余额的一半：${Math.floor(maxAffordable / 2)} 张`}
-            onClick={() => { setSizeStr(String(Math.max(sizeMin, capByMax(Math.floor(maxAffordable / 2))))); setPending(false); }}
-          >
-            50% 仓位
-          </button>
-          <button
-            className="chip"
-            title={`按当前 ${lev}x 杠杆和可用余额最多 ${maxAffordable} 张`}
-            onClick={() => { setSizeStr(String(Math.max(sizeMin, capByMax(maxAffordable)))); setPending(false); }}
-          >
-            满仓
-          </button>
+          {POS_STEPS.map((p) => (
+            <button
+              key={p}
+              className="chip"
+              style={posPct === p ? { background: 'var(--accent)', color: '#0b0e13', borderColor: 'var(--accent)' } : undefined}
+              title={`用可用余额的 ${p}% 作保证金：` + fmtUsd(avail * (p / 100)) + ' USDT × ' + lev + 'x 杠杆'}
+              onClick={() => { onPosPctChange(p); setSizeTouched(false); setPending(false); }}
+            >
+              {p}%
+            </button>
+          ))}
         </div>
 
-        <div className="row2" style={{ marginBottom: 9 }}>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>风险 %</label>
-            <input
-              className="input sm"
-              inputMode="decimal"
-              value={riskStr}
-              onChange={(e) => {
-                const raw = e.target.value.replace(/[^0-9.]/g, '');
-                setRiskStr(raw);
-                // 中间态（""、"1."、"0."）先不往外传，等它变成合法数字再说
-                const n = Number(raw);
-                if (Number.isFinite(n) && n >= 0.1 && n <= 100) onRiskPctChange(n);
-              }}
-              onBlur={() => setRiskStr(String(riskPct))}
-            />
-          </div>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>杠杆 {lev}x</label>
-            <input
-              className="input sm"
-              type="range"
-              min={1}
-              max={levMax}
-              value={lev}
-              onChange={(e) => setLeverage(Number(e.target.value))}
-              style={{ padding: 0, accentColor: 'var(--accent)' }}
-            />
-          </div>
+        <div className="field" style={{ marginBottom: 9 }}>
+          <label>杠杆 {lev}x</label>
+          <input
+            className="input sm"
+            type="range"
+            min={1}
+            max={levMax}
+            value={lev}
+            onChange={(e) => setLeverage(Number(e.target.value))}
+            style={{ padding: 0, accentColor: 'var(--accent)' }}
+          />
         </div>
 
         <div className="seg" style={{ marginBottom: 9, width: '100%' }}>
@@ -396,123 +315,51 @@ export default function OrderTicket({
           </div>
         )}
 
-        <div className="field" style={{ marginBottom: 6 }}>
-          <label>止盈止损（可以不设）</label>
-          <div className="seg" style={{ width: '100%' }}>
-            <button className={protect === 'none' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('none'); setPending(false); }}>不设</button>
-            <button
-              className={protect === 'plan' ? 'on' : ''}
-              style={{ flex: 1 }}
-              title={planBracket ? '成交后按下面这套方案价挂止损止盈' : '这个方向还没算出方案价'}
-              onClick={() => { setProtect('plan'); setPending(false); }}
-            >
-              方案价
-            </button>
-            <button className={protect === 'manual' ? 'on' : ''} style={{ flex: 1 }} onClick={() => { setProtect('manual'); setPending(false); }}>手动设</button>
+        <div className="row2" style={{ marginBottom: 6 }}>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>止损价</label>
+            <input
+              className="input sm"
+              inputMode="decimal"
+              placeholder="留空就不挂"
+              value={stopStr}
+              onChange={(e) => { setStopStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>止盈价</label>
+            <input
+              className="input sm"
+              inputMode="decimal"
+              placeholder="留空就不挂"
+              value={targetStr}
+              onChange={(e) => { setTargetStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
+            />
           </div>
         </div>
-
-        {protect === 'plan' && (
-          planBracket ? (
-            <>
-              <div className="edit-note" style={{ marginBottom: 6 }}>
-                {planBracket.entryKind === 'market'
-                  ? '入场就是现价。'
-                  : '入场挂着等 ' + fmtPrice(planBracket.entry, priceRound)
-                    + '（距现价 ' + fmtPct(planBracket.entryDistancePct, 2) + '，'
-                    + planBracket.entryDistanceAtr.toFixed(2) + ' ATR），价格不回到那儿就没有这笔单。'}
-                成交后按下面的方案价挂，盈亏比 {planBracket.riskReward.toFixed(2)}。
-                限价单还没成交就先记着，等它成交页面自动补挂。
-              </div>
-              {planWrong.stop && (
-                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
-                  现价已经跑过方案止损，这一边这次不挂：触发单方向反了，挂上就成交。
-                </div>
-              )}
-              {planWrong.target && (
-                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
-                  现价已经跑过方案止盈，这一边这次不挂：触发单方向反了，挂上就成交。
-                </div>
-              )}
-              {!planBracket.acceptable && (
-                <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
-                  这套方案盈亏比低于 {planBracket.minRR}，这一侧的结构不支持，最好别开。
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="warn-box" style={{ marginBottom: 8 }}>
-              这个方向还没算出方案价（数据太少或者行情正在刷新）。换成「不设」，或者用「手动设」自己填。
-            </div>
-          )
-        )}
-
-        {protect === 'manual' && (
-          <>
-            <div className="row2" style={{ marginBottom: 6 }}>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label>止损价</label>
-                <input
-                  className="input sm"
-                  inputMode="decimal"
-                  placeholder="留空就不挂"
-                  value={stopStr}
-                  onChange={(e) => { setStopStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
-                />
-              </div>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label>止盈价</label>
-                <input
-                  className="input sm"
-                  inputMode="decimal"
-                  placeholder="留空就不挂"
-                  value={targetStr}
-                  onChange={(e) => { setTargetStr(e.target.value.replace(/[^0-9.]/g, '')); setPending(false); }}
-                />
-              </div>
-            </div>
-            <div className="edit-note">
-              {planBracket && (
-                <button
-                  className="chip"
-                  style={{ marginRight: 6 }}
-                  onClick={() => { setStopStr(String(planBracket.stop)); setTargetStr(String(planBracket.target)); setPending(false); }}
-                >
-                  填方案价
-                </button>
-              )}
-              成交之后才挂得上。限价单还没成交就先记着，等它成交页面自动补挂。
-            </div>
-            {!wantProtect && (
-              <div className="edit-note" style={{ color: 'var(--warn)' }}>
-                两个价都空着，这一单不带保护。
-              </div>
-            )}
-          </>
+        <div className="edit-note" style={{ marginBottom: 8 }}>
+          两个价自己填，留空的那一边就不挂。成交之后才挂得上 —— 限价单还没成交时先记着，成交后页面自动补挂。
+        </div>
+        {!wantProtect && (
+          <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
+            两个价都空着，这一单不带保护。跳空的时候穿仓价就是强平价。
+          </div>
         )}
 
         <dl className="summary">
           <dt>现价</dt><dd>{fmtPrice(last, priceRound)}</dd>
           <dt>名义价值</dt><dd className={notional > 0 ? '' : 'dim'}>{notional > 0 ? fmtUsd(notional) : '—'} USDT</dd>
           <dt>占用保证金</dt><dd className={marginShort > 0 ? 'down' : ''}>{margin > 0 ? fmtUsd(margin) : '—'} USDT</dd>
+          <dt>手续费</dt><dd className="dim">{notional > 0 ? fmtUsd(notional * feeRate) : '—'} USDT</dd>
           <dt>可用</dt><dd>{fmtUsd(avail)} USDT</dd>
           {marginShort > 0 && (
             <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
           )}
           <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
-          {riskStop > 0 && (
-            <>
-              <dt>按风险张数</dt>
-              <dd className={sizing.cappedByMargin ? 'down' : ''}>
-                {sizing.wanted > 0 ? `${sizing.wanted} 张` : '—'}
-                {sizing.cappedByMargin && <span className="dim"> → 最多 {sizing.feasible} 张</span>}
-              </dd>
-            </>
-          )}
           {protectRows.map((row) => (
             <Fragment key={row.label}>
               <dt>{row.label}</dt>
-              <dd className={row.price > 0 ? '' : 'dim'}>
+              <dd className={row.price > 0 ? (wrong.stop && row.label.startsWith('止损') ? 'down' : wrong.target && row.label.startsWith('止盈') ? 'down' : '') : 'dim'}>
                 {row.price > 0 ? (
                   <>
                     {fmtPrice(row.price, priceRound)}
@@ -549,16 +396,16 @@ export default function OrderTicket({
             </p>
             {wantProtect && (
               <p className="dim" style={{ fontSize: 11 }}>
-                成交后挂保护（{protect === 'plan' ? '方案价' : '手动设'}）：
-                {effStop > 0 ? `止损 ${fmtPrice(effStop, priceRound)}` : ''}
-                {effStop > 0 && effTarget > 0 ? ' / ' : ''}
-                {effTarget > 0 ? `止盈 ${fmtPrice(effTarget, priceRound)}` : ''}
+                成交后挂保护：
+                {stopNum > 0 ? `止损 ${fmtPrice(stopNum, priceRound)}` : ''}
+                {stopNum > 0 && targetNum > 0 ? ' / ' : ''}
+                {targetNum > 0 ? `止盈 ${fmtPrice(targetNum, priceRound)}` : ''}
               </p>
             )}
             {marginShort > 0 && (
               <p className="warn">
                 保证金不够：连手续费要 {fmtUsd(need)} USDT，可用只有 {fmtUsd(avail)} USDT，差 {fmtUsd(marginShort)} USDT。
-                按同样的杠杆最多做 {affordableNow} 张，或者把杠杆调高。
+                按同样的杠杆最多做 {sizing.affordable} 张，或者把杠杆调高。
               </p>
             )}
             <div className="acts">

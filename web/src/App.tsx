@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
-  type Account, type AppConfig, type Bar, type Bracket, type ContractInfo,
+  type Account, type AppConfig, type Bar, type ContractInfo,
   type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Pattern, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
-import { fmtPrice } from './lib/format.ts';
 import { INTERVAL_SEC, mergeNewer, mergeOlder } from './lib/candles.ts';
 import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
@@ -13,7 +12,6 @@ import ChartPane from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
 import TopBar from './components/TopBar.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
-import BracketsCard from './components/BracketsCard.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
 import PositionsCard from './components/PositionsCard.tsx';
 import NewsCard from './components/NewsCard.tsx';
@@ -59,10 +57,11 @@ interface Prefs {
   contract: string;
   interval: string;
   side: 'long' | 'short';
-  riskPct: number;
+  /** 用可用余额的百分之几开仓（25 / 50 / 75 / 100） */
+  posPct: number;
 }
 
-const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', side: 'long', riskPct: 1 };
+const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', side: 'long', posPct: 25 };
 
 /**
  * 存下来的合约名还算不算数。
@@ -89,7 +88,7 @@ function readPrefs(): Prefs {
       contract: isContractName(raw.contract) ? raw.contract : DEFAULT_PREFS.contract,
       interval: typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : DEFAULT_PREFS.interval,
       side: raw.side === 'short' ? 'short' : 'long',
-      riskPct: typeof raw.riskPct === 'number' && raw.riskPct > 0 && raw.riskPct <= 100 ? raw.riskPct : DEFAULT_PREFS.riskPct,
+      posPct: typeof raw.posPct === 'number' && raw.posPct > 0 && raw.posPct <= 100 ? raw.posPct : DEFAULT_PREFS.posPct,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -126,10 +125,9 @@ export default function App() {
   /** 手机上左栏是抽屉：点顶栏的「合约」打开，选完自动收 */
   const [railOpen, setRailOpen] = useState(false);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
-  const [applied, setApplied] = useState<{ bracket: Bracket; at: number } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [side, setSide] = useState<'long' | 'short'>(prefs0.side);
-  const [riskPct, setRiskPct] = useState(prefs0.riskPct);
+  const [posPct, setPosPct] = useState(prefs0.posPct);
   /** 限价单带止盈止损下的单：等它成交、持仓出现，再把保护补上 */
   const [protectQueue, setProtectQueue] = useState<{
     id: number;
@@ -364,7 +362,7 @@ export default function App() {
   }, []);
 
   // 选过的东西记下来，刷新后接着看同一个
-  useEffect(() => { savePrefs({ contract, interval, side, riskPct }); }, [contract, interval, side, riskPct]);
+  useEffect(() => { savePrefs({ contract, interval, side, posPct }); }, [contract, interval, side, posPct]);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
@@ -549,14 +547,14 @@ export default function App() {
       const pos = positions.find((p) => p.contract === q.contract && p.direction === q.direction && p.size > 0) ?? null;
       if (pos) {
         changed = true;
-        // 方案是按挂单价算的。真成交价离它太远时，这套止损可能已经站到仓位的另一边 ——
+        // 止损是按挂单价填的。真成交价离它太远时，这个止损可能已经站到仓位的另一边 ——
         // 那样的触发单一挂上就成交，等于市价平仓。宁可先不挂，说清楚让人重算。
         const wrong = q.stop > 0 && (q.direction === 'long' ? q.stop >= pos.entryPrice : q.stop <= pos.entryPrice);
         if (wrong) {
           push(
             'err',
             '这套止损已经站错边了，没有补挂',
-            q.contract + ' 成交价越过了方案止损。用持仓卡里的「套用方案」按真实成本重算一遍。',
+            q.contract + ' 成交价越过了填的止损。到持仓卡里「设止损止盈」按真实成本重填一遍。',
           );
           continue;
         }
@@ -772,7 +770,6 @@ export default function App() {
   // 数组换一份新的，图表就会把价格线全部拆了重画一遍。
   const myPositions = useMemo(() => positions.filter((p) => p.contract === contract), [positions, contract]);
   const myOrders = useMemo(() => orders.filter((o) => o.contract === contract), [orders, contract]);
-  const myTriggers = useMemo(() => priceOrders.filter((o) => o.contract === contract), [priceOrders, contract]);
 
   /**
    * 私有数据停更了没有。停更时页面上的仓位、均价、盈亏全是旧快照 ——
@@ -782,7 +779,6 @@ export default function App() {
     ? { err: privateErr, ageMs: privateAt > 0 ? Date.now() - privateAt : 0 }
     : null;
 
-  const bracketForSide = side === 'long' ? levels?.brackets.long ?? null : levels?.brackets.short ?? null;
 
   const onManualLevels = useCallback((prices: number[]) => setManualLevels(prices), []);
 
@@ -819,10 +815,10 @@ export default function App() {
             bars={bars}
             levels={levels?.levels ?? []}
             patterns={fresh ? (levels?.patterns ?? EMPTY_PATTERNS) : EMPTY_PATTERNS}
-            bracket={bracketForSide}
+
             positions={myPositions}
             orders={myOrders}
-            priceOrders={myTriggers}
+
             multiplier={info?.multiplier ?? 0}
             markPrice={markPrice}
             priceRound={priceRound}
@@ -843,7 +839,7 @@ export default function App() {
             price={ticker?.last || levels?.last || 0}
             priceRound={priceRound}
             atr={levels?.atr ?? 0}
-            structure={levels?.structure}
+
           />
         </main>
 
@@ -857,31 +853,17 @@ export default function App() {
             </div>
           </div>
 
-          <BracketsCard
-            long={levels?.brackets.long ?? null}
-            short={levels?.brackets.short ?? null}
-            priceRound={priceRound}
-            multiplier={info?.multiplier ?? 0}
-            equity={account?.total ?? 0}
-            available={account?.available ?? 0}
-            feeRate={info?.takerFee ?? 0}
-            riskPercent={riskPct}
-            leverageMax={Math.min(info?.leverageMax ?? 125, 125)}
-            onUse={(b) => { setApplied({ bracket: b, at: Date.now() }); setSide(b.direction); push('ok', '已套用方案', `${b.direction === 'long' ? '做多' : '做空'} 止损 ${fmtPrice(b.stop, priceRound)} / 止盈 ${fmtPrice(b.target, priceRound)}`); }}
-          />
-
           <OrderTicket
             contract={liveInfo}
-            bracket={bracketForSide}
-            applied={applied}
+
             armed={armed}
             token={token}
             account={account}
             liveTrading={config?.liveTrading ?? false}
             env={config?.env ?? 'live'}
             keysConfigured={config?.keys.configured ?? false}
-            riskPct={riskPct}
-            onRiskPctChange={setRiskPct}
+            posPct={posPct}
+            onPosPctChange={setPosPct}
             onToast={push}
             onRefresh={loadPrivate}
             onQueueProtect={queueProtect}
@@ -891,7 +873,6 @@ export default function App() {
             positions={positions}
             orders={orders}
             priceOrders={priceOrders}
-            interval={interval}
             priceRound={priceRound}
             rounds={roundMap}
             marks={markMap}

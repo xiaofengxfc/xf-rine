@@ -89,8 +89,33 @@ check(fmtLeft(-1000) === '已过期', '时长：负数该说已过期，得到 '
   check(s.target === null, '归属：空头没有止盈，不该凭空给一张');
 }
 
+// ---- 8) 手动填的两个价：方向判断和摘要（web/src/lib/protection.ts） ----
+{
+  const { protectionPrices, protectionRows, wrongSide } = await import('../src/lib/protection.ts');
+  // 多头的止损必须在下方、止盈必须在上方；空头反过来
+  const w1 = wrongSide('long', 99, 101, 100);
+  check(w1.stop === false && w1.target === false, '方向：多头 99/101 判成了方向不对');
+  const w2 = wrongSide('long', 101, 99, 100);
+  check(w2.stop === true && w2.target === true, '方向：多头把止损止盈填反了却没拦住');
+  const w3 = wrongSide('short', 101, 99, 100);
+  check(w3.stop === false && w3.target === false, '方向：空头 101/99 判成了方向不对');
+  // 标记价比最新价更靠里时，要按更严格的那个判：止损 99.7 夹在 100 和 99.5 之间
+  const w4 = wrongSide('long', 99.7, 0, 100, 99.5);
+  check(w4.stop === true, '方向：止损夹在最新价和标记价之间，只按最新价判会放过它');
+  // 空着的价就是这一边不挂，绝不替用户编一个价
+  const pr = protectionPrices(0, 0);
+  check(pr.stop === 0 && pr.target === 0, '空价：两个都空着却给了价 ' + JSON.stringify(pr));
+  check(protectionRows('long', 0, 0, 100).length === 0, '摘要：一个价都没填却列了行');
+  const rows = protectionRows('long', 98, 0, 100);
+  check(rows.length === 2, '摘要：填了一个价也该把两边都写出来，得到 ' + rows.length);
+  check(rows[0]!.price === 98 && Math.abs((rows[0]!.pct ?? 0) + 2) < 1e-9, '摘要：止损的价格或百分比不对');
+  check(rows[1]!.price === 0 && rows[1]!.note === '不挂', '摘要：没填的那一边该写「不挂」');
+  const bad = protectionRows('long', 102, 0, 100);
+  check((bad[0]!.note ?? '').includes('方向不对'), '摘要：止损填到上方该说方向不对，得到 ' + bad[0]!.note);
+}
+
 if (failures.length === 0) {
-  console.log('自检（保护单到期 / 裸仓 / 判定 / 归属）：全部通过');
+  console.log('自检（保护单到期 / 裸仓 / 判定 / 归属 / 手动填价）：全部通过');
 } else {
   for (const f of failures) console.log('  ✗ ' + f);
 }
