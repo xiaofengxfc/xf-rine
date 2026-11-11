@@ -43,6 +43,13 @@ export default function OrderTicket({
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
   const [limitStr, setLimitStr] = useState('');
   const [leverage, setLeverage] = useState(10);
+  /**
+   * 逐仓还是全仓。默认逐仓。
+   *
+   * 交易所账户默认是全仓：那样一个仓亏穿了会继续吃整个余额。逐仓只赔这一笔的保证金，
+   * 止损才有意义。所以默认逐仓，要全仓得自己点一下 —— 反过来（默认全仓）等于默认承担最大的风险。
+   */
+  const [marginMode, setMarginMode] = useState<'isolated' | 'cross'>('isolated');
   const [pending, setPending] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -180,7 +187,7 @@ export default function OrderTicket({
     setBusy(true);
     try {
       try {
-        await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev }, token);
+        await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev, mode: marginMode }, token);
       } catch (e) {
         /**
          * 密钥没有「合约交易」写权限时会先卡在设杠杆这一步。
@@ -203,7 +210,7 @@ export default function OrderTicket({
         | { status: 'pending' }
         | { status: 'failed'; error: string }
         | null;
-      const r = await jsend<{ ok: boolean; order: { id: string; status: string; fillPrice: number }; bracket: Attach; checked: { notional: number } }>(
+      const r = await jsend<{ ok: boolean; order: { id: string; status: string; fillPrice: number }; bracket: Attach; margin: { applied: boolean; mode: string; why?: string } | null; checked: { notional: number } }>(
         'POST', '/api/order',
         {
           contract: contract.name,
@@ -213,6 +220,9 @@ export default function OrderTicket({
           tif: priceMode === 'market' ? 'ioc' : 'gtc',
           stop: wantProtect ? stopNum : 0,
           target: wantProtect ? targetNum : 0,
+          // 服务端会照着这个把保证金模式先设好；设不成就不发单
+          marginMode,
+          leverage: lev,
         },
         token,
       );
@@ -224,6 +234,7 @@ export default function OrderTicket({
         + `${r.order.fillPrice ? ` · 成交价 ${r.order.fillPrice}` : ''}`
         + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'partial' ? ' · 保护只挂上了一边' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
       );
+      if (r.margin && !r.margin.applied) onToast('err', '保证金模式没动', r.margin.why ?? '这一边已经有持仓，模式沿用交易所现状');
       if (b?.status === 'failed') onToast('err', '保护单没挂上', b.error);
       // 一边挂上、一边没挂上是最危险的情况：看着有保护，实际少了一半
       if (b?.status === 'partial') onToast('err', '保护只挂上了一边', b.errors.join(' · '));
@@ -298,6 +309,26 @@ export default function OrderTicket({
           />
         </div>
 
+        <div className="seg" style={{ marginBottom: 6, width: '100%' }}>
+          <button
+            className={marginMode === 'isolated' ? 'on' : ''}
+            style={{ flex: 1 }}
+            title="只赔这一笔的保证金，亏到强平价就结束"
+            onClick={() => { setMarginMode('isolated'); setPending(false); }}
+          >逐仓</button>
+          <button
+            className={marginMode === 'cross' ? 'on' : ''}
+            style={{ flex: 1 }}
+            title="用整个可用余额兜底：亏穿了会继续扣账户里的钱"
+            onClick={() => { setMarginMode('cross'); setPending(false); }}
+          >全仓</button>
+        </div>
+        {marginMode === 'cross' && (
+          <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
+            全仓：这个仓亏穿了会继续吃账户里剩下的钱，止损护不住的部分由整个余额承担。
+          </div>
+        )}
+
         <div className="seg" style={{ marginBottom: 9, width: '100%' }}>
           <button className={priceMode === 'limit' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setPriceMode('limit')}>限价</button>
           <button className={priceMode === 'market' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setPriceMode('market')}>市价</button>
@@ -356,7 +387,14 @@ export default function OrderTicket({
           {marginShort > 0 && (
             <><dt>保证金差</dt><dd className="down">{fmtUsd(marginShort)} USDT</dd></>
           )}
-          <dt>预估强平价</dt><dd className="dim">≈ {liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}</dd>
+          <dt>保证金模式</dt>
+          <dd>{marginMode === 'isolated' ? `逐仓 ${lev}x` : `全仓 ${lev}x`}</dd>
+          <dt>预估强平价</dt>
+          <dd className="dim">
+            {marginMode === 'cross'
+              ? '全仓按整个余额兜底，没有固定的强平价'
+              : `≈ ${liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}`}
+          </dd>
           {protectRows.map((row) => (
             <Fragment key={row.label}>
               <dt>{row.label}</dt>

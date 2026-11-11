@@ -7,7 +7,6 @@ import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from
 import { netFetch, proxyState, refreshProxy } from './net.js';
 import { detectLevels, type Bar, type Direction, type Level, type LevelSet } from './levels.js';
 import { newsDigest } from './news.js';
-import { detectPatterns } from './patterns.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
 import { sendFeedback, feedbackTarget, FeedbackError } from './feedback.js';
 import { randomUUID } from 'node:crypto';
@@ -263,15 +262,28 @@ interface GateContract {
  */
 let contractCache: { at: number; list: GateContract[] } | null = null;
 let contractBusy: Promise<void> | null = null;
+let contractRetry: NodeJS.Timeout | null = null;
 
 /** 整张合约表一个多 MB，国内直连要几秒到十几秒 —— 所以拉到就一直留着，过一小时才重拉 */
 function refreshContracts(): Promise<void> {
   if (contractBusy) return contractBusy;
   contractBusy = (async () => {
-    const list = await gatePublic<GateContract[]>('/futures/usdt/contracts', {}, 60_000);
+    // 这张表 1.4 MB、直连实测三十秒上下。超时给足，失败要说出来 ——
+    // 以前这里静默吞掉，结果整个进程活着期间都是空表：最小变动价拿不到，
+    // 「按比例算张数」也在猜，界面上却一个字都不提。
+    const list = await gatePublic<GateContract[]>('/futures/usdt/contracts', {}, 90_000, 90_000);
     contractCache = { at: Date.now(), list };
+    console.log(`[contracts] 合约表就绪：${list.length} 个`);
   })()
-    .catch(() => { /* 拉不到就继续用旧的 */ })
+    .catch((e) => {
+      const why = e instanceof Error ? e.message : String(e);
+      console.error('[contracts] 拉合约表失败：' + why.slice(0, 200));
+      // 失败了要自己再试，否则这次启动就一直空着
+      if (!contractRetry) {
+        contractRetry = setTimeout(() => { contractRetry = null; void refreshContracts(); }, 5 * 60_000);
+        contractRetry.unref?.();
+      }
+    })
     .finally(() => { contractBusy = null; });
   return contractBusy;
 }
@@ -279,14 +291,6 @@ function refreshContracts(): Promise<void> {
 /** 单独取一次，避免 TS 把上面那个分支的 null 收窄带进来 */
 const cachedContracts = (): GateContract[] => contractCache?.list ?? [];
 
-async function allContracts(): Promise<GateContract[]> {
-  if (contractCache) {
-    if (Date.now() - contractCache.at > 60 * 60_000) void refreshContracts();
-    return cachedContracts();
-  }
-  await refreshContracts();
-  return cachedContracts();
-}
 
 /** 不等：有就先用着，没有就返回空，顺手在后台拉。行情接口不该被这张大表拖住 */
 function contractsNow(): GateContract[] {
@@ -294,13 +298,9 @@ function contractsNow(): GateContract[] {
   return contractCache?.list ?? [];
 }
 
-/**
- * 合约参数按「下单环境」取。行情永远走主网，但最小变动价、杠杆范围这些是交易所
- * 自己的规则，两个环境并不一样（实测 ETH_USDT：主网 order_price_round=0.01，测试网 0.05）。
- * 拿主网的位数去挂测试网的触发单，交易所会回
- *   trigger.price is not an integer multiple of a price unit
- * 只有一边失败的时候，页面还写着「保护单已挂」—— 止损没挂上也不吭声。
- */
+// 开机就拉：这张表三十秒才回来，等第一个请求来催就太晚了。
+void refreshContracts();
+
 /**
  * 只取单个合约的参数，不拉整张表。
  * 那张表上千个合约、一个多 MB，从国内直连经常十几秒才回，超时还拿不到缓存 ——
@@ -315,27 +315,6 @@ async function tradeContract(name: string): Promise<GateContract> {
   return c;
 }
 
-router.get('/contracts', wrap(async (_req, res) => {
-  const list = await allContracts();
-  res.json(list
-    .filter((c) => c.status === 'trading' && !c.in_delisting)
-    .map((c) => ({
-      name: c.name,
-      multiplier: Number(c.quanto_multiplier),
-      sizeMin: c.order_size_min,
-      sizeMax: c.order_size_max,
-      priceRound: Number(c.order_price_round),
-      leverageMax: Number(c.leverage_max),
-      price: Number(c.last_price),
-      markPrice: Number(c.mark_price),
-      fundingRate: Number(c.funding_rate),
-      fundingInterval: c.funding_interval,
-      openInterest: c.position_size,
-      takerFee: Number(c.taker_fee_rate),
-      makerFee: Number(c.maker_fee_rate),
-    }))
-    .sort((a, b) => b.price * b.multiplier - a.price * a.multiplier));
-}));
 
 router.get('/contracts/:name', wrap(async (req, res) => {
   const name = String(req.params.name);
@@ -686,7 +665,6 @@ router.get('/levels', wrap(async (req, res) => {
     interval,
     barsUsed: closed.length,
     ...set,
-    patterns: detectPatterns(closed, { window: 30, limit: 6 }),
   });
 }));
 
@@ -753,11 +731,7 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
       pStall: Number(l.pStall.toFixed(2)),
       distancePct: Number(l.distancePct.toFixed(2)),
     })),
-    patterns: detectPatterns(closed, { window: 12, limit: 4 }).map((p) => ({
-      name: p.name,
-      direction: p.direction,
-      note: p.note,
-    })),
+
     news: {
       stance: news?.stance ?? 'neutral',
       sentiment: news?.sentiment ?? 0,
@@ -1418,18 +1392,37 @@ router.post('/trade/arm', wrap(async (req, res) => {
   res.json({ armed: true, token, expiresAt: Date.now() + ARM_TTL_MS });
 }));
 
+/**
+ * 设杠杆，顺手设保证金模式。
+ *
+ * Gate 没有单独的「逐仓/全仓」开关：leverage 传非 0 就是逐仓，传 0 就是全仓，
+ * 全仓的杠杆放在 cross_leverage_limit 里。所以模式只能从这里设 ——
+ * 页面以前只传 leverage，账户又是全仓开的，于是「你以为在逐仓，其实在拿整个余额兜底」。
+ * 返回里带上交易所真正接受的那一套，页面照着显示，不自己猜。
+ */
 router.post('/leverage', wrap(async (req, res) => {
   requireArm(req);
-  const { contract, leverage } = req.body ?? {};
+  const { contract: contractRaw, leverage, mode } = req.body ?? {};
+  const contract = String(contractRaw ?? '');
   const lev = Math.round(Number(leverage));
   if (!contract || !Number.isFinite(lev)) throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 leverage');
   const c = await tradeContract(contract);
   if (lev < Number(c.leverage_min) || lev > Number(c.leverage_max)) {
     throw new GateError(400, 'LEVERAGE_RANGE', `该合约杠杆范围 ${c.leverage_min} - ${c.leverage_max}`);
   }
+  const cross = mode === 'cross';
   // Gate 这个接口参数走 query，不放在 body 里
-  const r = await gatePrivate<Record<string, unknown>>('POST', `/futures/usdt/positions/${encodeURIComponent(contract)}/leverage`, { leverage: lev });
-  res.json({ ok: true, leverage: r.leverage ?? lev });
+  const r = await gatePrivate<Record<string, unknown>>(
+    'POST',
+    `/futures/usdt/positions/${encodeURIComponent(contract)}/leverage`,
+    cross ? { leverage: 0, cross_leverage_limit: lev } : { leverage: lev },
+  );
+  res.json({
+    ok: true,
+    mode: cross ? 'cross' : 'isolated',
+    leverage: Number(r.leverage ?? 0),
+    crossLeverageLimit: Number(r.cross_leverage_limit ?? 0),
+  });
 }));
 
 interface OrderBody {
@@ -1441,6 +1434,10 @@ interface OrderBody {
   reduceOnly?: boolean;
   stop?: number;         // 可选，开仓顺手挂的止损价，0 或不传 = 不挂
   target?: number;       // 可选，开仓顺手挂的止盈价，0 或不传 = 不挂
+  /** 逐仓还是全仓。不传按逐仓：账户默认是全仓，不说一声就等于拿整个余额兜底 */
+  marginMode?: 'isolated' | 'cross';
+  /** 开仓用的杠杆。切保证金模式要一起带上，不然逐仓会用交易所原来的倍数 */
+  leverage?: number;
 }
 
 interface PlaceSpec {
@@ -1559,6 +1556,42 @@ function explainMargin(e: unknown, prepared: PreparedOrder): unknown {
   );
 }
 
+/**
+ * 开仓前把保证金模式设成用户选的那个。
+ *
+ * 为什么要在服务端做：页面以前是「先设杠杆、再下单」，那一步失败只弹一句提示就继续发单。
+ * 结果是在一个你以为不是的模式里开的仓 —— 逐仓的止损意义完全建立在「亏损不会越过这一笔保证金」上，
+ * 模式错了，止损就只是心理安慰。所以这里改成「设不成就不发单」。
+ *
+ * 这一边已经有持仓时不去动它：交易所本来也不让在有仓的时候改模式，
+ * 硬试只会让加仓失败一场。返回里写明没动，页面照着说。
+ */
+async function ensureMarginMode(
+  contract: string, side: Direction, lev: number, mode: 'isolated' | 'cross',
+) {
+  const sides = await readSides(contract).catch(() => [] as Side[]);
+  if (sides.some((s) => s.direction === side && s.size > 0)) {
+    return { applied: false as const, mode, why: '这一边已经有持仓，模式沿用交易所现状' };
+  }
+  const cross = mode === 'cross';
+  try {
+    await gatePrivate(
+      'POST',
+      `/futures/usdt/positions/${encodeURIComponent(contract)}/leverage`,
+      cross ? { leverage: 0, cross_leverage_limit: lev } : { leverage: lev },
+    );
+    return { applied: true as const, mode, leverage: lev };
+  } catch (e) {
+    const detail = e instanceof GateError ? `${e.label} ${e.detail}` : String(e);
+    throw new GateError(
+      400,
+      'MARGIN_MODE',
+      `保证金模式没能设成${cross ? '全仓' : '逐仓'}：${detail}。这一单没有发出去 —— `
+      + '模式没切过来就开仓，止损护住的范围和你想的不是一回事。',
+    );
+  }
+}
+
 async function placeOrder(spec: PlaceSpec): Promise<{ prepared: PreparedOrder; order: Record<string, unknown> }> {
   const prepared = await prepareOrder(spec);
   try {
@@ -1589,6 +1622,10 @@ router.post('/order', wrap(async (req, res) => {
   // 开仓前先清掉这一边没人管的触发单（上一个仓已经没了的那种）。
   // 清不掉不影响下单，顶多在回执里少报一项。
   const cleared = body.reduceOnly ? [] : await clearOrphanTriggers(contract, side).catch(() => [] as string[]);
+  // 开仓前把保证金模式定下来。平仓（reduceOnly）不动它：平仓和模式无关，白跑一趟还可能被交易所拒。
+  const marginMode: 'isolated' | 'cross' = body.marginMode === 'cross' ? 'cross' : 'isolated';
+  const openLev = Math.round(Number(body.leverage ?? 0)) || 10;
+  const margin = body.reduceOnly ? null : await ensureMarginMode(contract, side, openLev, marginMode);
   const { prepared, order } = await placeOrder({
     contract,
     side,
@@ -1605,6 +1642,8 @@ router.post('/order', wrap(async (req, res) => {
     ok: true,
     order: orderReceipt(order),
     bracket,
+    /** 保证金模式设没设上。没设上时这里会写 why，页面要照说 */
+    margin,
     /** 开仓前顺手清掉的孤儿触发单 */
     cleared,
     checked: {
@@ -2042,7 +2081,7 @@ function refreshTickers(): Promise<void> {
   if (tickerBusy) return tickerBusy;
   tickerBusy = (async () => {
     const [list, tradable] = await Promise.all([
-      gatePublic<GateTicker[]>('/futures/usdt/tickers', {}, 60_000),
+      gatePublic<GateTicker[]>('/futures/usdt/tickers', {}, 60_000, 45_000),
       tradableNames().catch(() => null),
     ]);
     // 拉不到合约元数据不影响行情，只是价格精度退回默认值
@@ -2067,14 +2106,23 @@ function refreshTickers(): Promise<void> {
         .sort((a, b) => b.volume24hUsd - a.volume24hUsd),
     };
   })()
-    .catch(() => { /* 这次没拉到就先用旧的 */ })
+    .catch((e) => {
+      const why = e instanceof Error ? e.message : String(e);
+      console.error('[tickers] 拉全量行情失败：' + why.slice(0, 200));
+    })
     .finally(() => { tickerBusy = null; });
   return tickerBusy;
 }
 
 router.get('/tickers', wrap(async (_req, res) => {
-  if (!tickerCache) await refreshTickers();
-  else if (Date.now() - tickerCache.at > 15_000) void refreshTickers();
+  if (!tickerCache) {
+    // 冷启动最多等 10 秒。再久就先把空列表给出去 —— 页面每 12 秒会再问一次，
+    // 让第一屏挂在这儿一分钟，看起来就是「币种一直加载不出来」。
+    await Promise.race([
+      refreshTickers(),
+      new Promise<void>((done) => { const t = setTimeout(done, 10_000); t.unref?.(); }),
+    ]);
+  } else if (Date.now() - tickerCache.at > 15_000) void refreshTickers();
   res.json(tickerCache?.rows ?? []);
 }));
 

@@ -246,7 +246,7 @@ export default function PositionsCard({
     return (
       <div className={'plan-box' + (wrongStop || wrongTarget ? ' broken' : '')}>
         <div className="plan-line">
-          按持仓成本 {fmtPrice(p.entryPrice, round)} 算 · {size} 张 · {p.leverage}x
+          按持仓成本 {fmtPrice(p.entryPrice, round)} 算 · {size} 张 · {p.leverage > 0 ? `${p.leverage}x` : '全仓'}
         </div>
         <div className="plan-line">
           止损 {stopNum > 0 ? fmtPrice(stopNum, round) : '不设'} →{' '}
@@ -351,7 +351,7 @@ export default function PositionsCard({
               return (
                 <div key={k} className={'pos ' + (isLong ? 'long' : 'short')}>
                   <div className="pos-top">
-                    <span className="nm">{p.contract.replace('_USDT', '')} <span className="dim" style={{ fontSize: 10 }}>{isLong ? '多' : '空'} · {p.leverage}x</span></span>
+                    <span className="nm">{p.contract.replace('_USDT', '')} <span className="dim" style={{ fontSize: 10 }}>{isLong ? '多' : '空'} · {p.leverage > 0 ? `${p.leverage}x 逐仓` : '全仓'}</span></span>
                     <span className={'num ' + pnlCls}>
                       {fmtMoney(pnl.pnl)}
                       {pnl.pct !== null && <span className="dim"> ({fmtPct(pnl.pct, 2)})</span>}

@@ -122,7 +122,6 @@ export interface LevelsResponse {
   /** 回看的 bar 数，以及用到的已确认枢轴数（自查用） */
   lookback: number;
   pivots: number;
-  patterns: Pattern[];
 }
 
 export interface Position {
@@ -267,15 +266,6 @@ export interface NewsDigest {
   sentiment: number; stance: 'bullish' | 'neutral' | 'bearish'; note: string;
 }
 
-export interface Pattern {
-  kind: string;
-  name: string;
-  direction: 'bullish' | 'bearish' | 'neutral';
-  time: number;
-  index: number;
-  strength: number;
-  note: string;
-}
 
 export interface LiveBar {
   time: number; open: number; high: number; low: number; close: number; volume: number; closed: boolean;

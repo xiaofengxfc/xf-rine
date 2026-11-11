@@ -105,8 +105,7 @@ export interface AiSnapshot {
     pStall: number;
     distancePct: number;
   }[];
-  /** 最近几根 K 线上的形态，名字和方向给模型参考 */
-  patterns: { name: string; direction: string; note: string }[];
+
   news: { stance: string; sentiment: number; headlines: string[] };
 }
 
@@ -168,7 +167,7 @@ function userPrompt(s: AiSnapshot): string {
     覆盖小时: s.spanHours,
     // score 是相对强度不是概率；距离带符号，负=在现价下方
     识别出的位: s.levels.slice(0, 8),
-    最近K线形态: s.patterns.length ? s.patterns : '（没有识别出明显形态）',
+
     新闻情绪分: s.news.sentiment,
     新闻倾向: s.news.stance,
   };

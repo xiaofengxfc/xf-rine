@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
-  createSeriesMarkers,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
@@ -12,13 +11,10 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
-  type ISeriesMarkersPluginApi,
-  type SeriesMarker,
-  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Bar, Level, OpenOrder, Pattern, Position } from '../lib/api.ts';
+import type { Bar, Level, OpenOrder, Position } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
@@ -28,7 +24,7 @@ import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
-const NEUTRAL = '#8b98a5';
+
 /** 真实持仓成本 */
 const HOLDING = '#ffcf4d';
 /** 还挂着的限价单 */
@@ -45,25 +41,6 @@ function readMode(): ChartMode {
     const v = localStorage.getItem(MODE_KEY);
     return v === 'candle' || v === 'line' ? v : 'auto';
   } catch { return 'auto'; }
-}
-
-/**
- * 把形态转成图上的标记。
- * 只标记当前这份数据里真实存在的时间点 —— 切币种那一瞬间旧形态可能还没清掉，
- * 给不存在的 K 线挂标记没有任何意义。
- */
-function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
-  const times = new Set(bars.map((b) => b.time));
-  return [...list]
-    .filter((p) => times.has(p.time))
-    .sort((a, b) => a.time - b.time)
-    .map((p) => ({
-      time: p.time as Time,
-      position: p.direction === 'bullish' ? 'belowBar' : 'aboveBar',
-      color: p.direction === 'bullish' ? UP : p.direction === 'bearish' ? DOWN : NEUTRAL,
-      shape: p.direction === 'bullish' ? 'arrowUp' : p.direction === 'bearish' ? 'arrowDown' : 'circle',
-      text: p.name,
-    }));
 }
 
 /**
@@ -111,7 +88,6 @@ interface Props {
   interval: string;
   bars: Bar[];
   levels: Level[];
-  patterns: Pattern[];
 
   /** 当前合约的真实持仓，用来在图上标出成本线（双向模式可能多空各一条） */
   positions: Position[];
@@ -143,7 +119,7 @@ interface Props {
 }
 
 export default function ChartPane({
-  contract, interval, bars, levels, patterns, positions, orders, multiplier, markPrice, priceRound,
+  contract, interval, bars, levels, positions, orders, multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
   canClose, onClosePosition,
 }: Props) {
@@ -156,10 +132,6 @@ export default function ChartPane({
   const dmRef = useRef<DrawingManager | null>(null);
   const levelLinesRef = useRef<IPriceLine[]>([]);
 
-  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  /** 折线模式下形态标记挂在折线上：同一个数组，曲线上一模一样的位置 */
-  const lineMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const patternsRef = useRef<Pattern[]>(patterns);
   const barsRef = useRef<Bar[]>(bars);
   /** 补历史这件事要在 K 线落地之后再催一次，用 ref 拿最新的回调 */
   const needOlderRef = useRef(onNeedOlder);
@@ -272,7 +244,6 @@ export default function ChartPane({
   const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
 
   barsRef.current = bars;
-  patternsRef.current = patterns;
 
   // ---- 建图 ----
   useEffect(() => {
@@ -343,9 +314,6 @@ export default function ChartPane({
       visible: false,
     });
 
-    // 形态标记：切币种会重建整张图，所以建图时用 ref 里的最新形态补一次
-    markersRef.current = createSeriesMarkers(price, buildMarkers(patternsRef.current, barsRef.current));
-    lineMarkersRef.current = createSeriesMarkers(line, []);
 
     const vol = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
@@ -502,8 +470,7 @@ export default function ChartPane({
       dmRef.current = null;
       // 图已经销毁：这时候再 collect 就是对着一个没了的画线管理器读
       collectRef.current = () => {};
-      markersRef.current = null;
-      lineMarkersRef.current = null;
+
       levelLinesRef.current = [];
       lastTimeRef.current = null;
     };
@@ -549,30 +516,6 @@ export default function ChartPane({
     priceRef.current?.applyOptions({ visible: drawMode === 'candle' });
     lineRef.current?.applyOptions({ visible: drawMode === 'line' });
   }, [drawMode, storageKey]);
-
-  // ---- 形态标记 ----
-  const patternSig = patterns.map((p) => `${p.kind}@${p.time}`).join('|');
-  useEffect(() => {
-    const plugin = markersRef.current;
-    if (!plugin) return;
-    try {
-      // 标记跟着当前画法走：折线模式下挂在 K 线序列上是看不见的
-      const list = buildMarkers(patternsRef.current, barsRef.current);
-      if (drawMode === 'line') {
-        lineMarkersRef.current?.setMarkers(list);
-        plugin.setMarkers([]);
-      } else {
-        plugin.setMarkers(list);
-        lineMarkersRef.current?.setMarkers([]);
-      }
-    } catch (err) {
-      // 标记画不出来不影响看盘，别让它把整个界面带下去
-      console.warn('[chart] 写入形态标记失败', err);
-    }
-    // 只在形态本身变了时重画，K 线每来一根都重算没意义
-    // 画法是依赖：切到折线要把标记搬过去
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patternSig, storageKey, drawMode]);
 
   // ---- K 线数据 ----
   useEffect(() => {
@@ -1165,7 +1108,7 @@ export default function ChartPane({
                 <div key={p.direction} className={'cp-row ' + (isLong ? 'long' : 'short')}>
                   <div className="cp-head">
                     <span className="cp-dir">
-                      {isLong ? '多' : '空'} {Math.abs(p.size)} 张 · {p.leverage}x
+                      {isLong ? '多' : '空'} {Math.abs(p.size)} 张 · {p.leverage > 0 ? `${p.leverage}x 逐仓` : '全仓'}
                     </span>
                     <span className={'cp-pnl ' + (live.pnl >= 0 ? 'up' : 'down')}>
                       {fmtMoney(live.pnl)}
@@ -1175,6 +1118,7 @@ export default function ChartPane({
                   <div className="cp-mid">
                     <span>开仓 {fmtPrice(p.entryPrice, priceRound)}</span>
                     <span>标记 {fmtPrice(live.price, priceRound)}</span>
+                    {p.liqPrice > 0 && <span className="warn">强平 {fmtPrice(p.liqPrice, priceRound)}</span>}
                   </div>
 
                   <div className="cp-acts">

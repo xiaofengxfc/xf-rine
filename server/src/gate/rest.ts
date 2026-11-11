@@ -43,6 +43,8 @@ async function request<T>(
   baseOverride?: string,
   /** 这次调用的超时。整张合约表、全部行情这种大接口 15 秒不够 */
   timeoutMs = TIMEOUT_MS,
+  /** 单条出网路径的等待上限。慢网下拉大包要几十秒，默认的 8 秒一定超时 */
+  attemptMs?: number,
 ): Promise<T> {
   // 不能只给 GET/DELETE 拼 query：Gate 的「改杠杆」是 POST 但参数放在 query 上。
   const query = buildQuery(params);
@@ -70,7 +72,7 @@ async function request<T>(
       headers,
       body: bodyStr || undefined,
       signal: ac.signal,
-    }, { preferDirect: true, private: isPrivate });
+    }, { preferDirect: true, private: isPrivate, attemptMs });
     const text = await res.text();
     // Gate 的订单号和触发单号是 17 位整数，超过 JS 安全整数范围。
     // 直接 JSON.parse 会被 double 截断，拿去撤单就会 ORDER_NOT_FOUND。
@@ -96,7 +98,8 @@ export const gatePublic = <T>(
   path: string,
   params: Record<string, string | number | boolean | undefined> = {},
   timeoutMs?: number,
-) => request<T>('GET', path, params, undefined, false, undefined, timeoutMs);
+  attemptMs?: number,
+) => request<T>('GET', path, params, undefined, false, undefined, timeoutMs, attemptMs);
 
 /**
  * 公共接口，但走「下单环境」那台机器。

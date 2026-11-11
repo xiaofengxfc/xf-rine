@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
   type Account, type AppConfig, type Bar, type ContractInfo,
-  type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Pattern, type Position,
+  type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { INTERVAL_SEC, mergeNewer, mergeOlder } from './lib/candles.ts';
@@ -33,7 +33,7 @@ interface MarketSnap {
 }
 
 const EMPTY_BARS: Bar[] = [];
-const EMPTY_PATTERNS: Pattern[] = [];
+
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
 
 /** 往回要一页多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
@@ -56,12 +56,11 @@ const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 interface Prefs {
   contract: string;
   interval: string;
-  side: 'long' | 'short';
   /** 用可用余额的百分之几开仓（25 / 50 / 75 / 100） */
   posPct: number;
 }
 
-const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', side: 'long', posPct: 25 };
+const DEFAULT_PREFS: Prefs = { contract: DEFAULT_CONTRACT, interval: '15m', posPct: 25 };
 
 /**
  * 存下来的合约名还算不算数。
@@ -77,7 +76,7 @@ function isContractName(v: unknown): v is string {
 }
 
 /**
- * 记住上次在看什么：币种、周期、看多还是看空、风险百分比。
+ * 记住上次在看什么：币种、周期、按多少比例开仓。
  * 刷新一次就跳回 BTC/15m/看多很烦，但这只是偏好，
  * 读坏了就当没存过，绝不能让页面因此起不来。
  */
@@ -87,7 +86,7 @@ function readPrefs(): Prefs {
     return {
       contract: isContractName(raw.contract) ? raw.contract : DEFAULT_PREFS.contract,
       interval: typeof raw.interval === 'string' && INTERVALS.includes(raw.interval) ? raw.interval : DEFAULT_PREFS.interval,
-      side: raw.side === 'short' ? 'short' : 'long',
+
       posPct: typeof raw.posPct === 'number' && raw.posPct > 0 && raw.posPct <= 100 ? raw.posPct : DEFAULT_PREFS.posPct,
     };
   } catch {
@@ -126,7 +125,7 @@ export default function App() {
   const [railOpen, setRailOpen] = useState(false);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [side, setSide] = useState<'long' | 'short'>(prefs0.side);
+
   const [posPct, setPosPct] = useState(prefs0.posPct);
   /** 限价单带止盈止损下的单：等它成交、持仓出现，再把保护补上 */
   const [protectQueue, setProtectQueue] = useState<{
@@ -151,6 +150,14 @@ export default function App() {
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
+  /**
+   * 最近看过的几套「币种:周期」。
+   *
+   * 切币种要等合约参数、K 线和档位三份回包，快的半秒、慢的几秒 —— 每次切都空白等着，
+   * 手一快就是「点了没反应」。切回刚看过的那个直接拿缓存顶着，再去后台刷新；
+   * 只留 4 套，免得两万根 K 线攒成几百兆。
+   */
+  const marketCacheRef = useRef(new Map<string, { info: ContractInfo; bars: Bar[]; levels: LevelsResponse }>());
   /** 已经到交易所能给的最早一根 */
   const noMoreOlderRef = useRef(false);
   /** 交易所给的历史就这么多，图上要有个说明，不然拖到头像是在卡死 */
@@ -362,14 +369,17 @@ export default function App() {
   }, []);
 
   // 选过的东西记下来，刷新后接着看同一个
-  useEffect(() => { savePrefs({ contract, interval, side, posPct }); }, [contract, interval, side, posPct]);
+  useEffect(() => { savePrefs({ contract, interval, posPct }); }, [contract, interval, posPct]);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
     const seq = ++marketSeqRef.current;
     noMoreOlderRef.current = false;
     setHistoryEnd(false);
-    setLoading(true);
+    // 缓存里有就先画出来：不空白等那一拍，再去刷新（刷新回来的数照旧覆盖）
+    const cached = marketCacheRef.current.get(key) ?? null;
+    if (cached) setMarket({ key, ...cached });
+    setLoading(!cached);
     try {
       const [c, k, lv] = await Promise.all([
         jget<ContractInfo>(`/api/contracts/${name}`),
@@ -378,6 +388,13 @@ export default function App() {
         jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
       ]);
       // 期间又切过币种，这份数据已经不是当前要看的东西了
+      const cache = marketCacheRef.current;
+      cache.delete(key);
+      cache.set(key, { info: c, bars: k.bars, levels: lv });
+      if (cache.size > 4) {
+        const oldest = cache.keys().next().value;
+        if (oldest) cache.delete(oldest);
+      }
       if (seq !== marketSeqRef.current) return;
       setMarket({ key, info: c, bars: k.bars, levels: lv });
     } catch (e) {
@@ -814,7 +831,6 @@ export default function App() {
             interval={interval}
             bars={bars}
             levels={levels?.levels ?? []}
-            patterns={fresh ? (levels?.patterns ?? EMPTY_PATTERNS) : EMPTY_PATTERNS}
 
             positions={myPositions}
             orders={myOrders}
@@ -844,14 +860,6 @@ export default function App() {
         </main>
 
         <aside className="side">
-          <div className="card side-pick">
-            <div className="card-body" style={{ paddingTop: 10 }}>
-              <div className="seg" style={{ width: '100%' }}>
-                <button className={side === 'long' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('long')}>看多</button>
-                <button className={side === 'short' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('short')}>看空</button>
-              </div>
-            </div>
-          </div>
 
           <OrderTicket
             contract={liveInfo}

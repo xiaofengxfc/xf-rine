@@ -151,8 +151,9 @@ async function attempt(
   route: 'direct' | 'proxy',
   url: string,
   init: FetchInit,
+  limit: number = ATTEMPT_MS,
 ): Promise<Awaited<ReturnType<typeof undiciFetch>>> {
-  const timeout = AbortSignal.timeout(ATTEMPT_MS);
+  const timeout = AbortSignal.timeout(limit);
   const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   const started = Date.now();
   const res = await undiciFetch(url, { ...init, signal, dispatcher: dispatcherFor(route) });
@@ -247,10 +248,14 @@ export function proxyState(): ProxyState {
 export async function netFetch(
   url: string,
   init: FetchInit = {},
-  opts: { private?: boolean; direct?: boolean; preferDirect?: boolean } = {},
+  opts: { private?: boolean; direct?: boolean; preferDirect?: boolean; attemptMs?: number } = {},
 ): Promise<ReturnType<typeof undiciFetch>> {
+  // 一次尝试最多等多久。整张合约表、全量行情这种大包在慢网下要几十秒，
+  // 用默认的 8 秒必然超时 —— 调用方按需要放宽。不放宽的话，「拉不到」和「本来就没有」
+  // 在页面上长得一样：币种列表空着，也没人说一句为什么。
+  const limit = opts.attemptMs && opts.attemptMs > 0 ? opts.attemptMs : ATTEMPT_MS;
   const blocked = opts.private === true && blockedAt > 0 && Date.now() - blockedAt < BLOCK_TTL_MS;
-  if (opts.direct === true || !state.on || blocked) return attempt('direct', url, init);
+  if (opts.direct === true || !state.on || blocked) return attempt('direct', url, init, limit);
 
   const method = (init.method ?? 'GET').toUpperCase();
   /** 下单、撤单这类不能重发：换个路重试一遍可能变成两单，所以只对查询类这么做 */
@@ -258,7 +263,7 @@ export async function netFetch(
   const first = pickRoute(opts.preferDirect === true);
 
   try {
-    const res = await attempt(first, url, init);
+    const res = await attempt(first, url, init, limit);
     failures = 0;
     // 403 是「这一单没被受理」，改直连重发不会重复成交
     if (res.status === 403 && dispatcherFor(first) !== direct) {
@@ -267,7 +272,7 @@ export async function netFetch(
         blockedAt = Date.now();
         noteFailure('proxy');
         state = { ...state, blockedAt, at: Date.now() };
-        return attempt('direct', url, init);
+        return attempt('direct', url, init, limit);
       }
     }
     return res;
@@ -283,7 +288,7 @@ export async function netFetch(
     }
     const other: 'direct' | 'proxy' = first === 'direct' ? 'proxy' : 'direct';
     if (!canRetry || (other === 'proxy' && !state.on)) throw err;
-    const res = await attempt(other, url, init);
+    const res = await attempt(other, url, init, limit);
     failures = 0;
     return res;
   }

@@ -1203,8 +1203,6 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
     max-height: none;
     padding-bottom: calc(16px + var(--inset-bottom));
   }
-  /* 「看多/看空」和下单面板里的按钮是一回事，手机上省掉这一格 */
-  .side-pick { display: none; }
   .card-head { padding: 10px 12px 7px; }
   .card-body { padding: 0 12px 13px; }
 
