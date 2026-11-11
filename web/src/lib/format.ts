@@ -33,6 +33,12 @@ export const compact = (v: number): string => {
 export const fmtTime = (unix: number): string =>
   new Date(unix * 1000).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
+/** 只要日期。图上说明「历史最早到哪一天」用 */
+export const fmtDate = (unix: number): string =>
+  Number.isFinite(unix)
+    ? new Date(unix * 1000).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+    : '—';
+
 export const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
 /** 相对时间，新闻列表里用。超过一天直接给日期。 */

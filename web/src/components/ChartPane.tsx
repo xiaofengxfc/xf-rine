@@ -21,7 +21,7 @@ import { firstIndexAtOrAfter, normalizeBars } from '../lib/candles.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
-import { fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
+import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
@@ -53,10 +53,9 @@ function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
 }
 
 /**
- * 视口左边少于这么多根就开始要历史。
+ * 视口左边少于这么多根就催一次历史。
  *
- * 和 App 里的 BUFFER_BARS 对齐：那边补到这么多就停，这边低于这么多就催，
- * 于是拖动时一直有货可看，一页 1000 根，通常还没拖到边就已经落地了。
+ * 只是催，不是停手的条件：App 那边会把能拿的一路补到底。
  */
 const PREFETCH_BARS = 3000;
 
@@ -101,13 +100,15 @@ interface Props {
   onNeedOlder?: (from: number) => void;
   /** 交易所能给的历史到头了。图上要说一声，不然拖到头看着像卡死 */
   historyEnd?: boolean;
+  /** 后台正在往左补历史 */
+  backfilling?: boolean;
   onIntervalChange: (i: string) => void;
   onManualLevels: (prices: number[]) => void;
 }
 
 export default function ChartPane({
   contract, interval, bars, levels, patterns, bracket, positions, orders, priceOrders, multiplier, markPrice, priceRound,
-  stale, resetKey, loading, onNeedOlder, historyEnd, onIntervalChange, onManualLevels,
+  stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -131,6 +132,8 @@ export default function ChartPane({
   const firstTimeRef = useRef<number | null>(null);
   const countRef = useRef(0);
   const [tool, setTool] = useState<DrawingKind | null>(null);
+  /** 视口已经贴到最左边那根了。到头说明只在贴边时才显示，不然一开页面就挂在图上 */
+  const [atEdge, setAtEdge] = useState(false);
   const [legend, setLegend] = useState<{ o: number; h: number; l: number; c: number; v: number; t: number } | null>(null);
 
   const storageKey = `xf-rine:drawings:${contract}:${interval}`;
@@ -489,10 +492,21 @@ export default function ChartPane({
         });
       }
 
+      // 贴到最左边了：到头说明这时候才有意义
+      setAtEdge(r.from < 1.5);
+
       // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多
       if (r.from < PREFETCH_BARS) onNeedOlder(r.from);
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
+    /**
+     * 开局的视口是在订阅之前设的，那一次变化没人接，所以历史要等用户拖一下才开始补。
+     * 这里主动问一次。
+     */
+    const head = ts.getVisibleLogicalRange();
+    if (head && countRef.current > 0 && lastKeyRef.current === resetKey && head.from < PREFETCH_BARS) {
+      onNeedOlder(head.from);
+    }
     return () => {
       window.clearTimeout(saveTimer);
       ts.unsubscribeVisibleLogicalRangeChange(handler);
@@ -726,6 +740,11 @@ export default function ChartPane({
           ⌦
         </button>
         <div className="spacer" style={{ flex: 1 }} />
+        {bars.length > 0 && (
+          <span className="dim" style={{ fontSize: 10.5 }} title="已经拿到的 K 线根数，以及最老那一根的时间">
+            {backfilling ? '正在补历史 · ' : ''}{bars.length} 根 · 最早 {fmtDate(bars[0]!.time)}
+          </span>
+        )}
         <span className="dim" style={{ fontSize: 10.5 }}>画线自动存本地</span>
       </div>
 
@@ -740,8 +759,8 @@ export default function ChartPane({
             <span>V {Math.round(legend.v)}</span>
           </div>
         )}
-        {historyEnd && (
-          <div className="chart-edge">已到交易所能给的最早一根 · 换更大周期看更早</div>
+        {historyEnd && atEdge && (
+          <div className="chart-edge">已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早</div>
         )}
         {stale && (
           <div className="chart-stale">

@@ -38,18 +38,35 @@ interface BarSeries {
   newestAt: number;
   /** 最后一次被用到的时间，用来淘汰最久没人看的 */
   usedAt: number;
-  /** 交易所那条约一万个点的边界已经撞到了，别再往上打 */
+  /** 撞到过交易所的保留边界：再往前它不给了 */
   exhausted: boolean;
+  /** 撞到边界的时刻。过了 EXHAUSTED_TTL 允许再探一次，误判不会永久生效 */
+  exhaustedAt: number;
+  /** 连续失败次数。到 FAIL_LIMIT 就歇一会儿，别一直往交易所打 */
+  fails: number;
+  /** 这个时刻之前不再往上要 */
+  coolUntil: number;
 }
 const seriesCache = new Map<string, BarSeries>();
-const SERIES_MAX_BARS = 12000;
+/**
+ * 交易所每个周期只给约一万根。这里留两倍：裁头时不会把刚拉到的历史一起丢掉，
+ * 前端要的区间也就不会因为缓存被裁而回空页。
+ */
+const SERIES_MAX_BARS = 20_000;
 const SERIES_KEEP = 8;
 const NEWEST_TTL = 4000;
+/** exhausted 的存活时间。误判最多让某个周期十分钟不补历史，之后自动重探 */
+const EXHAUSTED_TTL = 10 * 60_000;
+const FAIL_LIMIT = 3;
+const FAIL_COOL_MS = 10_000;
 
 function seriesFor(key: string): BarSeries {
   const hit = seriesCache.get(key);
   if (hit) { hit.usedAt = Date.now(); return hit; }
-  const fresh: BarSeries = { bars: [], newestAt: 0, usedAt: Date.now(), exhausted: false };
+  const fresh: BarSeries = {
+    bars: [], newestAt: 0, usedAt: Date.now(),
+    exhausted: false, exhaustedAt: 0, fails: 0, coolUntil: 0,
+  };
   if (seriesCache.size >= SERIES_KEEP) {
     let victim = '';
     let oldest = Infinity;
@@ -60,6 +77,24 @@ function seriesFor(key: string): BarSeries {
   }
   seriesCache.set(key, fresh);
   return fresh;
+}
+
+/** 到头了没有。过期之后算没过期，下一次请求会再去探一次 */
+function isExhausted(s: BarSeries): boolean {
+  return s.exhausted && Date.now() - s.exhaustedAt < EXHAUSTED_TTL;
+}
+
+function markExhausted(s: BarSeries): void {
+  s.exhausted = true;
+  s.exhaustedAt = Date.now();
+}
+
+/**
+ * 交易所报「要的比它留的还老」。别的错误不能当成到头：
+ * 一次超时或限流被当成到头，这个周期就再也不补历史了。
+ */
+function isRetentionError(e: GateError): boolean {
+  return /too long ago|INVALID_PARAM_VALUE|out of range/i.test(`${e.label} ${e.detail}`);
 }
 
 /** 第一个 time >= t 的位置（时间轴有序） */
@@ -406,46 +441,93 @@ async function loadCandles(
   const series = seriesFor(`${contract}:${interval}`);
   const step = STEP_SEC[interval] ?? 60;
 
+  /** 时间轴里「早于 before 的连续一段」。裁头之后这一段可能是空的 */
+  const slice = () => contiguousRun(series.bars, lowerBoundTime(series.bars, before!), limit, step);
+
+  /**
+   * 这一页是不是已经接到手上最老那一根了。
+   *
+   * exhausted 的含义是「返回的这批 K 线后面没有了」。时间轴早就攒满了、
+   * 又标过到头的时候，缓存里还压着几千根没给出去，这时照样是 false ——
+   * 不然前端拿到满满一页却看到 exhausted，会当场停手，剩下的永远拉不出来。
+   */
+  const endedAt = (page: Bar[]): boolean => {
+    if (!isExhausted(series)) return false;
+    const oldest = series.bars[0]?.time;
+    return page.length === 0 || oldest === undefined || page[0]!.time <= oldest;
+  };
+
   if (before) {
     /**
      * 要的是「满满一页」。交易所偶尔少给几根就接着往下补 —— 短页回给前端，
      * 前端会当成到头了，从此不再加载，那才是真正的看着缺数据。
      */
+    const cached = slice();
+    if (!fresh && cached.length >= limit) return { bars: cached, exhausted: endedAt(cached) };
+
     let target = before;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const cached = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
-      if (!fresh && cached.length >= limit) return { bars: cached, exhausted: series.exhausted };
-      if (series.exhausted) break;
+    /** 最后一次真拉回来的那一页。缓存裁头时用它兜底，别把刚拿到的历史丢掉 */
+    let lastPage: Bar[] = [];
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (isExhausted(series)) break;
+      if (series.coolUntil > Date.now()) break;
+      /** 手上最老那一根。空时间轴是 Infinity，此时任何失败都不算到头 */
       const oldest = series.bars.length > 0 ? series.bars[0]!.time : Infinity;
+      /**
+       * 只有贴着已知最老那根还要不到，才算交易所真到头。
+       * 要的远比手上最老的还老（比如要 2017 年），是调用方问了一个离谱的位置 ——
+       * 拿它把整条时间轴标成到头，其余几千根就再也拉不出来了。
+       */
+      const atFrontier = target >= oldest - step;
+      let page: Bar[];
       try {
-        mergeInto(series, await fetchOnce(contract, interval, limit, step, target));
+        page = await fetchOnce(contract, interval, limit, step, target);
+        series.fails = 0;
       } catch (e) {
         if (!(e instanceof GateError)) throw e;
-        /**
-         * 交易所只留最近一万个点，翻过头它回 INVALID_PARAM_VALUE / too long ago。
-         * 那不是错，是到头了：记下来，此后直接给空页，前端就知道不用再往前要。
-         * 只有「要的比已经知道的最老那根还老」才算到头 —— 中途一次失败不能把
-         * 这条时间轴永久锁死，否则换个位置回来还是空的。
-         */
-        if (/too long ago|INVALID_PARAM_VALUE/i.test(e.message) && target <= oldest) series.exhausted = true;
+        series.fails += 1;
+        if (series.fails >= FAIL_LIMIT) {
+          series.coolUntil = Date.now() + FAIL_COOL_MS;
+          series.fails = 0;
+        }
+        if (isRetentionError(e) && atFrontier) markExhausted(series);
         break;
       }
-      target = series.bars.length > 0 ? series.bars[0]!.time : target;
+      // Gate 用空数组表示「再往前没有了」。那不是错，是真的到头
+      if (page.length === 0) {
+        if (atFrontier) markExhausted(series);
+        break;
+      }
+      mergeInto(series, page);
+      lastPage = page;
+      const got = slice();
+      if (!fresh && got.length >= limit) return { bars: got, exhausted: endedAt(got) };
+      const head = series.bars.length > 0 ? series.bars[0]!.time : target;
+      // 没有往更早的方向走，再要也是同一页
+      if (head >= target) break;
+      target = head;
     }
-    const run = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
-    return { bars: run, exhausted: series.exhausted };
+
+    const fromSeries = slice();
+    /**
+     * 缓存到上限就从头部裁。裁掉的正好是这次要的那一段时，fromSeries 会是空的 ——
+     * 直接回空页，前端会静默停在这里。用刚拉回来的这一页兜住。
+     */
+    const fromPage = contiguousRun(lastPage, lowerBoundTime(lastPage, before), limit, step);
+    const bars = fromPage.length > fromSeries.length ? fromPage : fromSeries;
+    return { bars, exhausted: endedAt(bars) };
   }
 
   const tailFresh = series.newestAt > 0 && Date.now() - series.newestAt < tailTtl;
   if (!fresh && tailFresh && series.bars.length >= limit) {
-    return { bars: series.bars.slice(series.bars.length - limit), exhausted: series.exhausted };
+    const bars = series.bars.slice(series.bars.length - limit);
+    return { bars, exhausted: endedAt(bars) };
   }
   mergeInto(series, await fetchOnce(contract, interval, limit, step));
   series.newestAt = Date.now();
-  return {
-    bars: series.bars.slice(Math.max(0, series.bars.length - limit)),
-    exhausted: series.exhausted,
-  };
+  const bars = series.bars.slice(Math.max(0, series.bars.length - limit));
+  return { bars, exhausted: endedAt(bars) };
 }
 
 router.get('/candles', wrap(async (req, res) => {

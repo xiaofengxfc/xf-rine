@@ -4,7 +4,7 @@
  * 单独拎出来是因为这两件事都不该写错：
  *   - 交给 lightweight-charts 的必须是时间严格递增、没有重复的数组，乱序会直接抛异常
  *   - 往前补历史时如果把最老的那些挤掉，图上左边那一片就空了，看着就是「K 线缺了」
- * 两个函数都是纯的，可以直接拿真实数据测。
+ * 这几个函数都是纯的，可以直接拿真实数据测。
  */
 import type { Bar } from './api.ts';
 
@@ -39,25 +39,32 @@ export function firstIndexAtOrAfter(bars: Bar[], t: number): number {
   return lo;
 }
 
+export interface OlderMerge {
+  bars: Bar[];
+  /** 真并进来的根数。调用方要显示进度或者判有没有进展就看它 */
+  added: number;
+  /**
+   * 这一页一根新的都没有：上游的窗口没往前走。
+   * 这不是到头，调用方当成「没有进展」处理就行。把它当成到头，历史就停在原地了。
+   */
+  duplicate: boolean;
+  /** 再并就超过本地上限。到上限就不再补，已经画上去的一根都不动 */
+  full: boolean;
+}
+
 /**
  * 把一页更早的 K 线并到前面。
  *
- * 返回 full=true 表示「到头了」，调用方不用再往前要：
- * 要么这一页全是已经有的（上游把窗口卡在同一个位置），要么并进来就超过上限了。
  * 超上限时宁可不并 —— 先加再 slice(-max) 会把最老的那几百根挤掉，
  * 用户正看着左边，那一片会当场变空，看起来就是 K 线缺了一段。
  */
-export function mergeOlder(
-  prev: Bar[],
-  older: Bar[],
-  maxBars: number,
-): { bars: Bar[]; full: boolean } {
-  if (older.length === 0) return { bars: prev, full: false };
+export function mergeOlder(prev: Bar[], older: Bar[], maxBars: number): OlderMerge {
+  if (older.length === 0) return { bars: prev, added: 0, duplicate: true, full: false };
   const seen = new Set(prev.map((b) => b.time));
   const add = older.filter((b) => !seen.has(b.time));
-  if (add.length === 0) return { bars: prev, full: true };
-  if (prev.length + add.length > maxBars) return { bars: prev, full: true };
+  if (add.length === 0) return { bars: prev, added: 0, duplicate: true, full: false };
+  if (prev.length + add.length > maxBars) return { bars: prev, added: 0, duplicate: false, full: true };
   const merged = [...add, ...prev];
   merged.sort((a, b) => a.time - b.time);
-  return { bars: normalizeBars(merged), full: false };
+  return { bars: normalizeBars(merged), added: add.length, duplicate: false, full: false };
 }

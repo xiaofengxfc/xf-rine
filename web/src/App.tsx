@@ -7,6 +7,7 @@ import {
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
 import { mergeOlder } from './lib/candles.ts';
+import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
 import ChartPane from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
@@ -37,16 +38,14 @@ const EMPTY_BARS: Bar[] = [];
 const EMPTY_PATTERNS: Pattern[] = [];
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
 
-/** 往回翻一页要多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
+/** 往回要一页多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
 const OLDER_PAGE = 1000;
-/** 视口左边至少要垫这么多根。一页一页补，垫够了就停，下一次拖动接着补 */
-const BUFFER_BARS = 3000;
 /**
  * 内存里最多留多少根。
- * 交易所只留最近一万个点，所以再往前也翻不出新东西了；一万二够接住它给的全部，
- * 整段重画一次也就三十毫秒的量级。
+ * 交易所每个周期只给约一万根，留两万接住它给的全部还有余量。
+ * 这个数比交易所的上限大，所以正常补历史永远碰不到它。
  */
-const MAX_BARS = 12000;
+const MAX_BARS = 20000;
 
 const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
@@ -127,13 +126,18 @@ export default function App() {
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
-  /** 历史 K 线：正在拉 / 已经到头，避免拖到边缘时反复请求 */
-  const olderBusyRef = useRef(false);
+  /** 已经到交易所能给的最早一根 */
   const noMoreOlderRef = useRef(false);
   /** 交易所给的历史就这么多，图上要有个说明，不然拖到头像是在卡死 */
   const [historyEnd, setHistoryEnd] = useState(false);
-  /** 图上看得到的左边界（逻辑序号）。补页补到它离 0 够远就停 */
-  const viewFromRef = useRef(0);
+  /** 后台正在往左补历史。界面上要说一句，不然看不出还在加载 */
+  const [backfilling, setBackfilling] = useState(false);
+  /** 正在补哪个 key。同一个 key 不重复开一轮，换 key 就让旧的那轮自己停 */
+  const pumpingKeyRef = useRef('');
+  /** 补页的轮次号。换 key 时递增，旧的循环据此停下并且不再动界面 */
+  const pumpGenRef = useRef(0);
+  /** 已经自动补过一轮的 key */
+  const pumpedKeyRef = useRef('');
   const marketRef = useRef(market);
   useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
@@ -182,84 +186,76 @@ export default function App() {
   const bars = fresh ? market.bars : EMPTY_BARS;
   const levels = fresh ? market.levels : null;
 
-  /**
-   * 往左拖到底时补一页更早的 K 线。失败就静默，用户再拖一次会重试。
-   *
-   * 这里以前是「先合并再 slice(-3000)」：真到三千根时，刚补进来的那一页
-   * 会被当场挤掉，图上左边那片反而变空，看着就像 K 线缺了一段。
-   * 现在到上限就不补了，已经画上去的一根都不动。
-   */
-  const loadOlder = useCallback(async (from?: number) => {
-    if (typeof from === 'number') viewFromRef.current = from;
-    if (olderBusyRef.current || noMoreOlderRef.current) return;
-    olderBusyRef.current = true;
-    try {
-      // 这一轮补页期间自己维护一份列表：state 要等渲染才更新，用它算时间会重页
-      let barsNow = marketRef.current.bars;
-      /**
-       * 一次拖到底要连着补，别一页一停。
-       *
-       * 这里每轮都问一句「图左边还差多少」：不够 BUFFER_BARS 就再要一页 1000 根，
-       * 最多连着补 4 页。用户一直拖，就一直在补 —— 反过来垫够了立刻停手，
-       * 不为了「多存点」去骚扰交易所。
-       */
-      for (let page = 0; page < 4; page += 1) {
-        if (noMoreOlderRef.current) return;
-        const cur = marketRef.current;
-        if (!cur.bars.length || cur.key === '') return;
-        if (cur.bars.length >= MAX_BARS) return;
-        if (page > 0 && viewFromRef.current >= BUFFER_BARS) return;
-        const [name, tf] = cur.key.split(':') as [string, string];
-        const before = barsNow[0]!.time;
-        const r = await jget<{ bars: Bar[]; exhausted?: boolean }>(
-          `/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}&before=${before}`,
-        );
-
-        /**
-         * 到头了以服务端说的 exhausted 为准。
-         *
-         * 以前是「不满一页就算到头」—— 交易所偶尔少给几根，这一条就把整条时间轴
-         * 锁死了：从此拖动只会在最左边空转，既不加载也没提示，看着就是 K 线缺了一段。
-         */
-        if (r.exhausted ?? r.bars.length < OLDER_PAGE) {
-          noMoreOlderRef.current = true;
-          setHistoryEnd(true);
-          push('ok', '已经到最早一根了', '交易所能给的历史只到这里：1m 约 7 天，15m 约 100 天。看更早请换更大周期。');
-        }
-        if (marketRef.current.key !== cur.key) return;
-
-        const beforeLen = barsNow.length;
-        const m = mergeOlder(barsNow, r.bars, MAX_BARS);
-        if (m.full) {
-          // 到本地容量上限了：再补就得挤掉已经画上去的，不如停在这里
-          noMoreOlderRef.current = true;
-          setHistoryEnd(true);
-          push('ok', '已经加载到上限了', `手上最多留 ${MAX_BARS} 根 K 线。看更早请换更大周期。`);
-          return;
-        }
-        if (m.bars === barsNow) return;
-        barsNow = m.bars;
-        setMarket((prev) => {
-          if (prev.key !== cur.key) return prev;
-          // 合并是纯函数，重算一遍是为了留住这期间 WebSocket 推来的那根
-          const mm = mergeOlder(prev.bars, r.bars, MAX_BARS);
-          return mm.bars === prev.bars ? prev : { ...prev, bars: mm.bars };
-        });
-        // 新补的这几百根插在视口左边，视野里那批 K 线整体右移，左边界跟着挪
-        viewFromRef.current += Math.max(0, m.bars.length - beforeLen);
-      }
-    } catch {
-      /* 静默失败，拖回去会再试 */
-    } finally {
-      olderBusyRef.current = false;
-    }
-  }, []);
-
   const push = useCallback((kind: 'ok' | 'err', title: string, detail?: string) => {
     const id = toastSeq++;
     setToasts((t) => [...t.slice(-4), { id, kind, title, detail }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'err' ? 9000 : 5000);
   }, []);
+
+  /**
+   * 把能拿的历史一路补到底。
+   *
+   * 拖动只是再催一次：正在补的时候直接返回，不重复开一轮。
+   * 补到交易所到头、本地上限、或者切了币种为止，中间不停 ——
+   * 以前一页一页等拖动事件催，用户不动历史就停在原地。
+   */
+  const backfillOlder = useCallback(async () => {
+    const key = marketRef.current.key;
+    if (!key || marketRef.current.bars.length === 0) return;
+    if (noMoreOlderRef.current || pumpingKeyRef.current === key) return;
+    const gen = ++pumpGenRef.current;
+    pumpingKeyRef.current = key;
+    const [name, tf] = key.split(':') as [string, string];
+    // 换了币种或者已经开了新的一轮：这一轮立刻收手，也不再写界面
+    const stale = () => pumpGenRef.current !== gen || marketRef.current.key !== key;
+    let failures = 0;
+    setBackfilling(true);
+    try {
+      const r = await backfill({
+        bars: marketRef.current.bars,
+        maxBars: MAX_BARS,
+        shouldStop: stale,
+        onError: () => { failures += 1; },
+        fetchPage: async (before) => {
+          const page = await jget<{ bars: Bar[]; exhausted?: boolean }>(
+            `/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}&before=${before}`,
+          );
+          // 到头只认服务端说的 exhausted：交易所偶尔少给几根，不满一页不代表没有
+          return { bars: page.bars, exhausted: page.exhausted === true };
+        },
+        onPage: (next) => {
+          if (stale()) return;
+          setMarket((prev) => {
+            if (prev.key !== key) return prev;
+            // 补页这一秒里 WebSocket 可能推来新的一根。整份替换会把它丢掉，
+            // 所以只把更早的那一段并到前面，新数据还是用 prev 的
+            const m = mergeOlder(prev.bars, next, MAX_BARS);
+            return m.bars === prev.bars ? prev : { ...prev, bars: m.bars };
+          });
+        },
+      });
+      if (stale()) return;
+      if (r.stopped === 'exhausted') {
+        // 不弹提示：图上到了最左边会写一行，工具栏上也一直写着根数和最早那一天
+        noMoreOlderRef.current = true;
+        setHistoryEnd(true);
+      } else if (r.stopped === 'full') {
+        noMoreOlderRef.current = true;
+        push('ok', `已加载 ${r.bars.length} 根 K 线`, `本地上限 ${MAX_BARS} 根。要看更早的行情，换更大的周期。`);
+      } else if (r.stopped === 'error' && failures > 0) {
+        // 不算到头：切回来或者往回拖一下会重新拉
+        push('err', '历史 K 线没拉到', '服务端或交易所没有响应。往回拖一下会重新拉。');
+      }
+    } finally {
+      if (pumpGenRef.current === gen) {
+        pumpingKeyRef.current = '';
+        setBackfilling(false);
+      }
+    }
+  }, [push]);
+
+  /** 图表催历史。写成稳定的回调，否则每次渲染都会重新订阅视口 */
+  const needOlder = useCallback(() => { void backfillOlder(); }, [backfillOlder]);
 
   // ---------- 只读数据 ----------
 
@@ -288,7 +284,8 @@ export default function App() {
     try {
       const [c, k, lv] = await Promise.all([
         jget<ContractInfo>(`/api/contracts/${name}`),
-        jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=500`),
+        // 首屏直接要满一页：一页一千根，剩下的交给后台补
+        jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}`),
         jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
       ]);
       // 期间又切过币种，这份数据已经不是当前要看的东西了
@@ -345,6 +342,17 @@ export default function App() {
 
   useEffect(() => { void loadConfig(); void loadTickers(); }, [loadConfig, loadTickers]);
   useEffect(() => { void loadMarket(contract, interval); }, [contract, interval, loadMarket]);
+
+  /**
+   * 首屏数据一落地就补历史，不等用户拖动。
+   * 图表的视口变化订阅挂在首次画完之后，那次订阅看不到开局的视口，所以不能靠它催。
+   */
+  useEffect(() => {
+    if (!fresh || market.bars.length === 0) return;
+    if (pumpedKeyRef.current === marketKey) return;
+    pumpedKeyRef.current = marketKey;
+    void backfillOlder();
+  }, [fresh, marketKey, market.bars.length, backfillOlder]);
 
   useEffect(() => {
     const t = window.setInterval(() => void loadTickers(), 12_000);
@@ -659,7 +667,8 @@ export default function App() {
             resetKey={`${contract}:${interval}`}
             loading={loading}
             historyEnd={historyEnd}
-            onNeedOlder={loadOlder}
+            backfilling={backfilling}
+            onNeedOlder={needOlder}
             onIntervalChange={setInterval}
             onManualLevels={onManualLevels}
           />
