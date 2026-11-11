@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
   createSeriesMarkers,
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
+  type AutoscaleInfoProvider,
   ColorType,
   CrosshairMode,
   LineStyle,
@@ -17,7 +19,7 @@ import {
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
 import type { Bar, Bracket, Level, OpenOrder, Pattern, Position, PriceOrder } from '../lib/api.ts';
-import { firstIndexAtOrAfter, normalizeBars } from '../lib/candles.ts';
+import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
@@ -32,6 +34,24 @@ const ENTRY = '#7aa2ff';
 const HOLDING = '#ffcf4d';
 /** 还挂着的限价单 */
 const PENDING = '#b58bff';
+/**
+ * 平价 K 线（那段时间没人成交）用中性灰。
+ * 开收相同的线用绿或红都是在替交易所编行情。
+ */
+const FLAT = 'rgba(139,152,165,0.55)';
+/** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
+const SPARSE_SHARE = 0.6;
+/** 太少不看：刚开局几十根说明不了什么 */
+const SPARSE_MIN_BARS = 40;
+/** 画法的偏好记在本地：自动 / 只用 K 线 / 只用折线 */
+const MODE_KEY = 'xf-rine:chart:mode';
+type ChartMode = 'auto' | 'candle' | 'line';
+function readMode(): ChartMode {
+  try {
+    const v = localStorage.getItem(MODE_KEY);
+    return v === 'candle' || v === 'line' ? v : 'auto';
+  } catch { return 'auto'; }
+}
 
 /**
  * 把形态转成图上的标记。
@@ -113,11 +133,15 @@ export default function ChartPane({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  /** 收盘价折线：成交稀疏的合约用这条，比一排小方块看着清楚 */
+  const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const dmRef = useRef<DrawingManager | null>(null);
   const levelLinesRef = useRef<IPriceLine[]>([]);
   const bracketLinesRef = useRef<IPriceLine[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  /** 折线模式下形态标记挂在折线上：同一个数组，曲线上一模一样的位置 */
+  const lineMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const patternsRef = useRef<Pattern[]>(patterns);
   const barsRef = useRef<Bar[]>(bars);
   /** 补历史这件事要在 K 线落地之后再催一次，用 ref 拿最新的回调 */
@@ -131,10 +155,49 @@ export default function ChartPane({
   /** 图上最左边那根的时间和总根数，用来识别「往前补了一段历史」 */
   const firstTimeRef = useRef<number | null>(null);
   const countRef = useRef(0);
+  /** 画图用的那版 K 线（平价线已撑开）。同一份数据只算一次，别每秒拷两万根 */
+  const paintRef = useRef<{ src: Bar[] | null; tick: number; out: PaintedBar[] }>({ src: null, tick: -1, out: [] });
+  /** 可视区里有多少根画不出实体。冷门币必须说一句，不然看着像图上缺了一块 */
+  const [sparse, setSparse] = useState<{ count: number; flat: number } | null>(null);
+
+  /**
+   * 数一下视口里有多少根平价 K 线。
+   *
+   * 冷门币这个比例能到 100%，图上一整片都是灰线 —— 不说明的话就是一种「K 线残缺」。
+   * 按可视范围算：缩放到确实有成交的那一段，提示自己就没了。
+   */
+  const refreshSparse = useCallback(() => {
+    const chart = chartRef.current;
+    const all = barsRef.current;
+    if (!chart || all.length === 0) { setSparse(null); return; }
+    const r = chart.timeScale().getVisibleLogicalRange();
+    const from = r ? Math.max(0, Math.floor(r.from)) : Math.max(0, all.length - 180);
+    const to = r ? Math.min(all.length - 1, Math.ceil(r.to)) : all.length - 1;
+    if (to < from) { setSparse(null); return; }
+    const s = sparseStats(all.slice(from, to + 1));
+    setSparse(s.count >= SPARSE_MIN_BARS ? { count: s.count, flat: s.flat } : null);
+  }, []);
+
+  /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
+  const [mode, setMode] = useState<ChartMode>(readMode);
+  const flatShare = sparse ? sparse.flat / Math.max(1, sparse.count) : 0;
+  const drawMode: 'candle' | 'line' = mode === 'auto'
+    ? (sparse !== null && flatShare >= SPARSE_SHARE ? 'line' : 'candle')
+    : mode;
+
+  useEffect(() => {
+    priceRef.current?.applyOptions({ visible: drawMode === 'candle' });
+    lineRef.current?.applyOptions({ visible: drawMode === 'line' });
+  }, [drawMode]);
+
+  const pickMode = useCallback((next: ChartMode) => {
+    setMode(next);
+    try { localStorage.setItem(MODE_KEY, next); } catch { /* 存不了就算了 */ }
+  }, []);
   const [tool, setTool] = useState<DrawingKind | null>(null);
   /** 视口已经贴到最左边那根了。到头说明只在贴边时才显示，不然一开页面就挂在图上 */
   const [atEdge, setAtEdge] = useState(false);
-  const [legend, setLegend] = useState<{ o: number; h: number; l: number; c: number; v: number; t: number } | null>(null);
+  const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
 
   const storageKey = `xf-rine:drawings:${contract}:${interval}`;
   // 视口也按币种和周期各记一份，刷新后接着看同一段
@@ -194,8 +257,24 @@ export default function ChartPane({
       lastValueVisible: true,
     });
 
+    /**
+     * 收盘价折线：给成交稀疏的合约用。
+     *
+     * 平价 K 线就算撑开了也只是一排小方块，一大段看着还是「连不上」。
+     * 折线把收盘价连起来，价格的台阶一眼能看出来 —— 它不假装有成交量，只是换一种画法。
+     */
+    const line = chart.addSeries(LineSeries, {
+      color: '#9aa7b8',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerRadius: 3,
+      visible: false,
+    });
+
     // 形态标记：切币种会重建整张图，所以建图时用 ref 里的最新形态补一次
     markersRef.current = createSeriesMarkers(price, buildMarkers(patternsRef.current, barsRef.current));
+    lineMarkersRef.current = createSeriesMarkers(line, []);
 
     const vol = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
@@ -208,9 +287,18 @@ export default function ChartPane({
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point) { setLegend(null); return; }
       const d = param.seriesData.get(price) as { open: number; high: number; low: number; close: number } | undefined;
+      const frame = param.seriesData.get(line) as { value: number } | undefined;
       const v = param.seriesData.get(vol) as { value: number } | undefined;
-      if (!d) { setLegend(null); return; }
-      setLegend({ o: d.open, h: d.high, l: d.low, c: d.close, v: v?.value ?? 0, t: Number(param.time) });
+      // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
+      if (!d && !frame) { setLegend(null); return; }
+      setLegend({
+        o: d ? d.open : null,
+        h: d ? d.high : null,
+        l: d ? d.low : null,
+        c: d ? d.close : frame!.value,
+        v: v?.value ?? 0,
+        t: Number(param.time),
+      });
     });
 
     /**
@@ -263,6 +351,7 @@ export default function ChartPane({
 
     chartRef.current = chart;
     priceRef.current = price;
+    lineRef.current = line;
     volRef.current = vol;
     dmRef.current = dm;
 
@@ -273,9 +362,11 @@ export default function ChartPane({
       chart.remove();
       chartRef.current = null;
       priceRef.current = null;
+      lineRef.current = null;
       volRef.current = null;
       dmRef.current = null;
       markersRef.current = null;
+      lineMarkersRef.current = null;
       levelLinesRef.current = [];
       bracketLinesRef.current = [];
       lastTimeRef.current = null;
@@ -290,14 +381,23 @@ export default function ChartPane({
     const plugin = markersRef.current;
     if (!plugin) return;
     try {
-      plugin.setMarkers(buildMarkers(patternsRef.current, barsRef.current));
+      // 标记跟着当前画法走：折线模式下挂在 K 线序列上是看不见的
+      const list = buildMarkers(patternsRef.current, barsRef.current);
+      if (drawMode === 'line') {
+        lineMarkersRef.current?.setMarkers(list);
+        plugin.setMarkers([]);
+      } else {
+        plugin.setMarkers(list);
+        lineMarkersRef.current?.setMarkers([]);
+      }
     } catch (err) {
       // 标记画不出来不影响看盘，别让它把整个界面带下去
       console.warn('[chart] 写入形态标记失败', err);
     }
     // 只在形态本身变了时重画，K 线每来一根都重算没意义
+    // 画法是依赖：切到折线要把标记搬过去
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patternSig, storageKey]);
+  }, [patternSig, storageKey, drawMode]);
 
   // ---- K 线数据 ----
   useEffect(() => {
@@ -305,22 +405,44 @@ export default function ChartPane({
     const price = priceRef.current;
     const vol = volRef.current;
     const dm = dmRef.current;
-    if (!chart || !price || !vol || !dm) return;
+    const line = lineRef.current;
+    if (!chart || !price || !vol || !line || !dm) return;
     if (bars.length === 0) return;
 
-    const writePrice = (b: Bar) => price.update({
-      time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-    });
+    /**
+     * 画之前过一遍 paintBars：平价 K 线（没成交的那些分钟）撑开一个最小变动价。
+     *
+     * 不撑的话图上是一排断续的小方块，冷门币看着就是「K 线连不上、残了一块」。
+     * 撑开的只是影线，开收量一个数都不动，而且只喂给图 ——
+     * 形态、档位、盈亏用的仍是原始数据。
+     */
+    const painted = (): PaintedBar[] => {
+      const cache = paintRef.current;
+      if (cache.src === bars && cache.tick === priceRound) return cache.out;
+      const out = paintBars(normalizeBars(bars), priceRound);
+      paintRef.current = { src: bars, tick: priceRound, out };
+      return out;
+    };
+    /** 平价线给中性灰：它没有涨跌，涂成绿或红都是在编行情 */
+    const point = (b: PaintedBar) => (b.flat
+      ? {
+        time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
+        color: FLAT, borderColor: FLAT, wickColor: FLAT,
+      }
+      : { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close });
+    const writePrice = (b: PaintedBar) => price.update(point(b));
+    /** 折线只用收盘价：稀疏合约看着就是价格的台阶，比一排小方块清楚 */
+    const writeLine = (b: PaintedBar) => line.update({ time: b.time as UTCTimestamp, value: b.close });
+    const lineData = (list: PaintedBar[]) => list.map((b) => ({ time: b.time as UTCTimestamp, value: b.close }));
     const writeVol = (b: Bar) => vol.update({
       time: b.time as UTCTimestamp,
       value: b.volume,
       color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
     });
     const fullLoad = () => {
-      const clean = normalizeBars(bars);
-      price.setData(clean.map((b) => ({
-        time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-      })));
+      const clean = painted();
+      price.setData(clean.map(point));
+      line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
         value: b.volume,
@@ -329,17 +451,24 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
-      // 优先恢复上次看到的那一段；没有记录才给默认值
+      /**
+       * 优先恢复上次看到的那一段，记的是**时间**不是下标。
+       *
+       * 记下标是错的：这次拉到的根数（首屏 1000 根 / 往回补完 8000 根）和上次不一样，
+       * 同一个下标指向的是完全不同的时间 —— 于是打开页面看到的是三个月前的行情，
+       * 而顶上的现价是今天的，看着就是「K 线不对」。时间在哪个文件里都一样。
+       */
       let restored = false;
       try {
-        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as { from?: number; to?: number } | null;
-        if (saved && Number.isFinite(saved.from) && Number.isFinite(saved.to) && (saved.to as number) > (saved.from as number)) {
-          const span = (saved.to as number) - (saved.from as number);
-          let f = saved.from as number;
-          // 这次只加载了 500 根，上次可能拖到了更早的历史里，别把视口留在数据外面
-          if (f > clean.length - 2) f = Math.max(0, clean.length - span - 6);
-          chart.timeScale().setVisibleLogicalRange({ from: f, to: f + span });
-          restored = true;
+        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as { fromTime?: number; toTime?: number } | null;
+        if (saved && Number.isFinite(saved.fromTime) && Number.isFinite(saved.toTime)) {
+          const a = firstIndexAtOrAfter(clean, saved.fromTime as number);
+          const b = firstIndexAtOrAfter(clean, saved.toTime as number);
+          if (b - a >= 8) {
+            // 右边留一点空：上次停在最新一屏时，右侧有几根的空位
+            chart.timeScale().setVisibleLogicalRange({ from: a, to: b >= clean.length ? clean.length + 6 : b });
+            restored = true;
+          }
         }
       } catch { /* 记录坏了就用默认值 */ }
 
@@ -358,10 +487,11 @@ export default function ChartPane({
      * 以前这两种情况都调 fullLoad()，那会顺手把视口摆回最新的一屏 —— 正看着历史的人
      * 会被弹回最右边，看着就是「画面转移了一下」。
      */
-    const redraw = (clean: Bar[]) => {
-      price.setData(clean.map((b) => ({
-        time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-      })));
+    const redraw = (clean: PaintedBar[]) => {
+      // 重画之前先记下「正在看哪一段时间」，重画完再按时间放回去
+      const span = chart.timeScale().getVisibleRange();
+      price.setData(clean.map(point));
+      line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
         value: b.volume,
@@ -370,10 +500,26 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+      /**
+       * 按时间把视口放回去。
+       *
+       * 不能指望 setData 自己稳住：前面插进七千根之后，库把「逻辑下标 840~1006」原样留着，
+       * 而那已经是三个月前的一段。这里换算成时间再找回来，看历史的就不会被弹走，
+       * 第一次进来看到的也是最新那一屏。
+       */
+      if (span !== null) {
+        const a = firstIndexAtOrAfter(clean, span.from as number);
+        const b = firstIndexAtOrAfter(clean, span.to as number);
+        if (b - a >= 2) {
+          // 原来停在最新一屏（右边还有余量）的，重画后要留在原地，别把空隙吃掉
+          const to = b >= clean.length ? clean.length + 6 : b;
+          try { chart.timeScale().setVisibleLogicalRange({ from: a, to }); } catch { /* 区间不合法就算了 */ }
+        }
+      }
     };
 
     try {
-      const cleanBars = normalizeBars(bars);
+      const cleanBars = painted();
       const prevFirst = firstTimeRef.current;
       const prevCount = countRef.current;
       /**
@@ -425,6 +571,16 @@ export default function ChartPane({
         redraw(cleanBars);
         return;
       }
+      /**
+       * 中间那个洞补回来了：最后一根没变，根数却变多了。
+       *
+       * 增量走的是 update()，它不接受比图上最后一根更早的时间 —— 补在中间的那几根
+       * 根本写不进去，图上会一直缺着。这种情况整段重画一次。
+       */
+      if (applied != null && newest.time === applied && cleanBars.length > prevCount) {
+        redraw(cleanBars);
+        return;
+      }
       // 中间漏了一大段（切币种、重连之后补回来的），整段重画比逐根 update 快得多
 
       /**
@@ -441,6 +597,7 @@ export default function ChartPane({
         const b = cleanBars[i]!;
         if (applied != null && b.time < applied) continue;
         writePrice(b);
+        writeLine(b);
         writeVol(b);
         lastTimeRef.current = b.time;
       }
@@ -470,7 +627,13 @@ export default function ChartPane({
       // 拖动时这个回调很密，攒一下再写
       window.clearTimeout(saveTimer);
       saveTimer = window.setTimeout(() => {
-        try { localStorage.setItem(viewKey, JSON.stringify({ from: r.from, to: r.to })); } catch { /* 存不了就算了 */ }
+        // 存时间，不存下标：下次拉到的根数和这次不一样
+        const vr = ts.getVisibleRange();
+        if (vr) {
+          try { localStorage.setItem(viewKey, JSON.stringify({ fromTime: vr.from, toTime: vr.to })); } catch { /* 存不了就算了 */ }
+        }
+        // 提示跟着可视范围走：缩到有成交的那一段，那句「成交稀疏」就该自己消失
+        refreshSparse();
       }, 400);
 
       /**
@@ -511,7 +674,14 @@ export default function ChartPane({
       window.clearTimeout(saveTimer);
       ts.unsubscribeVisibleLogicalRangeChange(handler);
     };
-  }, [onNeedOlder, resetKey, viewKey]);
+  }, [onNeedOlder, resetKey, viewKey, refreshSparse]);
+
+  // ---- 新数据落地之后（含实时补课）重新数一次平价占比 ----
+  useEffect(() => {
+    // 等这一帧把图写完再量视口，早了拿到的是上一次的区间
+    const id = requestAnimationFrame(() => refreshSparse());
+    return () => cancelAnimationFrame(id);
+  }, [bars, resetKey, refreshSparse]);
 
   // ---- 图上的横线：方案止损止盈、持仓均价、挂着的限价单、支撑阻力 ----
   useEffect(() => {
@@ -672,6 +842,28 @@ export default function ChartPane({
     });
   }, [priceRound]);
 
+  /**
+   * 价格轴的最小跨度。
+   *
+   * 一整屏都是没成交的平价 K 线时，数据的最高和最低只差一个最小变动价，
+   * 库就把坐标轴压到那么窄 —— 每根 K 线的影线（也是撑开后的那一个跳动）
+   * 正好占满整屏，于是满屏竖条，比原来的断续小方块还难看。
+   * 这里把可视区的最小跨度兜到「0.2% 或 20 个跳动」里大的那个，撑开的线就回到它该有的一像素。
+   */
+  useEffect(() => {
+    const provider: AutoscaleInfoProvider = (base) => {
+      const info = base();
+      if (!info || !info.priceRange) return info;
+      const { minValue, maxValue } = info.priceRange;
+      const mid = (minValue + maxValue) / 2;
+      const floor = Math.max(Math.abs(mid) * 0.002, priceRound * 20);
+      if (!(maxValue - minValue < floor)) return info;
+      return { ...info, priceRange: { minValue: mid - floor / 2, maxValue: mid + floor / 2 } };
+    };
+    priceRef.current?.applyOptions({ autoscaleInfoProvider: provider });
+    lineRef.current?.applyOptions({ autoscaleInfoProvider: provider });
+  }, [priceRound]);
+
   // ---- 工具切换 ----
   useEffect(() => {
     dmRef.current?.setTool(tool);
@@ -702,6 +894,20 @@ export default function ChartPane({
             <button key={i} className={i === interval ? 'on' : ''} onClick={() => onIntervalChange(i)}>{i}</button>
           ))}
         </div>
+        <div className="tool-divider" />
+        {/* 画法：自动只在「平价线过半」时改折线，冷门币不再是一排断续的小方块 */}
+        {(['auto', 'candle', 'line'] as const).map((m) => (
+          <button
+            key={m}
+            title={m === 'auto'
+              ? '自动：无成交占比过半的合约改画折线，其余画 K 线'
+              : m === 'candle' ? '只看 K 线' : '只看收盘价折线（成交稀疏时更清楚）'}
+            className={`tool-btn ${mode === m ? 'on' : ''}`}
+            onClick={() => pickMode(m)}
+          >
+            {m === 'auto' ? '自动' : m === 'candle' ? 'K线' : '折线'}
+          </button>
+        ))}
         <div className="tool-divider" />
         {TOOLS.map((t) => (
           <button
@@ -752,15 +958,21 @@ export default function ChartPane({
         <div className="chart-host" ref={hostRef} />
         {legend && (
           <div className="chart-badge">
-            <span>O {legend.o}</span>
-            <span className="up">H {legend.h}</span>
-            <span className="down">L {legend.l}</span>
+            <span>O {legend.o ?? '—'}</span>
+            <span className="up">H {legend.h ?? '—'}</span>
+            <span className="down">L {legend.l ?? '—'}</span>
             <span>C {legend.c}</span>
             <span>V {Math.round(legend.v)}</span>
           </div>
         )}
         {historyEnd && atEdge && (
           <div className="chart-edge">已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早</div>
+        )}
+        {sparse && flatShare >= SPARSE_SHARE && (
+          <div className="chart-sparse">
+            该合约成交稀疏 · 可视 {sparse.count} 根里 {sparse.flat} 根没有成交
+            {drawMode === 'line' ? '（折线只连收盘价）' : '（灰色为无成交 K 线）'}
+          </div>
         )}
         {stale && (
           <div className="chart-stale">

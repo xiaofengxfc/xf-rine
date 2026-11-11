@@ -80,7 +80,14 @@ export class MarketHub {
     let msg: any;
     try { msg = JSON.parse(raw); } catch { return; }
     if (msg?.type === 'subscribe' && typeof msg.contract === 'string') {
-      const contract = msg.contract.replace(/[^A-Za-z0-9_\-]/g, '').slice(0, 32);
+      /**
+       * 合约名不能按 ASCII 白名单洗。
+       *
+       * Gate 上有 牛逼_USDT 这种中文合约，洗完变成 "_USDT" —— 订阅出去的是一个不存在的合约，
+       * 这 5 个币的 K 线、最新价、逐笔永远不来，图上就停在 REST 快照那一刻。
+       * 只挡控制字符和空白（JSON 里本来就安全，这里只是别把怪东西转给交易所），长度按 Gate 的上限截。
+       */
+      const contract = String(msg.contract).replace(/[\u0000-\u001f\u007f\s]/g, '').slice(0, 32);
       const interval = typeof msg.interval === 'string' ? msg.interval.replace(/[^0-9a-zA-Z]/g, '') : '1m';
       // 单连接只保持一组订阅，切换合约时先退旧的
       this.dropAllRefs(client.id);

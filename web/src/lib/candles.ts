@@ -68,3 +68,112 @@ export function mergeOlder(prev: Bar[], older: Bar[], maxBars: number): OlderMer
   merged.sort((a, b) => a.time - b.time);
   return { bars: normalizeBars(merged), added: add.length, duplicate: false, full: false };
 }
+
+/** 每个周期一根 K 线多少秒。判断「最新一根落后了几根」要用它 */
+export const INTERVAL_SEC: Record<string, number> = {
+  '10s': 10, '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
+  '1h': 3600, '4h': 14400, '8h': 28800, '1d': 86400, '7d': 604800,
+};
+
+/**
+ * 平价 K 线：最高就等于最低。
+ *
+ * 没有任何成交的那段时间，交易所补的是一根 open=high=low=close、量为 0 的占位 K 线。
+ * 这种 K 线没有实体也没有影线，一整段画出来是一排断续的小方块 ——
+ * 冷门币看着就像「K 线连不上」，可数据一根没少，是那段时间真的没人成交。
+ */
+export function isFlatBar(b: Bar): boolean {
+  return !(b.high > b.low);
+}
+
+/** 平价而且没有成交：这段确实没人交易过 */
+export function isNoTradeBar(b: Bar): boolean {
+  return b.volume === 0 && isFlatBar(b) && !(b.close > b.open);
+}
+
+export interface PaintedBar extends Bar {
+  /** 原始数据是平价线，画之前已经被撑开过 */
+  flat: boolean;
+}
+
+/**
+ * 画图前把平价 K 线撑开。
+ *
+ * 撑的是影线（high/low），开、收、量一个数都不动：图上多出来的那半跳只为了
+ * 让这一根能画出来，而不是「图上缺了一块」。形态、档位、盈亏这些要算数的，
+ * 一律用原始数据，不许过这个函数。
+ */
+export function paintBars(bars: Bar[], tick: number): PaintedBar[] {
+  const out: PaintedBar[] = new Array(bars.length);
+  for (let i = 0; i < bars.length; i += 1) {
+    const b = bars[i]!;
+    if (!isFlatBar(b)) { out[i] = { ...b, flat: false }; continue; }
+    // 没拿到最小变动价时按万分之几撑开：只影响像素，不参与任何计算
+    const half = (tick > 0 ? tick : Math.max(Math.abs(b.close) * 2e-4, 1e-9)) / 2;
+    out[i] = { ...b, high: b.close + half, low: b.close - half, flat: true };
+  }
+  return out;
+}
+
+export interface TailMerge {
+  bars: Bar[];
+  /** 补进来的新根数（中间漏掉的那些） */
+  added: number;
+  /** 同一时间被新数据覆盖的根数（最后一根还在走，每次都会命中） */
+  patched: number;
+}
+
+/**
+ * 把一页「更新的」K 线并到右边界上。
+ *
+ * mergeOlder 管左边（历史），这个管右边（断线、丢帧之后补课）：同一时间以新的一页为准，
+ * 本地原有的一根都不丢 —— 断了几分钟不该顺手把更早的尾巴剪掉。
+ */
+export function mergeNewer(prev: Bar[], page: Bar[], maxBars: number): TailMerge {
+  if (page.length === 0) return { bars: prev, added: 0, patched: 0 };
+  const byTime = new Map<number, Bar>();
+  for (const b of prev) byTime.set(b.time, b);
+  let added = 0;
+  let patched = 0;
+  for (const b of normalizeBars(page)) {
+    const old = byTime.get(b.time);
+    if (old) {
+      if (old.open !== b.open || old.high !== b.high || old.low !== b.low
+        || old.close !== b.close || old.volume !== b.volume) patched += 1;
+    } else {
+      added += 1;
+    }
+    byTime.set(b.time, b);
+  }
+  if (added === 0 && patched === 0) return { bars: prev, added: 0, patched: 0 };
+  const merged = [...byTime.values()].sort((x, y) => x.time - y.time);
+  const bars = merged.length > maxBars ? merged.slice(merged.length - maxBars) : merged;
+  return { bars, added, patched };
+}
+
+export interface SparseStats {
+  count: number;
+  /** 平价 K 线（画不出实体）的根数 */
+  flat: number;
+  /** 平价且零成交的根数 */
+  noTrade: number;
+  /** 平价占比 0..1 */
+  flatShare: number;
+}
+
+/** 一段 K 线里有多少根是平价 / 无成交。图上的提示和体检脚本都用这一份口径 */
+export function sparseStats(bars: Bar[]): SparseStats {
+  let flat = 0;
+  let noTrade = 0;
+  for (const b of bars) {
+    if (isFlatBar(b)) flat += 1;
+    if (isNoTradeBar(b)) noTrade += 1;
+  }
+  return {
+    count: bars.length,
+    flat,
+    noTrade,
+    flatShare: bars.length > 0 ? flat / bars.length : 0,
+  };
+}
+

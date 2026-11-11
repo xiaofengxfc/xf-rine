@@ -362,6 +362,20 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .chart-pos.stale { opacity: 0.5; }
 
+/* 成交稀疏：可视区里大半天没有成交，图上一片灰线。说一句，别让人以为 K 线残了 */
+.chart-sparse {
+  position: absolute; left: 12px; bottom: 12px; z-index: 5;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: rgba(17, 20, 26, 0.88);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  pointer-events: none;
+  max-width: calc(100% - 24px);
+}
+
 /* 历史到头：交易所只留最近一段，翻到最老那根就在这里说一声，别让人以为卡死了 */
 .chart-edge {
   position: absolute; left: 12px; bottom: 30px; z-index: 5;

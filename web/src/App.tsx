@@ -6,7 +6,7 @@ import {
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
-import { mergeOlder } from './lib/candles.ts';
+import { INTERVAL_SEC, mergeNewer, mergeOlder } from './lib/candles.ts';
 import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
 import ChartPane from './components/ChartPane.tsx';
@@ -40,6 +40,8 @@ const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null }
 
 /** 往回要一页多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
 const OLDER_PAGE = 1000;
+/** 右边界对齐一次取多少根。够盖住几分钟没收到推送的那一段，又不至于每次都拖一整页 */
+const TAIL_PAGE = 300;
 /**
  * 内存里最多留多少根。
  * 交易所每个周期只给约一万根，留两万接住它给的全部还有余量。
@@ -257,6 +259,45 @@ export default function App() {
   /** 图表催历史。写成稳定的回调，否则每次渲染都会重新订阅视口 */
   const needOlder = useCallback(() => { void backfillOlder(); }, [backfillOlder]);
 
+  /**
+   * 把右边界的缺口补齐。
+   *
+   * WebSocket 掉线、代理抖一下、几分钟没收到推送，中间就少了几根 —— 而收到新 K 线时
+   * 只认「比图上最后一根新」，缺的那段自己永远回不来，看着就是 K 线残了一块。
+   * 这里按整页重取尾部（服务端有缓存，正常几十毫秒），按时间合并：缺几根补几根，
+   * 最后一根还在走的时候顺手覆盖成最新的。
+   */
+  const resyncTail = useCallback(async () => {
+    const key = marketRef.current.key;
+    if (!key || marketRef.current.bars.length === 0) return;
+    const [name, tf] = key.split(':') as [string, string];
+    try {
+      const page = await jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=${TAIL_PAGE}`);
+      if (marketRef.current.key !== key) return;
+      setMarket((prev) => {
+        if (prev.key !== key) return prev;
+        const m = mergeNewer(prev.bars, page.bars, MAX_BARS);
+        return m.added === 0 && m.patched === 0 ? prev : { ...prev, bars: m.bars };
+      });
+    } catch { /* 补不回来不影响看盘，下一轮再看 */ }
+  }, []);
+
+  /**
+   * 尾部看门狗：最后一根落后超过 3 个周期就补一次。
+   *
+   * 推送正常时这里一次请求都不会发（BTC 这种每秒都在推）；只有推送真停了才动 ——
+   * 比如 Gate 断过、这枚币很久没成交、或者订阅没接上。
+   */
+  useEffect(() => {
+    const step = INTERVAL_SEC[interval] ?? 60;
+    const t = window.setInterval(() => {
+      const list = marketRef.current.bars;
+      if (list.length === 0) return;
+      if (Date.now() / 1000 - list[list.length - 1]!.time > step * 3) void resyncTail();
+    }, 15_000);
+    return () => window.clearInterval(t);
+  }, [interval, resyncTail]);
+
   // ---------- 只读数据 ----------
 
   const loadConfig = useCallback(async () => {
@@ -378,7 +419,10 @@ export default function App() {
   // 浏览器在后台会压制定时器，回来时先对一次账，别让人对着几分前的仓做决定。
   useEffect(() => {
     const wake = () => {
-      if (document.visibilityState === 'visible') void loadPrivate();
+      if (document.visibilityState !== 'visible') return;
+      void loadPrivate();
+      // 后台标签页的定时器会被压制，回来时把 K 线的尾巴也对一次
+      void resyncTail();
     };
     document.addEventListener('visibilitychange', wake);
     window.addEventListener('focus', wake);
@@ -386,7 +430,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', wake);
       window.removeEventListener('focus', wake);
     };
-  }, [loadPrivate]);
+  }, [loadPrivate, resyncTail]);
 
   // ws 的行情帧攒够了再写进状态
   useEffect(() => {
@@ -451,6 +495,8 @@ export default function App() {
         setWsAlive(true);
         reconnectRef.current = 0;
         ws.send(JSON.stringify({ type: 'subscribe', contract, interval }));
+        // 断开这段时间图上是缺的，连上先按时间补一次，别让缺口一直留着
+        void resyncTail();
       };
 
       ws.onmessage = (ev) => {
@@ -472,8 +518,11 @@ export default function App() {
             const last = next[next.length - 1]!;
             const bar: Bar = { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume };
             if (last.time === b.time) next[next.length - 1] = bar;
-            else if (b.time > last.time) next.push(bar);
-            else return prev;
+            else if (b.time > last.time) {
+              // 跳了一根以上：中间那段没收到（断线、丢帧）。先把这一根接上，缺口交给补课
+              if (b.time - last.time > (INTERVAL_SEC[interval] ?? 60)) void resyncTail();
+              next.push(bar);
+            } else return prev;
             return { ...prev, bars: next };
           });
           if (b.closed) {
@@ -495,7 +544,7 @@ export default function App() {
 
     connect();
     return () => { disposed = true; wsRef.current?.close(); };
-  }, [contract, interval, loadLevelsOnly]);
+  }, [contract, interval, loadLevelsOnly, resyncTail]);
 
   // ---------- 定时刷新档位（防止 WS 长时间没收到收线事件） ----------
 

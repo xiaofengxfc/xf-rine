@@ -97,6 +97,15 @@ function isRetentionError(e: GateError): boolean {
   return /too long ago|INVALID_PARAM_VALUE|out of range/i.test(`${e.label} ${e.detail}`);
 }
 
+/** 缺口日志按 (合约,周期) 一分钟最多一条：图上看着像「残了一块」，日志里得能对上 */
+const gapNoted = new Map<string, number>();
+function noteGap(key: string): void {
+  const now = Date.now();
+  if (now - (gapNoted.get(key) ?? 0) < 60_000) return;
+  gapNoted.set(key, now);
+  console.warn(`[candles] ${key} 取到短页：时间轴上这一段有缺口`);
+}
+
 /** 第一个 time >= t 的位置（时间轴有序） */
 function lowerBoundTime(bars: Bar[], t: number): number {
   let lo = 0;
@@ -412,12 +421,29 @@ async function withFetchSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Gate 的限流。GET 是幂等的，等一会儿再要一次就行，别把 429 甩给前端 */
+function isRateLimited(e: unknown): boolean {
+  return e instanceof GateError && e.status === 429;
+}
+
+/** 被限流时退避几次。交易所这个窗口过去就好了，用户不该看到「K 线没拉到」 */
+const RATE_RETRY_MS = [250, 500];
+
 /** 同一页在飞就复用那一次请求，回来各自并进时间轴（合并是幂等的） */
 function fetchOnce(contract: string, interval: string, limit: number, step: number, before?: number): Promise<Bar[]> {
   const key = `${contract}:${interval}:${before ?? 0}`;
   const had = inflight.get(key);
   if (had) return had;
-  const p = withFetchSlot(() => fetchPage(contract, interval, limit, step, before));
+  const p = withFetchSlot(async () => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await fetchPage(contract, interval, limit, step, before);
+      } catch (e) {
+        if (!isRateLimited(e) || attempt >= RATE_RETRY_MS.length) throw e;
+        await new Promise((resolve) => { setTimeout(resolve, RATE_RETRY_MS[attempt]!); });
+      }
+    }
+  });
   inflight.set(key, p);
   void p.finally(() => inflight.delete(key)).catch(() => {});
   return p;
@@ -427,6 +453,13 @@ interface CandlePage {
   bars: Bar[];
   /** 交易所那边已经没有更早的数据了（它只保留最近一万个点） */
   exhausted: boolean;
+  /**
+   * 要了满满一页却没给满：时间轴上这段有洞，或者上游少给。
+   *
+   * 不设这个标记的话，前端拿到短页只会觉得「就这么多」，缺口被静默压掉；
+   * 有了它，体检脚本和日志能看出来是数据断了，而不是真的到头。
+   */
+  gap?: boolean;
 }
 
 async function loadCandles(
@@ -469,7 +502,12 @@ async function loadCandles(
     /** 最后一次真拉回来的那一页。缓存裁头时用它兜底，别把刚拿到的历史丢掉 */
     let lastPage: Bar[] = [];
 
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    /**
+     * 上游偶尔少给几根、或者时间轴上这段本来就有洞，一页补不满。
+     * 以前最多试 4 次就收手，短页直接甩给前端 —— 前端拿到不满一页就当到头了，
+     * 那一段历史从此再也拉不出来。这里多试几轮：只要还在往更早的方向走就接着补。
+     */
+    for (let attempt = 0; attempt < 8; attempt += 1) {
       if (isExhausted(series)) break;
       if (series.coolUntil > Date.now()) break;
       /** 手上最老那一根。空时间轴是 Infinity，此时任何失败都不算到头 */
@@ -516,7 +554,11 @@ async function loadCandles(
      */
     const fromPage = contiguousRun(lastPage, lowerBoundTime(lastPage, before), limit, step);
     const bars = fromPage.length > fromSeries.length ? fromPage : fromSeries;
-    return { bars, exhausted: endedAt(bars) };
+    const ended = endedAt(bars);
+    // 要了一整页却没凑满、又不是到头：这段中间有洞，标出来，别再假装它是连续的
+    const gap = bars.length < limit && !ended;
+    if (gap) noteGap(`${contract}:${interval}`);
+    return { bars, exhausted: ended, gap };
   }
 
   const tailFresh = series.newestAt > 0 && Date.now() - series.newestAt < tailTtl;
@@ -546,6 +588,8 @@ router.get('/candles', wrap(async (req, res) => {
     bars: page.bars,
     hasMore: page.bars.length >= limit,
     exhausted: page.exhausted,
+    // 这段历史中间有洞（上游少给）。前端的自愈和体检脚本按它判断，不影响正常画图
+    gap: page.gap === true,
   });
 }));
 
