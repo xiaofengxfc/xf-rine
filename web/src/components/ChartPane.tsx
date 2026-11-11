@@ -24,7 +24,7 @@ import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
-import { chartColors, getTheme, useTheme } from '../lib/theme.ts';
+import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
@@ -35,11 +35,6 @@ const ENTRY = '#7aa2ff';
 const HOLDING = '#ffcf4d';
 /** 还挂着的限价单 */
 const PENDING = '#b58bff';
-/**
- * 平价 K 线（那段时间没人成交）用中性灰。
- * 开收相同的线用绿或红都是在替交易所编行情。
- */
-const FLAT = 'rgba(139,152,165,0.55)';
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
 const SPARSE_SHARE = 0.6;
 /** 太少不看：刚开局几十根说明不了什么 */
@@ -167,6 +162,17 @@ export default function ChartPane({
   const countRef = useRef(0);
   /** 画图用的那版 K 线（平价线已撑开）。同一份数据只算一次，别每秒拷两万根 */
   const paintRef = useRef<{ src: Bar[] | null; tick: number; out: PaintedBar[] }>({ src: null, tick: -1, out: [] });
+  /**
+   * 当前这套色板。
+   *
+   * 图里的颜色分两类：底色、网格那类是 series/chart 的**选项**，applyOptions 就能换；
+   * 平价线的中性灰和成交量的淡色是**写在每根数据上**的，换主题只能整段重画一遍。
+   * 后者发生在建图、补数据那些 effect 里，它们只依赖 storageKey，拿的是建图那天的闭包 ——
+   * 所以要有一个能从外面读到当前色板的地方，否则重画出来的还是旧主题的颜色。
+   */
+  const colorsRef = useRef<ChartColors>(chartColors(getTheme()));
+  /** 图上这批 K 线是用哪套主题画的。变了就说明颜色过期了，得整段重画一次 */
+  const paintThemeRef = useRef<string>('');
   /** 可视区里有多少根画不出实体。冷门币必须说一句，不然看着像图上缺了一块 */
   const [sparse, setSparse] = useState<{ count: number; flat: number } | null>(null);
 
@@ -217,7 +223,7 @@ export default function ChartPane({
     if (!host) return;
 
     // canvas 里读不到 CSS 变量，配色只能从这份色板来（跟着当前主题）
-    const c = chartColors(getTheme());
+    const c = colorsRef.current;
     const chart = createChart(host, {
       autoSize: true,
       layout: {
@@ -389,9 +395,11 @@ export default function ChartPane({
 
   /**
    * 换主题：canvas 不吃 CSS 变量，得把底色、网格、坐标轴重新贴一遍。
-   * 只改这些结构性颜色 —— K 线的涨跌色两套一样，数据一条都不用重画。
+   * 涨跌色两套一样不用动；平价线的灰和成交量的淡色要按新主题重画一遍（见数据那条 effect）。
    */
   const theme = useTheme();
+  // 色板在渲染期就同步过去：数据那条 effect 只依赖 storageKey，靠 effect 的先后顺序不可靠
+  colorsRef.current = chartColors(theme);
   useEffect(() => {
     const c = chartColors(theme);
     chartRef.current?.applyOptions({
@@ -476,17 +484,22 @@ export default function ChartPane({
     const point = (b: PaintedBar) => (b.flat
       ? {
         time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-        color: FLAT, borderColor: FLAT, wickColor: FLAT,
+        color: colorsRef.current.flat, borderColor: colorsRef.current.flat, wickColor: colorsRef.current.flat,
       }
       : { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close });
     const writePrice = (b: PaintedBar) => price.update(point(b));
     /** 折线只用收盘价：稀疏合约看着就是价格的台阶，比一排小方块清楚 */
     const writeLine = (b: PaintedBar) => line.update({ time: b.time as UTCTimestamp, value: b.close });
     const lineData = (list: PaintedBar[]) => list.map((b) => ({ time: b.time as UTCTimestamp, value: b.close }));
+    /**
+     * 成交量的颜色是逐根写在数据上的（涨绿跌红），台账里没有「按根变色」这个选项。
+     * 深浅两套的浓淡不一样：同样的 0.28 落在白底上等于没画。
+     */
+    const volColor = (b: Bar) => (b.close >= b.open ? colorsRef.current.volumeUp : colorsRef.current.volumeDown);
     const writeVol = (b: Bar) => vol.update({
       time: b.time as UTCTimestamp,
       value: b.volume,
-      color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+      color: volColor(b),
     });
     const fullLoad = () => {
       const clean = painted();
@@ -495,7 +508,7 @@ export default function ChartPane({
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
         value: b.volume,
-        color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+        color: volColor(b),
       })));
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
@@ -544,7 +557,7 @@ export default function ChartPane({
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
         value: b.volume,
-        color: b.close >= b.open ? 'rgba(46,211,160,0.28)' : 'rgba(255,95,109,0.28)',
+        color: volColor(b),
       })));
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
@@ -569,6 +582,17 @@ export default function ChartPane({
 
     try {
       const cleanBars = painted();
+      /**
+       * 主题换了：平价线的中性灰和成交量那层淡色是**写在每根数据上**的，
+       * applyOptions 只能换底色网格那些选项，换不掉它们 —— 不重画就会留着一半旧配色。
+       * 重画走 redraw：它按时间把视口放回去，正在看历史的人不会被弹回最新一屏。
+       */
+      if (paintThemeRef.current && paintThemeRef.current !== theme) {
+        paintThemeRef.current = theme;
+        redraw(cleanBars);
+        return;
+      }
+      paintThemeRef.current = theme;
       const prevFirst = firstTimeRef.current;
       const prevCount = countRef.current;
       /**
@@ -663,7 +687,8 @@ export default function ChartPane({
       console.warn('[chart] 写入 K 线失败，改为整段重设', err);
       try { fullLoad(); } catch { /* 实在不行就保持现状 */ }
     }
-  }, [bars, resetKey, storageKey]);
+    // theme 也在依赖里：换主题要按新配色重画一遍（见上面那段）
+  }, [bars, resetKey, storageKey, theme]);
 
   // ---- 往回拖到底时，向上要一页更早的 K 线 ----
   useEffect(() => {

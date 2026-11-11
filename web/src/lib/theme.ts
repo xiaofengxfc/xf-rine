@@ -70,6 +70,15 @@ export interface ChartColors {
   priceLine: string;
   /** 折线模式那条收盘价线的颜色 */
   line: string;
+  /**
+   * 下面三项是**画在数据上**的颜色（每根 K 线各自带一份），不是 series 的选项。
+   * 深色下用淡一点就够；浅色下同一个淡色落在白底上几乎看不见，
+   * 成交量会整排消失、平价 K 线会变成一片白 —— 所以浅色这边要更实一些。
+   */
+  volumeUp: string;
+  volumeDown: string;
+  /** 平价 K 线（最高 = 最低，交易所给的无成交占位线）画的中性灰 */
+  flat: string;
 }
 
 const CHART: Record<Theme, ChartColors> = {
@@ -82,6 +91,9 @@ const CHART: Record<Theme, ChartColors> = {
     border: '#1e232c',
     priceLine: '#4c8dff',
     line: '#9aa7b8',
+    volumeUp: 'rgba(46,211,160,0.28)',
+    volumeDown: 'rgba(255,95,109,0.28)',
+    flat: 'rgba(139,152,165,0.55)',
   },
   light: {
     background: '#ffffff',
@@ -92,6 +104,9 @@ const CHART: Record<Theme, ChartColors> = {
     border: '#dfe4ec',
     priceLine: '#2563eb',
     line: '#6b7689',
+    volumeUp: 'rgba(14,143,98,0.45)',
+    volumeDown: 'rgba(217,45,75,0.42)',
+    flat: 'rgba(107,118,137,0.7)',
   },
 };
 
