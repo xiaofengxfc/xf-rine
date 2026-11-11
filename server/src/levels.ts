@@ -340,9 +340,18 @@ export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
 
 export type Direction = 'long' | 'short';
 
+export type EntryKind = 'market' | 'level' | 'range' | 'atr';
+
 export interface Bracket {
   direction: Direction;
   entry: number;
+  /** 这个入场价怎么来的：结构位回踩 / 区间中位 / ATR 回撤 / 就是现价 */
+  entryKind: EntryKind;
+  entrySource: string;
+  /** 入场价相对现价的偏离（%，带符号）。负数＝要等价格回落才成交 */
+  entryDistancePct: number;
+  /** 同一个偏离折算成 ATR 倍数：判断这点距离今天走不走得动 */
+  entryDistanceAtr: number;
   stop: number;
   target: number;
   riskReward: number;
@@ -350,7 +359,7 @@ export interface Bracket {
   targetSource: string;
   stopDistancePct: number;
   targetDistancePct: number;
-  /** 建议的止损宽度占总价百分比，给下单面板换算张数用 */
+  /** 建议的止损宽度占入场价的百分比，给下单面板换算张数用 */
   riskPct: number;
   /** 盈亏比是否达到最低要求；达不到也返回方案，但页面要标红，不装作能用 */
   acceptable: boolean;
@@ -358,9 +367,19 @@ export interface Bracket {
 }
 
 /**
- * 从识别出的位推导止盈止损：
- * 多头止损放在最近的强支撑下方一个缓冲，止盈放在最近能满足最小盈亏比的强阻力；
- * 找不到合格位就退回 ATR 倍数，并说明来源，不假装是结构位。
+ * 从识别出的位推导「在哪儿进、止损止盈放哪儿」。
+ *
+ * 入场默认按**限价回踩**算（entryMode: 'limit'）。按现价进场看着简单，但它把
+ * 「这个价该不该进」整个跳过了：现价正贴着阻力时，止损只能放远、止盈只能放近，
+ * 报出来就是盈亏比 0.27 这种「结构不支持」，而结构本来没那么差，差的是入场位置。
+ * 同一段结构改成回踩支撑上沿，止损从 1.4 ATR 缩到 0.8 ATR、止盈不变，盈亏比翻好几倍。
+ *
+ * 定价顺序（做多，空头镜像）：
+ *   1. 现价下方最近一条够强的支撑 → 挂在它的上沿（碰到就成交，不用等正好打到位）；
+ *   2. 没有能等的位、但结构是区间 → 挂区间中位（区间太窄就不算区间）；
+ *   3. 还是没有 → 按 ATR 回撤让一点，并写明「附近没有能等的结构位」。
+ * 勾不到的结构位（离现价超过 maxEntryAtr、或者已经跑到现价另一边）一律不用 ——
+ * 挂在那儿今天大概等不到，那种方案等于没有。
  */
 export function planBracket(
   set: LevelSet,
@@ -368,96 +387,142 @@ export function planBracket(
   opts: {
     minStrength?: number; minRR?: number; atrBuffer?: number;
     atrStop?: number; atrTarget?: number; minStopAtr?: number;
+    /** 限价回踩（默认）还是按现价算 */
+    entryMode?: 'limit' | 'market';
+    /** 结构位超过这么多 ATR 就不等它了 */
+    maxEntryAtr?: number;
+    /** 没有结构位时按几倍 ATR 回撤入场 */
+    atrEntry?: number;
+    /**
+     * 入场价离现价超过这个百分比就不要了，退回按现价进。
+     * 交易所对限价单有偏离上限（每个合约至少 5%，见 routes 里的 PRICE_DEVIATE），
+     * 挂太远不是「等回踩」，是下单直接被拒。
+     */
+    maxEntryPct?: number;
   } = {},
 ): Bracket | null {
   const {
     minStrength = 35, minRR = 1.5, atrBuffer = 0.3, atrStop = 1.5, atrTarget = 2.5, minStopAtr = 0.8,
+    entryMode = 'limit', maxEntryAtr = 1.5, atrEntry = 0.6, maxEntryPct = 3,
   } = opts;
   const { last, atr: a } = set;
   if (!last || !a) return null;
 
+  const long = direction === 'long';
   const buffer = Math.max(atrBuffer * a, last * 0.0005);
   // 止损最窄 0.8 个 ATR：支撑正好贴在入场价下方时，按位推出来的止损只有 0.1%，
   // 一个正常的抖动就打掉了，还顺手把盈亏比算成 10 倍这种假数字。
   const minRisk = minStopAtr * a;
-  const strong = set.levels.filter((l) => l.strength >= minStrength);
   // 止损只需要「可信的防护」，止盈必须是「真实的障碍」，所以两者的强度门槛不同。
   const weak = Math.min(minStrength, Math.max(0, minStrength * 0.6));
   // 止损最远放 4%：再远就不是日内单了，宁可承认这笔不值得做
   const maxStopPct = 4;
+  /** 挂单价贴在位的哪一侧：多单挂支撑上沿，空单挂阻力下沿 */
+  const pad = 0.15 * a;
+  /** 偏离小于这个就当市价：挂在那个位置等于立刻成交，别装成回踩 */
+  const negligible = 0.15 * a;
+  /** 这个价是不是真在现价的「这一侧」——回踩才有意义 */
+  const behind = (price: number) => (long ? price < last - negligible : price > last + negligible);
 
-  /** 找最近的一侧位，强度过线且距离不超过 maxStopPct */
+  // ---------- 入场价 ----------
+  let entry = last;
+  let entryKind: EntryKind = 'market';
+  let entrySource = '按现价进（入场就是最新价）';
+
+  if (entryMode === 'limit') {
+    const level = set.levels
+      .filter((l) => l.strength >= minStrength)
+      .filter((l) => (long ? l.price < last : l.price > last))
+      .filter((l) => Math.abs(l.price - last) / a <= maxEntryAtr)
+      .sort((x, y) => (long ? y.price - x.price : x.price - y.price))[0] ?? null;
+    const want = level ? (long ? level.price + pad : level.price - pad) : 0;
+    if (level && behind(want)) {
+      entry = want;
+      entryKind = 'level';
+      entrySource = (long ? '回踩支撑 ' : '反抽阻力 ') + fmt(level.price)
+        + '（强度 ' + Math.round(level.strength) + '）的' + (long ? '上沿' : '下沿');
+    }
+  }
+
+  if (entryKind === 'market' && entryMode === 'limit') {
+    const hi = set.rangeHigh;
+    const lo = set.rangeLow;
+    // 区间不到 2 ATR 就不是「区间」，中位没有意义
+    if (hi > lo && hi - lo >= 2 * a) {
+      const mid = (hi + lo) / 2;
+      if (behind(mid)) {
+        entry = mid;
+        entryKind = 'range';
+        entrySource = '区间中位 ' + fmt(mid) + '（区间 ' + fmt(lo) + ' - ' + fmt(hi) + '）';
+      }
+    }
+  }
+
+  if (entryKind === 'market' && entryMode === 'limit' && atrEntry > 0) {
+    const want = long ? last - atrEntry * a : last + atrEntry * a;
+    if (behind(want)) {
+      entry = want;
+      entryKind = 'atr';
+      entrySource = 'ATR × ' + atrEntry + ' 回撤（附近没有能等的结构位）';
+    }
+  }
+
+  // 挂得太远会被交易所的偏离上限拒掉，这里留出余量，退回按现价进
+  if (entryKind !== 'market' && (Math.abs(entry - last) / last) * 100 > maxEntryPct) {
+    entry = last;
+    entryKind = 'market';
+    entrySource = '按现价进（够得着的结构位都超出挂单距离上限）';
+  }
+
+  // ---------- 止损 / 止盈：一律相对入场价 ----------
+  /** 找最近的一侧位，强度过线且距离入场价不超过 maxStopPct */
   const nearest = (side: 'below' | 'above', threshold: number): Level | null => {
     const pool = set.levels
-      .filter((l) => (side === 'below' ? l.price < last : l.price > last))
+      .filter((l) => (side === 'below' ? l.price < entry : l.price > entry))
       .filter((l) => l.strength >= threshold)
-      .filter((l) => (Math.abs(l.price - last) / last) * 100 <= maxStopPct)
+      .filter((l) => (Math.abs(l.price - entry) / entry) * 100 <= maxStopPct)
       .sort((x, y) => (side === 'below' ? y.price - x.price : x.price - y.price));
     return pool[0] ?? null;
   };
 
-  if (direction === 'long') {
-    // 下方没有任何像样的支撑时，止损只能退回 ATR —— 会如实写进 stopSource，不冒充结构位
-    const stopLevel = nearest('below', weak);
-    let stop = stopLevel ? stopLevel.price - buffer : last - atrStop * a;
-    let stopSource = stopLevel
-      ? `支撑 ${fmt(stopLevel.price)}（强度 ${Math.round(stopLevel.strength)}）`
-      : `ATR × ${atrStop}（下方没有像样的支撑）`;
-    if (last - stop < minRisk) {
-      stop = last - minRisk;
-      if (stopLevel) stopSource += `，离入场不足 ${minStopAtr} ATR，止损已放宽`;
-    }
-    const risk = last - stop;
-    if (risk <= 0) return null;
-
-    // 目标取上方最近的强阻力。不为了凑盈亏比去挑更远的那条：
-    // 更远的阻力前面还挡着一条，实际走不到，那样报出来的盈亏比是假的。
-    const targetLevel = nearest('above', minStrength);
-    const target = targetLevel ? targetLevel.price : last + atrTarget * a;
-
-    return {
-      direction,
-      entry: last,
-      stop,
-      target,
-      riskReward: Math.round(((target - last) / risk) * 100) / 100,
-      stopSource,
-      targetSource: targetLevel ? `阻力 ${fmt(targetLevel.price)}（强度 ${Math.round(targetLevel.strength)}）` : `ATR × ${atrTarget}（上方没有够强的阻力）`,
-      stopDistancePct: Math.round((risk / last) * 10000) / 100,
-      targetDistancePct: Math.round(((target - last) / last) * 10000) / 100,
-      riskPct: Math.round((risk / last) * 10000) / 100,
-      acceptable: (target - last) / risk >= minRR,
-      minRR,
-    };
-  }
-
-  const stopLevel = nearest('above', weak);
-  let stop = stopLevel ? stopLevel.price + buffer : last + atrStop * a;
+  const stopLevel = nearest(long ? 'below' : 'above', weak);
+  let stop = stopLevel
+    ? (long ? stopLevel.price - buffer : stopLevel.price + buffer)
+    : (long ? entry - atrStop * a : entry + atrStop * a);
   let stopSource = stopLevel
-    ? `阻力 ${fmt(stopLevel.price)}（强度 ${Math.round(stopLevel.strength)}）`
-    : `ATR × ${atrStop}（上方没有像样的阻力）`;
-  if (stop - last < minRisk) {
-    stop = last + minRisk;
-    if (stopLevel) stopSource += `，离入场不足 ${minStopAtr} ATR，止损已放宽`;
+    ? (long ? '支撑 ' : '阻力 ') + fmt(stopLevel.price) + '（强度 ' + Math.round(stopLevel.strength) + '）'
+    : 'ATR × ' + atrStop + '（' + (long ? '下方没有像样的支撑' : '上方没有像样的阻力') + '）';
+  if (Math.abs(entry - stop) < minRisk) {
+    stop = long ? entry - minRisk : entry + minRisk;
+    if (stopLevel) stopSource += '，离入场不足 ' + minStopAtr + ' ATR，止损已放宽';
   }
-  const risk = stop - last;
+  const risk = Math.abs(entry - stop);
   if (risk <= 0) return null;
 
-  const targetLevel = nearest('below', minStrength);
-  const target = targetLevel ? targetLevel.price : last - atrTarget * a;
+  // 目标取那一侧最近的强位。不为了凑盈亏比去挑更远的那条：
+  // 更远的位前面还挡着一条，实际走不到，那样报出来的盈亏比是假的。
+  const targetLevel = nearest(long ? 'above' : 'below', minStrength);
+  const target = targetLevel ? targetLevel.price : (long ? entry + atrTarget * a : entry - atrTarget * a);
+  const reward = Math.abs(target - entry);
 
   return {
     direction,
-    entry: last,
+    entry,
+    entryKind,
+    entrySource,
+    entryDistancePct: Math.round(((entry - last) / last) * 10000) / 100,
+    entryDistanceAtr: Math.round((Math.abs(entry - last) / a) * 100) / 100,
     stop,
     target,
-    riskReward: Math.round(((last - target) / risk) * 100) / 100,
+    riskReward: Math.round((reward / risk) * 100) / 100,
     stopSource,
-    targetSource: targetLevel ? `支撑 ${fmt(targetLevel.price)}（强度 ${Math.round(targetLevel.strength)}）` : `ATR × ${atrTarget}（下方没有够强的支撑）`,
-    stopDistancePct: Math.round((risk / last) * 10000) / 100,
-    targetDistancePct: Math.round(((last - target) / last) * 10000) / 100,
-    riskPct: Math.round((risk / last) * 10000) / 100,
-    acceptable: (last - target) / risk >= minRR,
+    targetSource: targetLevel
+      ? (long ? '阻力 ' : '支撑 ') + fmt(targetLevel.price) + '（强度 ' + Math.round(targetLevel.strength) + '）'
+      : 'ATR × ' + atrTarget + '（' + (long ? '上方没有够强的阻力' : '下方没有够强的支撑') + '）',
+    stopDistancePct: Math.round((risk / entry) * 10000) / 100,
+    targetDistancePct: Math.round((reward / entry) * 10000) / 100,
+    riskPct: Math.round((risk / entry) * 10000) / 100,
+    acceptable: reward / risk >= minRR,
     minRR,
   };
 }

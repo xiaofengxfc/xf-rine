@@ -116,9 +116,22 @@ export interface Structure {
   note: string;
 }
 
+/**
+ * 入场价怎么来的。market = 就是现价；level = 回踩结构位；range = 区间中位；
+ * atr = 附近没有能等的位，按波动率让一点。
+ */
+export type EntryKind = 'market' | 'level' | 'range' | 'atr';
+
 export interface Bracket {
   direction: 'long' | 'short';
   entry: number;
+  entryKind: EntryKind;
+  /** 入场价怎么定出来的，一句话，带价位和强度 */
+  entrySource: string;
+  /** 入场价相对现价的偏离（%，带符号）。负数＝要等价格回落才成交 */
+  entryDistancePct: number;
+  /** 同一个偏离折算成 ATR 倍数 */
+  entryDistanceAtr: number;
   stop: number;
   target: number;
   riskReward: number;
@@ -146,6 +159,8 @@ export interface LevelsResponse {
   patterns: Pattern[];
   /** 结构状态。老服务端不返回这个字段，读的时候兜一下 */
   structure?: Structure;
+  /** 这一份方案是按限价回踩算的还是按现价算的 */
+  entryMode?: 'limit' | 'market';
 }
 
 export interface Position {

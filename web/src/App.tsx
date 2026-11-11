@@ -131,7 +131,19 @@ export default function App() {
   const [side, setSide] = useState<'long' | 'short'>(prefs0.side);
   const [riskPct, setRiskPct] = useState(prefs0.riskPct);
   /** 限价单带止盈止损下的单：等它成交、持仓出现，再把保护补上 */
-  const [protectQueue, setProtectQueue] = useState<{ id: number; contract: string; direction: 'long' | 'short'; stop: number; target: number; at: number }[]>([]);
+  const [protectQueue, setProtectQueue] = useState<{
+    id: number;
+    contract: string;
+    direction: 'long' | 'short';
+    stop: number;
+    target: number;
+    /** 下单时间 */
+    at: number;
+    /** 入场委托号。回踩单能挂几个小时，靠它判断入场单还在不在 */
+    orderId?: string;
+    /** 第一次发现委托不见了的时间，用来留宽限 */
+    missingSince?: number;
+  }[]>([]);
   const protectSeq = useRef(0);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -397,7 +409,7 @@ export default function App() {
   }, []);
 
 
-  const queueProtect = useCallback((p: { contract: string; direction: 'long' | 'short'; stop: number; target: number }) => {
+  const queueProtect = useCallback((p: { contract: string; direction: 'long' | 'short'; stop: number; target: number; orderId: string }) => {
     setProtectQueue((list) => [...list, { ...p, id: ++protectSeq.current, at: Date.now() }]);
   }, []);
 
@@ -516,22 +528,64 @@ export default function App() {
     return () => window.clearInterval(t);
   }, []);
 
-  // 限价单成交之后才挂得上保护。持仓一出现就补挂一次，挂完或者等太久就把这条丢掉。
+  /**
+   * 限价单成交之后才挂得上保护。持仓一出现就补挂一次。
+   *
+   * 过期规则原来是写死的 30 分钟，那在「回踩挂单」下是错的：入场价挂在支撑上沿，
+   * 等两三个小时才成交很正常，队列早被丢掉，成交那一刻没人补挂 —— 看着有保护，其实是裸仓。
+   * 所以改成跟着委托走：委托还在就一直等，持仓出现就挂，委托消失（撤了 / 过期了）才收尾。
+   */
   useEffect(() => {
     if (!armed || !token || protectQueue.length === 0) return;
+    const now = Date.now();
+    /** 委托刚消失、持仓还没刷出来的那一下，留两分钟再看一眼 */
+    const GRACE = 2 * 60_000;
+    /** 兜底：一条记录最多活 24 小时 */
+    const MAX_AGE = 24 * 3600_000;
+    const keep: typeof protectQueue = [];
+    const fire: typeof protectQueue = [];
+    let changed = false;
     for (const q of protectQueue) {
-      const open = positions.some((p) => p.contract === q.contract && p.direction === q.direction && p.size > 0);
-      const stale = Date.now() - q.at > 30 * 60_000;
-      if (!open && !stale) continue;
-      setProtectQueue((list) => list.filter((x) => x.id !== q.id));
-      if (!open) continue;
+      const pos = positions.find((p) => p.contract === q.contract && p.direction === q.direction && p.size > 0) ?? null;
+      if (pos) {
+        changed = true;
+        // 方案是按挂单价算的。真成交价离它太远时，这套止损可能已经站到仓位的另一边 ——
+        // 那样的触发单一挂上就成交，等于市价平仓。宁可先不挂，说清楚让人重算。
+        const wrong = q.stop > 0 && (q.direction === 'long' ? q.stop >= pos.entryPrice : q.stop <= pos.entryPrice);
+        if (wrong) {
+          push(
+            'err',
+            '这套止损已经站错边了，没有补挂',
+            q.contract + ' 成交价越过了方案止损。用持仓卡里的「套用方案」按真实成本重算一遍。',
+          );
+          continue;
+        }
+        fire.push(q);
+        continue;
+      }
+      if (now - q.at > MAX_AGE) { changed = true; continue; }
+      // 没有委托号（老记录）就退回原来的规则：半小时内还等，之后作废
+      if (!q.orderId) {
+        if (now - q.at > 30 * 60_000) { changed = true; continue; }
+        keep.push(q);
+        continue;
+      }
+      if (orders.some((o) => o.id === q.orderId)) { keep.push(q); continue; }
+      // 委托不在了、也还没见到持仓：先记一笔，给持仓刷新留宽限
+      if (!q.missingSince) { keep.push({ ...q, missingSince: now }); changed = true; continue; }
+      if (now - q.missingSince < GRACE) { keep.push(q); continue; }
+      // 撤单或者过期了，这条不用再补
+      changed = true;
+    }
+    if (changed) setProtectQueue(keep);
+    for (const q of fire) {
       // 这一边已经有保护单了就别覆盖用户后来手动挂的那套
       if (priceOrders.some((o) => o.contract === q.contract && o.direction === q.direction)) continue;
       void jsend('POST', '/api/bracket', { contract: q.contract, direction: q.direction, stop: q.stop, target: q.target }, token)
         .then(() => { push('ok', '保护单已补挂', `${q.contract} · ${q.direction === 'long' ? '多' : '空'}`); void loadPrivate(); })
         .catch((e) => push('err', '补挂保护失败', (e as Error).message));
     }
-  }, [armed, token, positions, priceOrders, protectQueue, push, loadPrivate]);
+  }, [armed, token, positions, priceOrders, orders, protectQueue, push, loadPrivate]);
 
   useEffect(() => {
     void loadNews(contract);

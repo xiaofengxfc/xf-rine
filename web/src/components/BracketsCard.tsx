@@ -1,4 +1,4 @@
-import type { Bracket } from '../lib/api.ts';
+import type { Bracket, EntryKind } from '../lib/api.ts';
 import { fmtPrice, fmtPct, fmtUsd } from '../lib/format.ts';
 import { riskSizing } from '../lib/sizing.ts';
 
@@ -21,6 +21,9 @@ interface Props {
   leverageMax: number;
   onUse: (b: Bracket) => void;
 }
+
+/** 入场价的来历，一行字。用词跟着 entryKind 走，不统一写成「入场」把人绕晕 */
+const kindText = (k: EntryKind) => (k === 'level' ? '回踩' : k === 'range' ? '区间中位' : k === 'atr' ? 'ATR 回撤' : '现价');
 
 export default function BracketsCard({
   long, short, priceRound, multiplier, equity, available, feeRate = 0, riskPercent, leverageMax, onUse,
@@ -69,7 +72,15 @@ export default function BracketsCard({
                   </div>
                 )}
                 <dl className="br-rows">
-                  <dt>入场</dt><dd>{fmtPrice(b.entry, priceRound)}</dd>
+                  <dt>{kindText(b.entryKind)}</dt>
+                  <dd>
+                    {fmtPrice(b.entry, priceRound)}
+                    {b.entryKind !== 'market' && (
+                      <span className="dim">
+                        {' '}距现价 {fmtPct(b.entryDistancePct, 2)}（{b.entryDistanceAtr.toFixed(2)} ATR）
+                      </span>
+                    )}
+                  </dd>
                   <dt>止损</dt><dd style={{ color: 'var(--down)' }}>{fmtPrice(b.stop, priceRound)} <span className="dim">({fmtPct(-b.stopDistancePct, 2)})</span></dd>
                   <dt>止盈</dt><dd style={{ color: 'var(--up)' }}>{fmtPrice(b.target, priceRound)} <span className="dim">({fmtPct(b.targetDistancePct, 2)})</span></dd>
                   <dt>可担亏损</dt><dd>{fmtUsd(riskUsd)} USDT</dd>
@@ -91,6 +102,7 @@ export default function BracketsCard({
                   </div>
                 )}
                 <div className="br-src">
+                  <div>入场 · {b.entrySource}</div>
                   <div>止损 · {b.stopSource}</div>
                   <div>止盈 · {b.targetSource}</div>
                 </div>

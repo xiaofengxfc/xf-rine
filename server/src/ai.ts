@@ -146,7 +146,12 @@ function userPrompt(s: AiSnapshot): string {
   const side = (b: Bracket | null) =>
     b
       ? {
+          // 入场价现在多半是「回踩到哪儿才进」的挂单价，不是现价 ——
+          // 不写清楚的话，模型会把它当成已经进场的价来算
           入场: b.entry,
+          入场方式: b.entryKind === 'market' ? '按现价进' : '限价挂着等，价格不回来就不成交',
+          入场依据: b.entrySource,
+          距现价百分比: b.entryDistancePct,
           止损: b.stop,
           止盈: b.target,
           盈亏比: b.riskReward,

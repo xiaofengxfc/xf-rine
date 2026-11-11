@@ -657,16 +657,19 @@ router.get('/levels', wrap(async (req, res) => {
   const weighted = applyConfluence(set.levels, coarseSet.levels, set.atr, live);
   const setForPlan = { ...set, levels: weighted, last: live };
   const structure = analyzeStructure(closed, { swing: 3 });
+  // 入场默认按限价回踩算；entry=market 只是留着对比和排查用的
+  const entryMode = String(req.query.entry ?? '') === 'market' ? 'market' as const : 'limit' as const;
   res.json({
     contract,
     interval,
     barsUsed: closed.length,
     ...setForPlan,
     structure,
+    entryMode,
     patterns: detectPatterns(closed, { window: 30, limit: 6 }),
     brackets: {
-      long: planBracket(setForPlan, 'long', { minRR }),
-      short: planBracket(setForPlan, 'short', { minRR }),
+      long: planBracket(setForPlan, 'long', { minRR, entryMode }),
+      short: planBracket(setForPlan, 'short', { minRR, entryMode }),
     },
   });
 }));

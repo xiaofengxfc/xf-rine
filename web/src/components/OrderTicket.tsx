@@ -18,8 +18,14 @@ interface Props {
   onRiskPctChange: (v: number) => void;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
   onRefresh: () => void;
-  /** 限价单还没成交、保护单挂不上时，把要挂的价交给页面记着 */
-  onQueueProtect: (p: { contract: string; direction: 'long' | 'short'; stop: number; target: number }) => void;
+  /**
+   * 限价单还没成交、保护单挂不上时，把要挂的价交给页面记着。
+   * 带上委托号：回踩单可能挂上几个小时，页面要靠它判断「入场单还在不在」，
+   * 不能再用固定时长判过期（30 分钟就丢，成交之后保护不补挂，等于裸仓开进去）。
+   */
+  onQueueProtect: (p: {
+    contract: string; direction: 'long' | 'short'; stop: number; target: number; orderId: string;
+  }) => void;
 }
 
 export default function OrderTicket({
@@ -65,6 +71,9 @@ export default function OrderTicket({
     setLeverage((v) => Math.min(Math.max(1, v), levMax));
   }, [levMax]);
 
+  /** 吸附到最小变动单位。方案入场价是算出来的，不是交易所的 tick */
+  const snapPrice = (p: number) => (priceRound > 0 ? Number((Math.round(p / priceRound) * priceRound).toFixed(10)) : p);
+
   /**
    * 从「自动止盈止损」卡片套用过来：方向、保护方式，还有入场价。
    *
@@ -81,7 +90,9 @@ export default function OrderTicket({
     setPending(false);
     if (applied.bracket.entry > 0) {
       setPriceMode('limit');
-      setLimitStr(String(applied.bracket.entry));
+      // 方案入场价是「支撑价 + 一点垫子」算出来的，不一定落在最小变动单位上；
+      // 下单接口会按 PRICE_ROUND 拒掉（不是 tick 的整数倍），这里先吸附
+      setLimitStr(String(snapPrice(applied.bracket.entry)));
       // 这个价是点「套用」指定的，别让「限价框自动填现价」那一步再盖一次
       autoLimitRef.current = true;
     }
@@ -99,7 +110,6 @@ export default function OrderTicket({
 
   // 限价框空着的时候，提交上去的其实是市价单（price 0），摘要里全是「—」，
   // 按风险也会按一个不会真正发出去的价算。所以第一次切到限价就把现价填进去。
-  const snapPrice = (p: number) => (priceRound > 0 ? Number((Math.round(p / priceRound) * priceRound).toFixed(10)) : p);
   useEffect(() => {
     if (autoLimitRef.current || priceMode !== 'limit' || !(last > 0)) return;
     autoLimitRef.current = true;
@@ -135,7 +145,12 @@ export default function OrderTicket({
   const mark = contract?.markPrice ?? 0;
   const lowRef = mark > 0 && priceUsed > 0 ? Math.min(priceUsed, mark) : priceUsed;
   const highRef = mark > 0 && priceUsed > 0 ? Math.max(priceUsed, mark) : priceUsed;
-  const planWrong = planWrongSide(side, planBracket, priceUsed, mark);
+  // 触发单是成交之后才挂的，那一刻现价≈成交价。所以这里拿「这一单会成交在哪个价」判，
+  // 而不是拿此刻的现价：回踩挂单时现价离入场还远得很，用现价判会把合法的止盈
+  // 误判成「现价已跑过」然后悄悄不挂（回踩进场的止盈常常正好夹在入场价和现价之间）。
+  // 标记价那道保险只在按市价进的时候才需要 —— 那时成交价就是现价。
+  const fillAtMarket = !(priceUsed > 0) || Math.abs(priceUsed - last) / (last || 1) < 0.0005;
+  const planWrong = planWrongSide(side, planBracket, priceUsed, fillAtMarket ? mark : 0);
   const effStop = protect === 'plan' && planWrong.stop ? 0 : wanted.stop;
   const effTarget = protect === 'plan' && planWrong.target ? 0 : wanted.target;
   const wantProtect = effStop > 0 || effTarget > 0;
@@ -189,7 +204,7 @@ export default function OrderTicket({
   })();
 
   // 摘要下方那一小截：只列这一单真会挂上去的保护
-  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed, mark);
+  const protectRows = protectionRows(protect, side, planBracket, stopNum, targetNum, priceUsed, fillAtMarket ? mark : 0);
 
   /** 止损很窄时每张只亏零点几 USDT，两位小数会全变成 0.00，按量级补位数 */
   const money = (v: number) => fmtUsd(v, v !== 0 && Math.abs(v) < 1 ? 4 : 2);
@@ -262,7 +277,9 @@ export default function OrderTicket({
       if (b?.status === 'failed') onToast('err', '保护单没挂上', b.error);
       // 一边挂上、一边没挂上是最危险的情况：看着有保护，实际少了一半
       if (b?.status === 'partial') onToast('err', '保护只挂上了一边', b.errors.join(' · '));
-      if (b?.status === 'pending') onQueueProtect({ contract: contract.name, direction: side, stop: effStop, target: effTarget });
+      if (b?.status === 'pending') {
+        onQueueProtect({ contract: contract.name, direction: side, stop: effStop, target: effTarget, orderId: r.order.id });
+      }
       setPending(false);
       setSizeStr('');
       onRefresh();
@@ -399,9 +416,13 @@ export default function OrderTicket({
           planBracket ? (
             <>
               <div className="edit-note" style={{ marginBottom: 6 }}>
+                {planBracket.entryKind === 'market'
+                  ? '入场就是现价。'
+                  : '入场挂着等 ' + fmtPrice(planBracket.entry, priceRound)
+                    + '（距现价 ' + fmtPct(planBracket.entryDistancePct, 2) + '，'
+                    + planBracket.entryDistanceAtr.toFixed(2) + ' ATR），价格不回到那儿就没有这笔单。'}
                 成交后按下面的方案价挂，盈亏比 {planBracket.riskReward.toFixed(2)}。
                 限价单还没成交就先记着，等它成交页面自动补挂。
-                方案入场价 {fmtPrice(planBracket.entry, priceRound)}，点「套用到下单面板」会把它填进上面的限价框。
               </div>
               {planWrong.stop && (
                 <div className="edit-note" style={{ marginBottom: 6, color: 'var(--warn)' }}>
