@@ -388,6 +388,12 @@ function fetchOnce(contract: string, interval: string, limit: number, step: numb
   return p;
 }
 
+interface CandlePage {
+  bars: Bar[];
+  /** 交易所那边已经没有更早的数据了（它只保留最近一万个点） */
+  exhausted: boolean;
+}
+
 async function loadCandles(
   contract: string,
   interval: string,
@@ -396,17 +402,23 @@ async function loadCandles(
   /** 只要早于这个时间的 K 线（秒）。不传就是取最新的 limit 根。 */
   before?: number,
   tailTtl = NEWEST_TTL,
-): Promise<Bar[]> {
+): Promise<CandlePage> {
   const series = seriesFor(`${contract}:${interval}`);
   const step = STEP_SEC[interval] ?? 60;
 
   if (before) {
-    const cached = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
-    if (!fresh && cached.length >= limit) return cached;
-    const oldest = series.bars.length > 0 ? series.bars[0]!.time : Infinity;
-    if (!series.exhausted) {
+    /**
+     * 要的是「满满一页」。交易所偶尔少给几根就接着往下补 —— 短页回给前端，
+     * 前端会当成到头了，从此不再加载，那才是真正的看着缺数据。
+     */
+    let target = before;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const cached = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
+      if (!fresh && cached.length >= limit) return { bars: cached, exhausted: series.exhausted };
+      if (series.exhausted) break;
+      const oldest = series.bars.length > 0 ? series.bars[0]!.time : Infinity;
       try {
-        mergeInto(series, await fetchOnce(contract, interval, limit, step, before));
+        mergeInto(series, await fetchOnce(contract, interval, limit, step, target));
       } catch (e) {
         if (!(e instanceof GateError)) throw e;
         /**
@@ -415,17 +427,25 @@ async function loadCandles(
          * 只有「要的比已经知道的最老那根还老」才算到头 —— 中途一次失败不能把
          * 这条时间轴永久锁死，否则换个位置回来还是空的。
          */
-        if (/too long ago|INVALID_PARAM_VALUE/i.test(e.message) && before <= oldest) series.exhausted = true;
+        if (/too long ago|INVALID_PARAM_VALUE/i.test(e.message) && target <= oldest) series.exhausted = true;
+        break;
       }
+      target = series.bars.length > 0 ? series.bars[0]!.time : target;
     }
-    return contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
+    const run = contiguousRun(series.bars, lowerBoundTime(series.bars, before), limit, step);
+    return { bars: run, exhausted: series.exhausted };
   }
 
   const tailFresh = series.newestAt > 0 && Date.now() - series.newestAt < tailTtl;
-  if (!fresh && tailFresh && series.bars.length >= limit) return series.bars.slice(series.bars.length - limit);
+  if (!fresh && tailFresh && series.bars.length >= limit) {
+    return { bars: series.bars.slice(series.bars.length - limit), exhausted: series.exhausted };
+  }
   mergeInto(series, await fetchOnce(contract, interval, limit, step));
   series.newestAt = Date.now();
-  return series.bars.slice(Math.max(0, series.bars.length - limit));
+  return {
+    bars: series.bars.slice(Math.max(0, series.bars.length - limit)),
+    exhausted: series.exhausted,
+  };
 }
 
 router.get('/candles', wrap(async (req, res) => {
@@ -434,11 +454,17 @@ router.get('/candles', wrap(async (req, res) => {
   const limit = Math.min(1000, Math.max(50, Number(req.query.limit ?? 500)));
   const beforeRaw = Number(req.query.before);
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
-  const bars = await loadCandles(contract, interval, limit, false, before);
+  const page = await loadCandles(contract, interval, limit, false, before);
   // 这一页给出去之后，顺手把再往前的一页取回来：下一步多半就是往那边拖
-  if (bars.length > 0) warmOlder(contract, interval, limit, bars[0]!.time);
-  // 返不满一页就说明到头了，前端不用再往前要
-  res.json({ contract, interval, bars, hasMore: bars.length >= limit });
+  if (page.bars.length > 0 && !page.exhausted) warmOlder(contract, interval, limit, page.bars[0]!.time);
+  // exhausted 是「交易所真没了」，前端只认它；hasMore 留给老前端兜底
+  res.json({
+    contract,
+    interval,
+    bars: page.bars,
+    hasMore: page.bars.length >= limit,
+    exhausted: page.exhausted,
+  });
 }));
 
 router.get('/levels', wrap(async (req, res) => {
@@ -446,7 +472,7 @@ router.get('/levels', wrap(async (req, res) => {
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   const limit = Math.min(1000, Math.max(120, Number(req.query.limit ?? 500)));
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
-  const bars = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
+  const { bars } = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
   // 丢掉最后一根未走完的 K 线，避免用半根 K 线的影线判位
   const closed = bars.slice(0, -1);
   const set = detectLevels(closed, {
@@ -488,7 +514,7 @@ const roundBracket = (b: Bracket | null): Bracket | null =>
   b ? { ...b, entry: px(b.entry), stop: px(b.stop), target: px(b.target), riskReward: Number(b.riskReward.toFixed(2)) } : null;
 
 async function buildSnapshot(contract: string, interval: string): Promise<AiSnapshot> {
-  const bars = await loadCandles(contract, interval, 300);
+  const { bars } = await loadCandles(contract, interval, 300);
   const closed = bars.slice(0, -1);
   const set = detectLevels(closed, {});
   const live = bars[bars.length - 1]?.close ?? set.last;
@@ -1700,7 +1726,7 @@ router.get('/level-stats', wrap(async (req, res) => {
   const price = Number(req.query.price);
   const horizon = Math.min(200, Math.max(10, Number(req.query.horizon ?? 60)));
   if (!Number.isFinite(price)) throw new GateError(400, 'BAD_INPUT', '缺少 price');
-  const bars = (await loadCandles(contract, interval, 1000)).slice(0, -1);
+  const bars = (await loadCandles(contract, interval, 1000)).bars.slice(0, -1);
   const atrV = detectLevels(bars).atr;
   const tol = Math.max(0.45 * atrV, price * 0.0015);
 

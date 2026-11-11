@@ -53,11 +53,12 @@ function buildMarkers(list: Pattern[], bars: Bar[]): SeriesMarker<Time>[] {
 }
 
 /**
- * 离最左边还有多少根就开始要历史。
- * 交易所一页要一秒到四秒，贴到边缘再要，人就干等着；留出两屏多的余量，
- * 通常还没拖到边，那一页已经落地了。
+ * 视口左边少于这么多根就开始要历史。
+ *
+ * 和 App 里的 BUFFER_BARS 对齐：那边补到这么多就停，这边低于这么多就催，
+ * 于是拖动时一直有货可看，一页 1000 根，通常还没拖到边就已经落地了。
  */
-const PREFETCH_BARS = 400;
+const PREFETCH_BARS = 3000;
 
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
 
@@ -96,15 +97,17 @@ interface Props {
   stale?: { err: string; ageMs: number } | null;
   resetKey: string;
   loading: boolean;
-  /** 拖到最左边时向上再要一页更早的 K 线 */
-  onNeedOlder?: () => void;
+  /** 视口左边快没 K 线了，要补。带上当前左边界（逻辑序号），App 据此决定补几页 */
+  onNeedOlder?: (from: number) => void;
+  /** 交易所能给的历史到头了。图上要说一声，不然拖到头看着像卡死 */
+  historyEnd?: boolean;
   onIntervalChange: (i: string) => void;
   onManualLevels: (prices: number[]) => void;
 }
 
 export default function ChartPane({
   contract, interval, bars, levels, patterns, bracket, positions, orders, priceOrders, multiplier, markPrice, priceRound,
-  stale, resetKey, loading, onNeedOlder, onIntervalChange, onManualLevels,
+  stale, resetKey, loading, onNeedOlder, historyEnd, onIntervalChange, onManualLevels,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -119,7 +122,7 @@ export default function ChartPane({
   /** 补历史这件事要在 K 线落地之后再催一次，用 ref 拿最新的回调 */
   const needOlderRef = useRef(onNeedOlder);
   needOlderRef.current = onNeedOlder;
-  /** 正在把视口从负区间拉回来，防止 setVisibleLogicalRange 把回调再触发一遍 */
+  /** 这一帧已经排了一次「把视口拉回数据边缘」，别排队排成一串 */
   const clampingRef = useRef(false);
   const lastKeyRef = useRef<string>('');
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
@@ -395,7 +398,7 @@ export default function ChartPane({
          * 而不是停下来等一页、再拖、再等一页。
          */
         const after = chart.timeScale().getVisibleLogicalRange();
-        if (after && after.from < PREFETCH_BARS) needOlderRef.current?.();
+        if (after && after.from < PREFETCH_BARS) needOlderRef.current?.(after.from);
         return;
       }
 
@@ -471,19 +474,23 @@ export default function ChartPane({
        * 别让人拖到数据左边去。
        *
        * 逻辑区间允许负数，拖过头左边就是一整片空白 —— 数据其实一根没少，
-       * 但看着就是「K 线缺了一大段」。挡住之后，翻到最老那根就停住，
-       * 补页到位再接着往左走。
+       * 但看着就是「K 线缺了一大段」，而且拖到那里也不会再有新页进来。
+       *
+       * 拖动中的在同一帧里改区间会被图库忽略，得挪到下一帧再拉回来；
+       * 拉回来后停一小会儿，让下一批拖动事件重新触发，形成「到边就回弹」。
        */
-      if (r.from < 0 && !clampingRef.current) {
+      // 一帧只拉一次：再密也救不了，反而会和用户的手感打架
+      if ((r.from < -1 || r.to < 8) && !clampingRef.current) {
         clampingRef.current = true;
-        try {
-          ts.setVisibleLogicalRange({ from: 0, to: Math.max(60, r.to - r.from) });
-        } catch { /* 区间不合法就算了，别把拖动卡死 */ }
-        clampingRef.current = false;
+        const span = Math.max(80, r.to - r.from);
+        requestAnimationFrame(() => {
+          clampingRef.current = false;
+          try { ts.setVisibleLogicalRange({ from: 0, to: span }); } catch { /* 区间不合法就算了 */ }
+        });
       }
 
       // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多
-      if (r.from < PREFETCH_BARS) onNeedOlder();
+      if (r.from < PREFETCH_BARS) onNeedOlder(r.from);
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
     return () => {
@@ -732,6 +739,9 @@ export default function ChartPane({
             <span>C {legend.c}</span>
             <span>V {Math.round(legend.v)}</span>
           </div>
+        )}
+        {historyEnd && (
+          <div className="chart-edge">已到交易所能给的最早一根 · 换更大周期看更早</div>
         )}
         {stale && (
           <div className="chart-stale">

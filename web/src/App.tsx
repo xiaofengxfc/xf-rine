@@ -39,6 +39,8 @@ const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null }
 
 /** 往回翻一页要多少根。交易所一次最多给 1000，要满它就是一次往返拿双份 */
 const OLDER_PAGE = 1000;
+/** 视口左边至少要垫这么多根。一页一页补，垫够了就停，下一次拖动接着补 */
+const BUFFER_BARS = 3000;
 /**
  * 内存里最多留多少根。
  * 交易所只留最近一万个点，所以再往前也翻不出新东西了；一万二够接住它给的全部，
@@ -128,6 +130,10 @@ export default function App() {
   /** 历史 K 线：正在拉 / 已经到头，避免拖到边缘时反复请求 */
   const olderBusyRef = useRef(false);
   const noMoreOlderRef = useRef(false);
+  /** 交易所给的历史就这么多，图上要有个说明，不然拖到头像是在卡死 */
+  const [historyEnd, setHistoryEnd] = useState(false);
+  /** 图上看得到的左边界（逻辑序号）。补页补到它离 0 够远就停 */
+  const viewFromRef = useRef(0);
   const marketRef = useRef(market);
   useEffect(() => { marketRef.current = market; }, [market]);
   const newsSeqRef = useRef(0);
@@ -183,31 +189,65 @@ export default function App() {
    * 会被当场挤掉，图上左边那片反而变空，看着就像 K 线缺了一段。
    * 现在到上限就不补了，已经画上去的一根都不动。
    */
-  const loadOlder = useCallback(async () => {
+  const loadOlder = useCallback(async (from?: number) => {
+    if (typeof from === 'number') viewFromRef.current = from;
     if (olderBusyRef.current || noMoreOlderRef.current) return;
-    const cur = marketRef.current;
-    if (!cur.bars.length || cur.key === '') return;
-    if (cur.bars.length >= MAX_BARS) return;
     olderBusyRef.current = true;
     try {
-      const [name, tf] = cur.key.split(':') as [string, string];
-      const before = cur.bars[0]!.time;
-      const r = await jget<{ bars: Bar[] }>(
-        `/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}&before=${before}`,
-      );
-      // 不满一页就说明到头了，前端不用再往前要
-      if (r.bars.length < OLDER_PAGE) noMoreOlderRef.current = true;
-      const latest = marketRef.current;
-      if (latest.key !== cur.key) return;
-      const m = mergeOlder(latest.bars, r.bars, MAX_BARS);
-      if (m.full) noMoreOlderRef.current = true;
-      if (m.bars === latest.bars) return;
-      setMarket((prev) => {
-        if (prev.key !== cur.key) return prev;
-        // 合并是纯函数，重算一遍是为了留住这期间 WebSocket 推来的那根
-        const mm = mergeOlder(prev.bars, r.bars, MAX_BARS);
-        return mm.bars === prev.bars ? prev : { ...prev, bars: mm.bars };
-      });
+      // 这一轮补页期间自己维护一份列表：state 要等渲染才更新，用它算时间会重页
+      let barsNow = marketRef.current.bars;
+      /**
+       * 一次拖到底要连着补，别一页一停。
+       *
+       * 这里每轮都问一句「图左边还差多少」：不够 BUFFER_BARS 就再要一页 1000 根，
+       * 最多连着补 4 页。用户一直拖，就一直在补 —— 反过来垫够了立刻停手，
+       * 不为了「多存点」去骚扰交易所。
+       */
+      for (let page = 0; page < 4; page += 1) {
+        if (noMoreOlderRef.current) return;
+        const cur = marketRef.current;
+        if (!cur.bars.length || cur.key === '') return;
+        if (cur.bars.length >= MAX_BARS) return;
+        if (page > 0 && viewFromRef.current >= BUFFER_BARS) return;
+        const [name, tf] = cur.key.split(':') as [string, string];
+        const before = barsNow[0]!.time;
+        const r = await jget<{ bars: Bar[]; exhausted?: boolean }>(
+          `/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}&before=${before}`,
+        );
+
+        /**
+         * 到头了以服务端说的 exhausted 为准。
+         *
+         * 以前是「不满一页就算到头」—— 交易所偶尔少给几根，这一条就把整条时间轴
+         * 锁死了：从此拖动只会在最左边空转，既不加载也没提示，看着就是 K 线缺了一段。
+         */
+        if (r.exhausted ?? r.bars.length < OLDER_PAGE) {
+          noMoreOlderRef.current = true;
+          setHistoryEnd(true);
+          push('ok', '已经到最早一根了', '交易所能给的历史只到这里：1m 约 7 天，15m 约 100 天。看更早请换更大周期。');
+        }
+        if (marketRef.current.key !== cur.key) return;
+
+        const beforeLen = barsNow.length;
+        const m = mergeOlder(barsNow, r.bars, MAX_BARS);
+        if (m.full) {
+          // 到本地容量上限了：再补就得挤掉已经画上去的，不如停在这里
+          noMoreOlderRef.current = true;
+          setHistoryEnd(true);
+          push('ok', '已经加载到上限了', `手上最多留 ${MAX_BARS} 根 K 线。看更早请换更大周期。`);
+          return;
+        }
+        if (m.bars === barsNow) return;
+        barsNow = m.bars;
+        setMarket((prev) => {
+          if (prev.key !== cur.key) return prev;
+          // 合并是纯函数，重算一遍是为了留住这期间 WebSocket 推来的那根
+          const mm = mergeOlder(prev.bars, r.bars, MAX_BARS);
+          return mm.bars === prev.bars ? prev : { ...prev, bars: mm.bars };
+        });
+        // 新补的这几百根插在视口左边，视野里那批 K 线整体右移，左边界跟着挪
+        viewFromRef.current += Math.max(0, m.bars.length - beforeLen);
+      }
     } catch {
       /* 静默失败，拖回去会再试 */
     } finally {
@@ -243,6 +283,7 @@ export default function App() {
     const key = `${name}:${tf}`;
     const seq = ++marketSeqRef.current;
     noMoreOlderRef.current = false;
+    setHistoryEnd(false);
     setLoading(true);
     try {
       const [c, k, lv] = await Promise.all([
@@ -617,6 +658,7 @@ export default function App() {
             stale={privateStale}
             resetKey={`${contract}:${interval}`}
             loading={loading}
+            historyEnd={historyEnd}
             onNeedOlder={loadOlder}
             onIntervalChange={setInterval}
             onManualLevels={onManualLevels}
