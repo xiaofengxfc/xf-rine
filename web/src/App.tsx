@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend,
   type Account, type AppConfig, type Bar, type Bracket, type ContractInfo,
-  type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Pattern, type Position,
+  type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Pattern, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
 } from './lib/api.ts';
 import { fmtPrice } from './lib/format.ts';
@@ -396,6 +396,7 @@ export default function App() {
     }
   }, []);
 
+
   const queueProtect = useCallback((p: { contract: string; direction: 'long' | 'short'; stop: number; target: number }) => {
     setProtectQueue((list) => [...list, { ...p, id: ++protectSeq.current, at: Date.now() }]);
   }, []);
@@ -418,6 +419,27 @@ export default function App() {
       setPrivateErr((e as Error).message || '刷新失败');
     }
   }, [config?.keys.configured]);
+
+  /**
+   * 图上直接平仓。以前只有持仓卡里有这个动作，手机上要滑到图表下面很远才够得着，
+   * 站在一张亏着的仓前面却按不到平仓。接口和持仓卡用的是同一个，逻辑不另写一份。
+   */
+  const closeFromChart = useCallback(async (name: string, direction: 'long' | 'short') => {
+    if (!token) return;
+    try {
+      const r = await jsend<CloseResult>('POST', '/api/close-position', { contract: name, direction }, token);
+      const cleaned = [
+        r.canceled.orders.length ? '撤掉委托 ' + r.canceled.orders.length + ' 张' : '',
+        r.canceled.triggers.length ? '撤掉触发单 ' + r.canceled.triggers.length + ' 张' : '',
+        ...r.canceled.errors,
+      ].filter(Boolean).join(' · ');
+      push('ok', '市价平仓已提交',
+        name + ' ' + (direction === 'long' ? '多' : '空') + '头' + (cleaned ? ' · ' + cleaned : ' · 没有挂着的委托要撤'));
+      void loadPrivate();
+    } catch (e) {
+      push('err', '平仓失败', (e as Error).message);
+    }
+  }, [token, push, loadPrivate]);
 
   useEffect(() => { void loadConfig(); void loadTickers(); }, [loadConfig, loadTickers]);
   useEffect(() => { void loadMarket(contract, interval); }, [contract, interval, loadMarket]);
@@ -758,6 +780,8 @@ export default function App() {
             onNeedOlder={needOlder}
             onIntervalChange={setInterval}
             onManualLevels={onManualLevels}
+            canClose={armed && Boolean(token)}
+            onClosePosition={(name, dir) => { void closeFromChart(name, dir); }}
           />
           <LevelsStrip
             levels={levels?.levels ?? []}
@@ -765,6 +789,7 @@ export default function App() {
             price={ticker?.last || levels?.last || 0}
             priceRound={priceRound}
             atr={levels?.atr ?? 0}
+            structure={levels?.structure}
           />
         </main>
 
@@ -812,9 +837,7 @@ export default function App() {
             positions={positions}
             orders={orders}
             priceOrders={priceOrders}
-            currentContract={contract}
-            longBracket={levels?.brackets.long ?? null}
-            shortBracket={levels?.brackets.short ?? null}
+            interval={interval}
             priceRound={priceRound}
             rounds={roundMap}
             marks={markMap}

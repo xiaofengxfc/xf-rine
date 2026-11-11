@@ -92,6 +92,28 @@ export interface Level {
   lastTouch: number;
   zoneLow: number;
   zoneHigh: number;
+  /** 1 = 只有当前周期认这条位，2 = 更粗的周期也认（多周期一致） */
+  confluence?: number;
+}
+
+/**
+ * 结构状态（服务端 structure.ts 算的）。
+ * 术语是 BOS / CHoCH 那一套，含义写在服务端的注释里。
+ */
+export interface Structure {
+  trend: 'up' | 'down' | 'range';
+  lastHigh: { price: number; index: number } | null;
+  lastLow: { price: number; index: number } | null;
+  event: {
+    kind: 'BOS' | 'CHoCH';
+    direction: 'up' | 'down';
+    price: number;
+    index: number;
+    time: number;
+  } | null;
+  rangePct: number | null;
+  zone: 'premium' | 'equilibrium' | 'discount' | null;
+  note: string;
 }
 
 export interface Bracket {
@@ -122,6 +144,8 @@ export interface LevelsResponse {
   nearestResistance: Level | null;
   brackets: { long: Bracket | null; short: Bracket | null };
   patterns: Pattern[];
+  /** 结构状态。老服务端不返回这个字段，读的时候兜一下 */
+  structure?: Structure;
 }
 
 export interface Position {
@@ -149,6 +173,63 @@ export interface PriceOrder {
   reduceOnly: boolean;
   /** 整边平仓（isclose），看不出平哪一边 */
   closeAll: boolean;
+  /** 挂单时间，unix 秒 */
+  createTime: number;
+  /** 交易所会在这一刻把它撤掉（unix 秒）。0 = 读不出来或没有过期 */
+  expiresAt: number;
+}
+
+/**
+ * 按持仓成本算的止盈止损（POST /api/position-plan）。
+ * 和开仓前的 Bracket 不是一回事：那份锚在最新价，这份锚在成本上，
+ * 所以它答的是「这笔已经开的单要亏多少」，不是「现在进场止损放哪」。
+ */
+export interface PositionPlan {
+  direction: 'long' | 'short';
+  entry: number;
+  stop: number;
+  target: number;
+  /** 正数 = 从成本算要亏多少；负数 = 止损已在成本上方、锁住了利润 */
+  riskFromEntry: number;
+  rewardFromEntry: number;
+  riskPct: number;
+  rewardPct: number;
+  /** 止损已在成本上方时没有意义，服务端给 null */
+  riskReward: number | null;
+  acceptable: boolean;
+  minRR: number;
+  stopSource: string;
+  targetSource: string;
+  broken: boolean;
+  locksProfit: boolean;
+  tooWide: boolean;
+  mountable: { stop: boolean; target: boolean };
+  notes: string[];
+}
+
+export interface PositionPlanResponse {
+  contract: string;
+  direction: 'long' | 'short';
+  interval: string;
+  barsUsed: number;
+  entry: number;
+  mark: number;
+  last: number;
+  size: number;
+  leverage: number;
+  multiplier: number;
+  structure: Structure;
+  plan: PositionPlan;
+  money: {
+    /** 打到止损平出多少 USDT（负数就是亏损） */
+    atStop: number;
+    atTarget: number;
+    /** 按现价平仓的已盈亏 */
+    atMark: number;
+    riskUsd: number;
+    /** 占账户权益的百分比；权益读不到时是 null */
+    riskOfEquityPct: number | null;
+  };
 }
 
 /** 平仓、反手时连带撤掉的东西 */

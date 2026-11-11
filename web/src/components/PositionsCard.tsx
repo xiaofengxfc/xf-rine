@@ -1,20 +1,21 @@
 import { useEffect, useState } from 'react';
 import {
-  jget, jsend,
-  type Bracket, type CanceledTrades, type CloseResult, type LevelsResponse,
-  type OpenOrder, type Position, type PriceOrder,
+  jsend,
+  type CanceledTrades, type CloseResult, type OpenOrder, type Position,
+  type PositionPlanResponse, type PriceOrder,
 } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtPct, fmtUsd, fmtTime } from '../lib/format.ts';
-import { pnlOf } from '../lib/position.ts';
-import { bracketOf as findBracket, dirLabel, triggerKind, type Dir } from '../lib/protective.ts';
+import { pnlFromCost, pnlOf } from '../lib/position.ts';
+import {
+  bracketOf as findBracket, dirLabel, protectionState, triggerKind, type Dir,
+} from '../lib/protective.ts';
 
 interface Props {
   positions: Position[];
   orders: OpenOrder[];
   priceOrders: PriceOrder[];
-  currentContract: string;
-  longBracket: Bracket | null;
-  shortBracket: Bracket | null;
+  /** 图上正在看的周期。按持仓成本取方案时也用它，和人在图上看到的是一份结构 */
+  interval: string;
   priceRound: number;
   /** 每个合约的最小变动价。这张卡会列出别的合约的仓和委托，价格得按各自的来 */
   rounds?: ReadonlyMap<string, number>;
@@ -36,6 +37,11 @@ interface BracketEdit {
   target: string;
   /** 值是从自动方案填进来的（只是提示文案，不影响怎么挂） */
   fromPlan: boolean;
+  /**
+   * 自动方案按持仓成本算出来的那一套。
+   * 手动改价之后它照样留着：填进去的两个数是「方案」，面板上那行钱按当前填的数现算。
+   */
+  plan: PositionPlanResponse | null;
 }
 
 const keyOf = (contract: string, dir: Dir) => contract + ':' + dir;
@@ -50,7 +56,7 @@ function cleanupText(c: CanceledTrades | undefined): string {
 }
 
 export default function PositionsCard({
-  positions, orders, priceOrders, currentContract, longBracket, shortBracket, priceRound, rounds, marks, stale,
+  positions, orders, priceOrders, interval, priceRound, rounds, marks, stale,
   armed, token, onToast, onRefresh,
 }: Props) {
   /**
@@ -101,28 +107,35 @@ export default function PositionsCard({
     } finally { setBusy(null); }
   }
 
-  /** 套用方案：当前合约直接用页面上的档位，别的合约现拉一次 */
+  /**
+   * 套用方案：按**这张仓的成本**算，不是按现价算。
+   *
+   * 以前这里直接用页面上的档位（/api/levels 算的那份），那份锚在最新价上 ——
+   * 套到一张已经拿着的仓上，等于把它当成「现在才进场」，不看成本也不看已经亏了多少，
+   * 越是亏反而把止损放得越远。现在交给 /api/position-plan 按持仓重算。
+   */
   async function usePlan(p: Position) {
+    if (!token) return;
     const k = keyOf(p.contract, p.direction);
     setBusy('plan-' + k);
     try {
-      let b: Bracket | null = null;
-      if (p.contract === currentContract) {
-        b = p.direction === 'long' ? longBracket : shortBracket;
-      } else {
-        const lv = await jget<LevelsResponse>(
-          '/api/levels?contract=' + encodeURIComponent(p.contract) + '&interval=15m&limit=500',
-        );
-        b = p.direction === 'long' ? lv.brackets.long : lv.brackets.short;
-      }
-      if (!b) {
-        onToast('err', '这一侧没有方案', '结构不支持给止损止盈，自己填一个价位吧');
-        setEdit({ contract: p.contract, direction: p.direction, stop: '', target: '', fromPlan: false });
-        return;
-      }
-      setEdit({ contract: p.contract, direction: p.direction, stop: String(b.stop), target: String(b.target), fromPlan: true });
+      const r = await jsend<PositionPlanResponse>('POST', '/api/position-plan', {
+        contract: p.contract,
+        direction: p.direction,
+        interval,
+      }, token);
+      setEdit({
+        contract: p.contract,
+        direction: p.direction,
+        stop: String(r.plan.stop),
+        target: String(r.plan.target),
+        fromPlan: true,
+        plan: r,
+      });
     } catch (e) {
+      // 算不出来（结构不支持、K 线不够）就把面板打开让人自己填，别把人堵在这儿
       onToast('err', '取方案失败', (e as Error).message);
+      setEdit({ contract: p.contract, direction: p.direction, stop: '', target: '', fromPlan: false, plan: null });
     } finally { setBusy(null); }
   }
 
@@ -135,6 +148,7 @@ export default function PositionsCard({
       stop: cur.stop ? String(cur.stop.triggerPrice) : '',
       target: cur.target ? String(cur.target.triggerPrice) : '',
       fromPlan: false,
+      plan: null,
     });
   }
 
@@ -256,6 +270,59 @@ export default function PositionsCard({
     } finally { setBusy(null); }
   }
 
+  /**
+   * 方案预览：把填进去的两个价换成钱。
+   *
+   * 「亏 12.3 USDT」比「风险 2.4%」更接近人真正在权衡的东西。这里按持仓成本、张数、
+   * 乘数现算，改一个数字马上跟着变 —— 而不是把服务端算好的数写死在框里。
+   */
+  const planBox = (e: BracketEdit) => {
+    const p = e.plan;
+    if (!p) return null;
+    const round = roundOf(e.contract);
+    const stopNum = Number(e.stop) || 0;
+    const targetNum = Number(e.target) || 0;
+    const atStop = stopNum > 0 ? pnlFromCost(p.direction, p.entry, p.size, p.multiplier, stopNum) : null;
+    const atTarget = targetNum > 0 ? pnlFromCost(p.direction, p.entry, p.size, p.multiplier, targetNum) : null;
+    const risk = atStop !== null && atStop < 0 ? -atStop : 0;
+    // 权益用服务端的两个数反推：它算的那一份占比和美元风险是同一个止损价来的
+    const equity = p.money.riskOfEquityPct && p.money.riskOfEquityPct > 0
+      ? p.money.riskUsd / (p.money.riskOfEquityPct / 100) : 0;
+    const riskOfEquity = equity > 0 && risk > 0 ? (risk / equity) * 100 : null;
+    const wrongStop = stopNum > 0 && (p.direction === 'long' ? stopNum >= p.mark : stopNum <= p.mark);
+    const wrongTarget = targetNum > 0 && (p.direction === 'long' ? targetNum <= p.mark : targetNum >= p.mark);
+    return (
+      <div className={'plan-box' + (p.plan.broken ? ' broken' : '')}>
+        <div className="plan-line">
+          按持仓成本 {fmtPrice(p.entry, round)} 算 · {p.size} 张 · {p.leverage}x
+        </div>
+        <div className="plan-line">
+          止损 {stopNum > 0 ? fmtPrice(stopNum, round) : '不设'} →{' '}
+          <b className={atStop !== null && atStop >= 0 ? 'up' : 'down'}>
+            {atStop !== null ? fmtMoney(atStop) : '—'}
+          </b>
+          {'　止盈 '}{targetNum > 0 ? fmtPrice(targetNum, round) : '不设'} →{' '}
+          <b className={atTarget !== null && atTarget >= 0 ? 'up' : 'down'}>
+            {atTarget !== null ? fmtMoney(atTarget) : '—'}
+          </b>
+        </div>
+        <div className="plan-line dim">
+          {/* 盈亏比按填进去的价现算：拿方案里那个数显示，改一个数字就对不上了 */}
+          {stopNum > 0 && targetNum > 0 && risk > 0 && atTarget !== null
+            ? '成本口径盈亏比 ' + Math.round((atTarget / risk) * 100) / 100
+              + '（这一侧要求 ≥ ' + p.plan.minRR + '）'
+            : stopNum > 0 && risk === 0
+              ? '止损已经在成本之上，这笔单最差也是保本'
+              : '方案盈亏比 ' + (p.plan.riskReward === null ? '保本' : p.plan.riskReward)}
+          {riskOfEquity !== null ? ' · 最差占权益 ' + riskOfEquity.toFixed(2) + '%' : ''}
+        </div>
+        {p.plan.notes.map((n, i) => <div key={'pn' + i} className="plan-note">{n}</div>)}
+        {wrongStop && <div className="plan-note warn">止损落在现价这一边，挂上去当场就成交 —— 服务端也会拒。</div>}
+        {wrongTarget && <div className="plan-note warn">止盈已经跑到现价另一边了。</div>}
+      </div>
+    );
+  };
+
   const editPanel = (e: BracketEdit) => {
     const wanting = Number(e.stop) > 0 || Number(e.target) > 0;
     return (
@@ -282,8 +349,9 @@ export default function PositionsCard({
             />
           </div>
         </div>
+        {planBox(e)}
         <div className="edit-note">
-          {e.fromPlan ? '已填入自动方案的结构价，可以直接改。' : ''}
+          {e.fromPlan ? '已填入自动方案按持仓成本算的结构价，可以直接改。' : ''}
           保存会先撤掉这一边现有的保护单再挂。两个都留空 = 只要撤掉、不挂新的。
         </div>
         <div className="acts">
@@ -330,6 +398,7 @@ export default function PositionsCard({
               const pnl = pnlOf(p, mark);
               const pnlCls = pnl.pnl >= 0 ? 'up' : 'down';
               const cur = bracketOf(p.contract, p.direction);
+              const prot = protectionState(cur);
               const round = roundOf(p.contract);
               const editing = edit && edit.contract === p.contract && edit.direction === p.direction;
               return (
@@ -361,6 +430,15 @@ export default function PositionsCard({
                       {cur.stop || cur.target ? '到价自动平' : '没设'}
                     </span>
                   </div>
+                  {/* 到期是交易所自己撤单（见服务端 PROTECT_EXPIRATION_SEC），不说就等于静默裸仓 */}
+                  {prot.naked && (
+                    <div className="cp-flag naked">裸仓 · 止损止盈一张都没有，点「套用方案」补上</div>
+                  )}
+                  {!prot.naked && prot.expiresAt > 0 && (
+                    <div className={'cp-flag' + (prot.urgent ? ' urgent' : '')}>
+                      保护 {prot.left}后由交易所自动撤销
+                    </div>
+                  )}
 
                   {editing && edit ? editPanel(edit) : confirmClose === k ? (
                     <div className="confirm">
@@ -571,6 +649,7 @@ export default function PositionsCard({
                           stop: cur.stop ? String(cur.stop.triggerPrice) : '',
                           target: cur.target ? String(cur.target.triggerPrice) : '',
                           fromPlan: false,
+                          plan: null,
                         });
                       }}
                     >

@@ -31,6 +31,11 @@ export interface Level {
   lastTouch: number;     // unix 秒
   zoneLow: number;
   zoneHigh: number;
+  /**
+   * 几个周期上同时有这条位。1 = 只有当前周期，2 = 更粗的周期也认。
+   * 只在接口层由 applyConfluence 填，detectLevels 自己不管
+   */
+  confluence?: number;
 }
 
 export interface LevelSet {
@@ -43,7 +48,7 @@ export interface LevelSet {
   nearestResistance: Level | null;
 }
 
-interface Pivot { index: number; price: number; time: number; kind: 'high' | 'low' }
+export interface Pivot { index: number; price: number; time: number; kind: 'high' | 'low' }
 
 /** Wilder ATR */
 export function atr(bars: Bar[], period = 14): number {
@@ -59,8 +64,13 @@ export function atr(bars: Bar[], period = 14): number {
   return sum / n;
 }
 
-/** 局部极值：一根 bar 的高/低是前后 k 根里的极值 */
-function pivots(bars: Bar[], k: number): Pivot[] {
+/**
+ * 局部极值：一根 bar 的高/低是前后 k 根里的极值。
+ *
+ * 要求右侧也有 k 根，所以返回的每一个点都是「已经确认」的 ——
+ * structure.ts 直接拿它判 BOS / CHoCH，靠的就是这个性质。
+ */
+export function pivots(bars: Bar[], k: number): Pivot[] {
   const out: Pivot[] = [];
   for (let i = k; i < bars.length - k; i++) {
     const b = bars[i]!;
@@ -145,6 +155,59 @@ export interface LevelOptions {
   halfLifeBars?: number;
   /** 第二级聚类放大倍数：相邻位的间距小于 tolerance × mergeFactor 就并成一条带 */
   mergeFactor?: number;
+}
+
+/**
+ * 把 K 线按 factor 根合成一根（时间取这一组的第一根）。
+ *
+ * 多周期一致性不另外去交易所拉一遍长周期：同一批数据自己聚一次就够了 ——
+ * 少一次网络往返，也就不存在「两个周期来自两个时刻」的错位。
+ */
+export function resampleBars(bars: Bar[], factor: number): Bar[] {
+  const n = Math.max(1, Math.floor(factor));
+  if (n === 1) return bars.map((b) => ({ ...b }));
+  const out: Bar[] = [];
+  // 只取整组：末尾不足 n 根的那一组丢掉。留着的话，每来一根新 K 线这一组就变一次，
+  // 粗周期的位会跟着抖 —— 那种位比没有更糟
+  for (let i = 0; i + n <= bars.length; i += n) {
+    const group = bars.slice(i, i + n);
+    const first = group[0]!;
+    let high = first.high;
+    let low = first.low;
+    let volume = 0;
+    for (const b of group) {
+      if (b.high > high) high = b.high;
+      if (b.low < low) low = b.low;
+      volume += b.volume;
+    }
+    out.push({
+      time: first.time,
+      open: first.open,
+      high,
+      low,
+      close: group[group.length - 1]!.close,
+      volume,
+    });
+  }
+  return out;
+}
+
+/**
+ * 多周期一致性：更粗的周期也认同一条位，这条位就更硬。
+ *
+ * 这是「更多结构分析」里最省钱的一项 —— 位本身没变，只是把「5 分钟上碰了三次」
+ * 和「5 分钟、20 分钟、1 小时上都碰过」区分开。强度乘 1.15 再加 5 分，封顶 100，
+ * 不打乱原来的排序，只是在同一批位里把更硬的往前推。
+ */
+export function applyConfluence(levels: Level[], coarse: Level[], atr: number, last: number): Level[] {
+  if (coarse.length === 0 || levels.length === 0) return levels;
+  // 容差和 detectLevels 里判「同一条带」的量级一致：位本身就差半个 ATR 以内就算同一条
+  const tol = Math.max(0.5 * atr, last * 0.0015);
+  return levels.map((l) => {
+    const hit = coarse.some((c) => Math.abs(c.price - l.price) <= tol);
+    if (!hit) return { ...l, confluence: 1 };
+    return { ...l, strength: Math.min(100, Math.round((l.strength * 1.15 + 5) * 100) / 100), confluence: 2 };
+  });
 }
 
 export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
@@ -401,4 +464,183 @@ export function planBracket(
 
 function fmt(p: number): string {
   return p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(2) : p.toFixed(6).replace(/0+$/, '');
+}
+
+export interface PositionPlan {
+  direction: Direction;
+  /** 锚在持仓成本上，不是现价 —— 这是「分析当前持仓」和「开仓前算方案」的分界 */
+  entry: number;
+  stop: number;
+  target: number;
+  /** 从成本价算：正数 = 这一单要亏多少，负数 = 止损已经推到成本上方、锁住了利润 */
+  riskFromEntry: number;
+  rewardFromEntry: number;
+  riskPct: number;
+  rewardPct: number;
+  /** 成本口径的盈亏比。止损已在成本上方时它没有意义，给 null */
+  riskReward: number | null;
+  acceptable: boolean;
+  minRR: number;
+  stopSource: string;
+  targetSource: string;
+  /** 收盘已经收在那条关键结构位的另一侧：这张仓原来的结构没了 */
+  broken: boolean;
+  /** 止损在成本上方，最差也是保本 */
+  locksProfit: boolean;
+  /** 成本口径的风险超过每日上限 —— 等于把风险又放宽一截 */
+  tooWide: boolean;
+  /** 能不能真挂上。现价已经跑过的那一边，挂上去当场就成交 */
+  mountable: { stop: boolean; target: boolean };
+  notes: string[];
+}
+
+export interface PositionPlanOptions {
+  minStrength?: number;
+  minRR?: number;
+  atrBuffer?: number;
+  atrStop?: number;
+  atrTarget?: number;
+  /** 成本口径的风险上限（%）。超过就说这张仓的止损已经是在放宽风险 */
+  maxRiskPct?: number;
+  /** 结构状态。逆势的仓要单独提醒一句 —— 逆势单的止损本来就是用来被打的 */
+  trend?: 'up' | 'down' | 'range';
+}
+
+/**
+ * 给「已经拿在手上的仓」推导止盈止损。
+ *
+ * 和 planBracket 只差一件事，后果却很大：锚点从最新价换成持仓成本。
+ * 开仓前的方案问的是「现在进场，止损放哪」；持仓后的方案问的是
+ * 「这笔已经开的单，从成本算到底要亏多少、还值不值得守」—— 后者才是真正会赔的钱。
+ *
+ * 因为止损只能挂在现价的另一侧，成本口径的风险永远大于等于当前的浮亏。
+ * 所以这里不假装能把风险收窄：算出来偏大就直说偏大（tooWide），
+ * 结构破了就直说破了（broken），交给页面去劝人离场，而不是悄悄把止损放远。
+ */
+export function planPositionBracket(
+  set: LevelSet,
+  pos: { direction: Direction; entry: number; last: number; mark?: number },
+  opts: PositionPlanOptions = {},
+): PositionPlan | null {
+  const {
+    minStrength = 35, minRR = 1.5, atrBuffer = 0.3,
+    atrStop = 1.5, atrTarget = 2.5, maxRiskPct = 4, trend,
+  } = opts;
+  const a = set.atr;
+  const entry = pos.entry;
+  const last = pos.last > 0 ? pos.last : (pos.mark ?? 0);
+  const mark = pos.mark && pos.mark > 0 ? pos.mark : last;
+  if (!(entry > 0) || !(last > 0) || !(a > 0)) return null;
+
+  const long = pos.direction === 'long';
+  // 判「现价在哪」时取更严格的那个：止损正好落在最新价和标记价之间时，
+  // 只看一个会放过它，挂上去那一秒就成交（服务端的 checkTriggerPrices 也是这个口径）
+  const adverse = long ? Math.min(last, mark) : Math.max(last, mark);
+  const far = long ? Math.max(last, mark) : Math.min(last, mark);
+  const buffer = Math.max(atrBuffer * a, entry * 0.0005);
+  const weak = Math.min(minStrength, Math.max(0, minStrength * 0.6));
+  const notes: string[] = [];
+
+  // 止损：现价「更差」那一侧最近的强位。挂得比现价更差才挂得住
+  const stopPool = set.levels
+    .filter((l) => l.strength >= weak)
+    .filter((l) => (long ? l.price < adverse : l.price > adverse))
+    .sort((x, y) => (long ? y.price - x.price : x.price - y.price));
+  const stopLevel = stopPool[0] ?? null;
+  const stop = stopLevel
+    ? (long ? stopLevel.price - buffer : stopLevel.price + buffer)
+    : (long ? adverse - atrStop * a : adverse + atrStop * a);
+  const stopSource = stopLevel
+    ? (long ? '支撑 ' : '阻力 ') + fmt(stopLevel.price) + '（强度 ' + Math.round(stopLevel.strength) + '）'
+    : 'ATR × ' + atrStop + '（现价' + (long ? '下' : '上') + '方没有够强的' + (long ? '支撑' : '阻力') + '）';
+  if (!stopLevel) notes.push('现价这一侧没有像样的结构位，止损只能按波动率放。');
+
+  // 止盈：现价「更好」那一侧最近的强位。已经走过的那条不再是障碍，
+  // 所以不为了凑盈亏比去挑更远的一条 —— 和开仓前的方案同一个口径
+  const targetPool = set.levels
+    .filter((l) => l.strength >= minStrength)
+    .filter((l) => (long ? l.price > far : l.price < far))
+    .sort((x, y) => (long ? x.price - y.price : y.price - x.price));
+  const targetLevel = targetPool[0] ?? null;
+  // ATR 兜底也从成本算：从现价算会把「已经走了一段」当成起点，止盈离得越来越近
+  const atrTargetPrice = long ? entry + atrTarget * a : entry - atrTarget * a;
+  const reachable = long ? Math.max(atrTargetPrice, far + buffer) : Math.min(atrTargetPrice, far - buffer);
+  const target = targetLevel ? targetLevel.price : reachable;
+  const targetSource = targetLevel
+    ? (long ? '阻力 ' : '支撑 ') + fmt(targetLevel.price) + '（强度 ' + Math.round(targetLevel.strength) + '）'
+    : 'ATR × ' + atrTarget + '（现价' + (long ? '上' : '下') + '方没有够强的' + (long ? '阻力' : '支撑') + '）';
+  if (!targetLevel) notes.push('没有够强的目标位，止盈按波动率放。');
+
+  const risk = long ? entry - stop : stop - entry;
+  const reward = long ? target - entry : entry - target;
+  const riskPct = Math.round((risk / entry) * 10000) / 100;
+  const rewardPct = Math.round((reward / entry) * 10000) / 100;
+  const riskReward = risk > 0 ? Math.round((reward / risk) * 100) / 100 : null;
+  const locksProfit = risk < 0;
+  const tooWide = riskPct > maxRiskPct;
+
+  // 结构破没破：成本下方（上方）那条最强的关键位，收盘已经跑到它另一边，就是破了。
+  // 破了之后能找到的止损都在破位之后，挂上去等于把风险再放宽一截 —— 这是要劝离场的信号
+  const keyLevel = set.levels
+    .filter((l) => l.strength >= minStrength)
+    .filter((l) => (long ? l.price < entry : l.price > entry))
+    .sort((x, y) => (long ? y.price - x.price : x.price - y.price))[0] ?? null;
+  // 贴着位不算破：收盘要落到位之外一个缓冲，才叫真的跌（涨）破了它。
+  // 不这么收一下，价格正好踩在位上时会被判成破位，一句「结构没了」就成了噪声。
+  const broken = keyLevel
+    ? (long ? adverse < keyLevel.price - buffer : adverse > keyLevel.price + buffer)
+    : false;
+
+  if (broken && keyLevel) {
+    notes.push(
+      '收盘已经' + (long ? '跌' : '涨') + '破' + (long ? '支撑' : '阻力') + ' ' + fmt(keyLevel.price) +
+      '，这张仓的结构没了。还挂得上的止损都在破位之后，等于把风险再放宽一截 —— 更该考虑按市价离场。',
+    );
+  }
+  // 逆势单：结构方向和这张仓相反。这不是「不能做」，但止损更容易被打，得说出来
+  if (trend && trend !== 'range' && (trend === 'up') !== long) {
+    notes.push(
+      '结构在往' + (trend === 'up' ? '上' : '下') + '走，这张' + (long ? '多' : '空')
+      + '单是逆势的 —— 这一侧的止损本来就是用来被打的。',
+    );
+  }
+  if (locksProfit) {
+    notes.push('止损 ' + fmt(stop) + ' 已经在成本价之上，这笔单最差也是保本。');
+  } else if (tooWide) {
+    notes.push('从成本算要亏 ' + riskPct + '%，超过 ' + maxRiskPct + '% 的日内上限。');
+  }
+  // 最近的障碍还在成本这一边：按它挂止盈就是亏损离场，不是止盈。这必须说出来，
+  // 否则面板上那个「止盈」看着像目标，实际是个更小的亏。
+  if (targetLevel && reward <= 0) {
+    notes.push(
+      '最近的' + (long ? '阻力 ' : '支撑 ') + fmt(targetLevel.price) + ' 还在成本' + (long ? '下' : '上')
+      + '方，按它挂止盈是带着亏损离场，不是止盈。',
+    );
+  }
+
+  const mountable = {
+    stop: stop > 0 && (long ? stop < adverse : stop > adverse),
+    target: target > 0 && (long ? target > far : target < far),
+  };
+
+  return {
+    direction: pos.direction,
+    entry,
+    stop,
+    target,
+    riskFromEntry: risk,
+    rewardFromEntry: reward,
+    riskPct,
+    rewardPct,
+    riskReward,
+    acceptable: riskReward === null ? true : riskReward >= minRR,
+    minRR,
+    stopSource,
+    targetSource,
+    broken,
+    locksProfit,
+    tooWide,
+    mountable,
+    notes,
+  };
 }

@@ -434,6 +434,16 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .cp-prot { display: flex; gap: 12px; flex-wrap: wrap; }
 .cp-prot .none { color: var(--warn); }
 
+/* 裸仓 / 保护快到期：这两句必须看得见。到期是交易所自己撤单，不提醒就是静默裸仓 */
+.cp-flag { font-size: 9.5px; color: var(--text-2); }
+.cp-flag.naked { color: var(--warn); }
+.cp-flag.urgent { color: var(--down); }
+
+/* 图上平仓。整块 .chart-pos 是 pointer-events: none（挡在 K 线上，拖动照常），
+   所以只有按钮这一行重新打开鼠标事件 —— 否则按钮点不动，或者反过来一点就拖图 */
+.cp-acts { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; pointer-events: auto; }
+.btn.xs { width: auto; padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
+
 /* 私有数据停更：图上的均价/止损止盈都是旧快照，先说清楚再让人看 */
 .chart-stale {
   position: absolute; right: 78px; top: 8px; z-index: 5;
@@ -899,6 +909,33 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 .bracket-edit .acts .btn { padding: 6px 0; font-size: 11.5px; }
 
 .edit-note { font-size: 10px; color: var(--text-2); line-height: 1.55; }
+
+/* 按持仓成本算的方案预览：钱写在前面，百分比写在后面。结构破了整块换成告警色 */
+.plan-box {
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  display: grid; gap: 3px;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+.plan-box.broken { border-color: rgba(255,95,109,0.4); background: rgba(255,95,109,0.06); }
+.plan-line { color: var(--text-1); font-family: var(--mono); }
+.plan-line.dim { color: var(--text-2); }
+.plan-note { color: var(--text-2); font-size: 10px; }
+.plan-note.warn { color: var(--warn); }
+.plan-box.broken .plan-note { color: var(--down); }
+
+/* 结构卡：和三档价位卡长一样，但左边那道竖条跟着趋势变色 ——
+   扫一眼就知道现在该偏向哪边，不用去读字 */
+.lv.struct { border-left: 2px solid var(--line); }
+.lv.struct.up { border-left-color: var(--up); }
+.lv.struct.down { border-left-color: var(--down); }
+.lv.struct.range { border-left-color: var(--warn); }
+/* 多周期一致的位：同一个价位在两个周期上都成立，比只在一个周期上碰过更硬 */
+.lv .mtf { color: var(--accent); font-size: 9px; font-weight: 700; margin-left: 2px; }
 
 .order-edit {
   display: grid; gap: 6px;

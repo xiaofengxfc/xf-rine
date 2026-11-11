@@ -13,6 +13,24 @@ export function multiplierOf(p: Position, fallback = 0): number {
   return 0;
 }
 
+/**
+ * 从「成本 / 张数 / 乘数 / 方向」直接算到某个价位平掉的盈亏（USDT）。
+ *
+ * 全站只有这一个盈亏公式：持仓卡、图上摘要、保护单预览都走它。
+ * 多空用同一个式子，空头取负 —— 和交易所的 unrealised_pnl 一分不差。
+ * 乘数或张数读不出来时返回 0，不编一个看起来合理的数。
+ */
+export function pnlFromCost(
+  side: 'long' | 'short',
+  entry: number,
+  size: number,
+  multiplier: number,
+  price: number,
+): number {
+  if (!(entry > 0) || !(size > 0) || !(multiplier > 0) || !(price > 0)) return 0;
+  return (price - entry) * size * multiplier * (side === 'short' ? -1 : 1);
+}
+
 export interface PnlView {
   /** 已盈亏，USDT */
   pnl: number;
@@ -38,8 +56,7 @@ export function pnlOf(p: Position, price = p.markPrice, fallbackMult = 0): PnlVi
   const at = price > 0 ? price : p.markPrice;
   const size = Math.abs(p.size);
   if (mult > 0 && at > 0 && p.entryPrice > 0 && size > 0) {
-    const dir = p.direction === 'short' ? -1 : 1;
-    const pnl = (at - p.entryPrice) * size * mult * dir;
+    const pnl = pnlFromCost(p.direction === 'short' ? 'short' : 'long', p.entryPrice, size, mult, at);
     const margin = p.leverage > 0 ? (p.entryPrice * size * mult) / p.leverage : 0;
     return { pnl, pct: margin > 0 ? (pnl / margin) * 100 : null, price: at };
   }

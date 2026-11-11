@@ -23,7 +23,7 @@ import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type Painte
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { pnlOf } from '../lib/position.ts';
-import { bracketOf } from '../lib/protective.ts';
+import { bracketOf, protectionState } from '../lib/protective.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 
@@ -140,11 +140,16 @@ interface Props {
   backfilling?: boolean;
   onIntervalChange: (i: string) => void;
   onManualLevels: (prices: number[]) => void;
+  /** 解锁并连上了，图上那个「市价平」才可按 */
+  canClose: boolean;
+  /** 图上直接平仓。和持仓卡里那个是同一个接口，只是挪到手指边上 —— 手机上原来要滑到底才够得着 */
+  onClosePosition: (contract: string, direction: 'long' | 'short') => void;
 }
 
 export default function ChartPane({
   contract, interval, bars, levels, patterns, bracket, positions, orders, priceOrders, multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
+  canClose, onClosePosition,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -266,6 +271,8 @@ export default function ChartPane({
   const [tool, setTool] = useState<DrawingKind | null>(null);
   /** 视口已经贴到最左边那根了。到头说明只在贴边时才显示，不然一开页面就挂在图上 */
   const [atEdge, setAtEdge] = useState(false);
+  /** 图上那一步「确认平掉」按了没有。按合约+方向记，双向持仓时两边各管各的 */
+  const [closing, setClosing] = useState<string | null>(null);
   const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
 
   barsRef.current = bars;
@@ -1094,6 +1101,8 @@ export default function ChartPane({
     return {
       p,
       cur,
+      // 裸仓和「保护还有多久到期」都在这里算：到期是交易所自己撤单，不提醒就是静默裸仓
+      prot: protectionState(cur),
       // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
       // 看着就是个自相矛盾的数字。停更时整块退回快照自己的价。
       live: pnlOf(p, stale ? 0 : markPrice, multiplier),
@@ -1101,6 +1110,11 @@ export default function ChartPane({
       atTarget: cur.target ? pnlOf(p, cur.target.triggerPrice, multiplier).pnl : null,
     };
   });
+
+  // 仓没了就把「确认平掉」收掉，别让人对着已经不在的数字点确认
+  useEffect(() => {
+    if (closing && !positions.some((x) => x.direction === closing)) setClosing(null);
+  }, [positions, closing]);
 
   return (
     <>
@@ -1197,8 +1211,9 @@ export default function ChartPane({
         )}
         {positionViews.length > 0 && (
           <div className={'chart-pos' + (stale ? ' stale' : '')}>
-            {positionViews.map(({ p, cur, live, atStop, atTarget }) => {
+            {positionViews.map(({ p, cur, prot, live, atStop, atTarget }) => {
               const isLong = p.direction === 'long';
+              const asking = closing === p.direction;
               return (
                 <div key={p.direction} className={'cp-row ' + (isLong ? 'long' : 'short')}>
                   <div className="cp-head">
@@ -1225,6 +1240,35 @@ export default function ChartPane({
                         ? `止盈 ${fmtPrice(cur.target.triggerPrice, priceRound)} → ${fmtMoney(atTarget ?? 0)}`
                         : '止盈 未设'}
                     </span>
+                  </div>
+                  {prot.naked && <div className="cp-flag naked">裸仓 · 止损止盈一张都没有</div>}
+                  {!prot.naked && prot.expiresAt > 0 && (
+                    <div className={'cp-flag' + (prot.urgent ? ' urgent' : '')}>
+                      保护 {prot.left}后到期（交易所到点会自己撤掉）
+                    </div>
+                  )}
+                  <div className="cp-acts">
+                    {asking ? (
+                      <>
+                        <button
+                          className="btn danger xs"
+                          disabled={!canClose}
+                          onClick={() => onClosePosition(p.contract, p.direction)}
+                        >
+                          确认平掉 {Math.abs(p.size)} 张
+                        </button>
+                        <button className="btn ghost xs" onClick={() => setClosing(null)}>算了</button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn ghost xs"
+                        disabled={!canClose}
+                        title={canClose ? '按市价平掉这张仓（和持仓卡里是同一个接口）' : '先解锁交易'}
+                        onClick={() => setClosing(p.direction)}
+                      >
+                        市价平
+                      </button>
+                    )}
                   </div>
                 </div>
               );

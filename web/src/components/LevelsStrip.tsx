@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtPct, fmtPrice } from '../lib/format.ts';
-import type { Level } from '../lib/api.ts';
+import type { Level, Structure } from '../lib/api.ts';
 
 interface Props {
   levels: Level[];
@@ -8,9 +8,11 @@ interface Props {
   price: number;
   priceRound: number;
   atr: number;
+  /** 结构状态：趋势 / 最近的 BOS·CHoCH / 现价在区间里的位置 */
+  structure?: Structure;
 }
 
-export default function LevelsStrip({ levels, manual, price, priceRound, atr }: Props) {
+export default function LevelsStrip({ levels, manual, price, priceRound, atr, structure }: Props) {
   const manualSet = new Set(manual.map((p) => p.toFixed(6)));
   const manualOnly = manual.filter((p) => !levels.some((l) => Math.abs(l.price - p) < atr * 0.3));
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -90,6 +92,39 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
         <div className="meta"><span>{(atr / (price || 1) * 100).toFixed(2)}% 波动</span></div>
       </div>
 
+      {structure && (
+        <div
+          className={'lv struct ' + structure.trend}
+          title={structure.note}
+          style={{ minWidth: 118 }}
+        >
+          <div className="r1">
+            <span className="px" style={{ fontSize: 11 }}>结构</span>
+            <span className="tag">
+              {structure.trend === 'up' ? '上升' : structure.trend === 'down' ? '下降' : '区间'}
+            </span>
+          </div>
+          <div className="meta">
+            <span>{structure.event ? structure.event.kind : '暂无破位'}</span>
+            {structure.event && (
+              <span>{structure.event.direction === 'up' ? '向上' : '向下'}破 {fmtPrice(structure.event.price, priceRound)}</span>
+            )}
+          </div>
+          <div className="meta">
+            {structure.rangePct === null
+              ? <span>区间位置算不出来</span>
+              : (
+                <>
+                  <span>区间 {structure.rangePct.toFixed(0)}%</span>
+                  <span>
+                    {structure.zone === 'premium' ? '溢价' : structure.zone === 'discount' ? '折价' : '中间'}
+                  </span>
+                </>
+              )}
+          </div>
+        </div>
+      )}
+
       {levels.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没有识别出够强的位，换个周期或调低最小强度</div>}
 
       {levels.map((lv) => (
@@ -105,7 +140,10 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
           </div>
           <div className="meta">
             <span>{fmtPct(lv.distancePct, 2)}</span>
-            <span>强度 {Math.round(lv.strength)}</span>
+            <span>
+              强度 {Math.round(lv.strength)}
+              {lv.confluence === 2 && <b className="mtf" title="更粗的周期上也认这条位"> ×2</b>}
+            </span>
           </div>
           <div className="meta">
             <span>{lv.touches} 次触及</span>

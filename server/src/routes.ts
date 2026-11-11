@@ -5,7 +5,11 @@ import {
 } from './config.js';
 import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
-import { detectLevels, planBracket, type Bar, type Bracket, type Direction } from './levels.js';
+import {
+  applyConfluence, detectLevels, planBracket, planPositionBracket, resampleBars,
+  type Bar, type Bracket, type Direction, type PositionPlan,
+} from './levels.js';
+import { analyzeStructure } from './structure.js';
 import { newsDigest } from './news.js';
 import { detectPatterns } from './patterns.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
@@ -647,16 +651,100 @@ router.get('/levels', wrap(async (req, res) => {
   });
   const minRR = qnum(req.query.minRR, 1.5, 0.5, 100);
   const live = bars[bars.length - 1]?.close ?? set.last;
-  const setForPlan = { ...set, last: live };
+  // 多周期一致性：把同一批 K 线聚成 4 倍周期再算一遍。
+  // 不在两个周期上分别算的话，「5 分钟上碰了三次」和「5 分钟和 20 分钟上都碰过」是同一个强度。
+  const coarseSet = detectLevels(resampleBars(closed, 4), { pivotWindow: 3, maxLevels: 8 });
+  const weighted = applyConfluence(set.levels, coarseSet.levels, set.atr, live);
+  const setForPlan = { ...set, levels: weighted, last: live };
+  const structure = analyzeStructure(closed, { swing: 3 });
   res.json({
     contract,
     interval,
     barsUsed: closed.length,
     ...setForPlan,
+    structure,
     patterns: detectPatterns(closed, { window: 30, limit: 6 }),
     brackets: {
       long: planBracket(setForPlan, 'long', { minRR }),
       short: planBracket(setForPlan, 'short', { minRR }),
+    },
+  });
+}));
+
+const roundPositionPlan = (p: PositionPlan): PositionPlan => ({
+  ...p,
+  entry: px(p.entry),
+  stop: px(p.stop),
+  target: px(p.target),
+  riskFromEntry: px(p.riskFromEntry),
+  rewardFromEntry: px(p.rewardFromEntry),
+});
+
+/**
+ * 持仓的自动止盈止损：输入是这张仓，不是现价。
+ *
+ * 页面上的「套用方案」以前直接用 /api/levels 那份 brackets —— 那是「现在进场」的方案，
+ * 锚在最新价上。套到一张已经拿着的仓上，等于按现价重新开一次来算止损，
+ * 不看成本、不看已经浮亏多少，越是亏反而把止损放得越远。
+ * 这里按持仓成本重算，并把「打到止损止盈各平出多少钱」一起算好 ——
+ * 用户真正要看的是钱，不是一个百分比。
+ */
+router.post('/position-plan', wrap(async (req, res) => {
+  const contract = String(req.body?.contract ?? '');
+  const direction = req.body?.direction;
+  if (!contract || !['long', 'short'].includes(String(direction))) {
+    throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
+  }
+  const dir = direction as Direction;
+  const interval = INTERVALS.has(String(req.body?.interval)) ? String(req.body.interval) : '15m';
+  const minRR = qnum(req.body?.minRR, 1.5, 0.5, 100);
+
+  const sides = await readSides(contract);
+  const mine = sides.find((s) => s.direction === dir && s.size > 0) ?? null;
+  if (!mine) {
+    throw new GateError(400, 'NO_POSITION', '当前没有' + (dir === 'long' ? '多' : '空') + '头持仓，没有可分析的仓');
+  }
+
+  // 和 /levels 一样：丢掉最后一根未走完的 K 线，别用半根 K 线的影线判位
+  const { bars } = await loadCandles(contract, interval, 500, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
+  const closed = bars.slice(0, -1);
+  const set = detectLevels(closed, {});
+  const live = bars[bars.length - 1]?.close ?? set.last;
+  const coarseSet = detectLevels(resampleBars(closed, 4), { pivotWindow: 3, maxLevels: 8 });
+  const weighted = applyConfluence(set.levels, coarseSet.levels, set.atr, live);
+  const structure = analyzeStructure(closed, { swing: 3 });
+  const plan = planPositionBracket({ ...set, levels: weighted, last: live }, {
+    direction: dir,
+    entry: mine.entryPrice,
+    last: live,
+    mark: mine.markPrice,
+  }, { minRR, trend: structure.trend });
+  if (!plan) throw new GateError(400, 'NO_PLAN', 'K 线不够或者价格读不出来，算不出方案');
+
+  // 乘数从交易所的持仓价值反推，和 readPositions 同一个口径
+  const multiplier = mine.size > 0 && mine.markPrice > 0 && mine.value > 0
+    ? mine.value / (mine.size * mine.markPrice) : 0;
+  const pnlAt = (price: number) => (multiplier > 0
+    ? (price - mine.entryPrice) * mine.size * multiplier * (dir === 'long' ? 1 : -1)
+    : 0);
+  const atStop = pnlAt(plan.stop);
+  const atTarget = pnlAt(plan.target);
+  const riskUsd = Math.max(0, -atStop);
+  // 权益读不到就不编一个占比出来
+  const equity = await readAccount().then((a) => a.total).catch(() => 0);
+
+  res.json({
+    contract, direction: dir, interval, barsUsed: closed.length,
+    entry: px(mine.entryPrice), mark: px(mine.markPrice), last: px(live),
+    size: mine.size, leverage: mine.leverage, multiplier,
+    structure,
+    plan: roundPositionPlan(plan),
+    money: {
+      atStop: Math.round(atStop * 100) / 100,
+      atTarget: Math.round(atTarget * 100) / 100,
+      atMark: Math.round(pnlAt(mine.markPrice > 0 ? mine.markPrice : live) * 100) / 100,
+      riskUsd: Math.round(riskUsd * 100) / 100,
+      riskOfEquityPct: equity > 0 ? Math.round((riskUsd / equity) * 10000) / 100 : null,
     },
   });
 }));
@@ -1211,7 +1299,26 @@ interface Trigger {
   triggerPrice: number;
   triggerRule: number;
   size: number;
+  /** 挂单时间，unix 秒 */
+  createTime: number;
+  /**
+   * 什么时候会被交易所自己撤掉，unix 秒；0 表示不带过期（或读不出来）。
+   * 这一项以前完全没读 —— 于是 24 小时一到保护单悄悄消失，
+   * 页面上只显示「止损未设」，没人知道是被过期撤掉的。现在把它带到页面上。
+   */
+  expiresAt: number;
 }
+
+/**
+ * 保护单的有效期（秒）。
+ *
+ * Gate 的定义（gateapi-python / gateapi-go 的 FuturesPriceTrigger 文档原文）：
+ * 「Maximum wait time for trigger condition (in seconds). Order will be cancelled if timeout」
+ * —— 到点交易所自己把止损止盈撤掉，仓就没有保护了。0 的含义文档没写，
+ * 不拿真钱去试，所以维持 24 小时；但 expiresAt 会跟着接口回到页面上，
+ * 剩多久、什么时候没的，用户必须看得见（见 readTriggers 和页面上的保护提示）。
+ */
+const PROTECT_EXPIRATION_SEC = 86_400;
 
 async function readTriggers(contract?: string): Promise<Trigger[]> {
   const list = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/price_orders', { status: 'open' });
@@ -1220,6 +1327,8 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
     const trigger = (o.trigger ?? {}) as Record<string, unknown>;
     const auto = String(initial.auto_size ?? '');
     const closeAll = Boolean(initial.isclose);
+    const expiration = Number(trigger.expiration ?? 0);
+    const createTime = unixSeconds(o.create_time);
     return {
       id: String(o.id),
       contract: String(initial.contract ?? ''),
@@ -1230,6 +1339,9 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
       triggerPrice: Number(trigger.price ?? 0),
       triggerRule: Number(trigger.rule ?? 0),
       size: Number(initial.size ?? 0),
+      createTime,
+      // 交易所到点会自己撤掉，所以到期时刻 = 挂单时间 + 有效期。传 0 才表示没有这一层
+      expiresAt: expiration > 0 && createTime > 0 ? createTime + expiration : 0,
     } as Trigger;
   }).filter((t) => !contract || t.contract === contract);
 }
@@ -1793,7 +1905,7 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
           // auto_size 指明平哪一边，单仓和双向持仓都吃这套；isclose 在双向模式下有歧义
           auto_size: dir === 'long' ? 'close_long' : 'close_short',
         },
-        trigger: { strategy: 0, price_type: 0, price: String(job.price), rule: job.rule, expiration: 86400 },
+        trigger: { strategy: 0, price_type: 0, price: String(job.price), rule: job.rule, expiration: PROTECT_EXPIRATION_SEC },
       });
       created.push({ kind: job.kind, id: String(r.id), triggerPrice: job.price });
     } catch (e) {
