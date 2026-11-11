@@ -2001,39 +2001,6 @@ router.delete('/price-order/:id', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- 回测式统计：这些位历史上被碰过几次、守住几次 ----------
-
-router.get('/level-stats', wrap(async (req, res) => {
-  const contract = String(req.query.contract ?? 'BTC_USDT');
-  const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
-  const price = Number(req.query.price);
-  const horizon = Math.round(qnum(req.query.horizon, 60, 10, 200));
-  if (!Number.isFinite(price)) throw new GateError(400, 'BAD_INPUT', '缺少 price');
-  const bars = (await loadCandles(contract, interval, 1000)).bars.slice(0, -1);
-  const atrV = detectLevels(bars).atr;
-  const tol = Math.max(0.45 * atrV, price * 0.0015);
-
-  let touched = 0; let held = 0;
-  for (let i = 1; i < bars.length; i++) {
-    const b = bars[i]!;
-    const inZone = b.low - tol <= price && b.high + tol >= price;
-    if (!inZone) continue;
-    touched++;
-    const window = bars.slice(i, i + horizon);
-    const brokeUp = window.some((x) => x.close > price + tol * 2);
-    const brokeDown = window.some((x) => x.close < price - tol * 2);
-    if (!(brokeUp && brokeDown) && (brokeUp || brokeDown)) held++;
-  }
-  res.json({
-    price,
-    tolerance: tol,
-    touched,
-    held,
-    holdRate: touched ? Math.round((held / touched) * 1000) / 1000 : null,
-    sampleBars: bars.length,
-  });
-}));
-
 interface GateTicker {
   contract: string; last: string; mark_price: string; change_percentage: string;
   volume_24h_quote: string; funding_rate: string; quanto_multiplier: string; total_size: string;

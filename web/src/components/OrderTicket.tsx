@@ -145,9 +145,10 @@ export default function OrderTicket({
     if (!keysConfigured) return '未配置 API 密钥';
     if (!liveTrading) return '服务端 LIVE_TRADING=false，下单被禁用';
     if (!armed) return '先点右上角解锁交易';
+    // 限价空着的时候张数必然是 0，先说限价 —— 不然「张数至少 1」会把人引到错的地方
+    if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
     if (size < sizeMin) return `张数至少 ${sizeMin}`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
-    if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
     if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
       return side === 'long' ? '止损要在现价下方' : '止损要在现价上方';
     }
@@ -162,7 +163,7 @@ export default function OrderTicket({
 
   /** 比例算出来的张数被夹住时，把账写清楚：想要多少、能下多少、为什么 */
   const sizingNote = (() => {
-    if (sizing.clamped === 'afford') {
+    if (sizing.clamped === 'afford' && priceUsed > 0) {
       return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连 ${sizeMin} 张都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
     }
     if (sizing.clamped === 'min') {
