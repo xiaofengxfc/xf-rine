@@ -103,6 +103,10 @@ pnpm pack:android
 也不用在同一个 Wi-Fi。
 
 - 第一次打开会慢几秒：要把内置的服务端从 APK 里解出来、起进程、等接口通。之后是秒开。
+- 全面屏按「画到系统栏底下、自己让位」来排：页面写 `viewport-fit=cover`，壳把系统栏和挖孔的尺寸
+  注入成 `--safe-area-inset-*`，页面里统一用 `--inset-*` 这四个变量（见 `web/src/styles.css` 开头）。
+  少写那句 viewport，手机上就会白留上下两条边 —— 这就是 `env(safe-area-inset-*)` 全是 0 的样子。
+  顶栏、抽屉、弹窗、提示条、第一屏都已经按这个让位，横屏也认左右挖孔。
 - 手机上什么都能改：密钥、环境、下单开关、持仓模式。没有「只能看盘」的限制。
 - 密钥存在 App 自己的目录里，和电脑那份互不相干；改一个不影响另一个。
 - 交易所如果开了 IP 白名单，要填的是**手机**的出口地址（实盘页那一格显示的就是它）。换个网络就会变，
@@ -110,6 +114,17 @@ pnpm pack:android
 
 内置服务端万一怎么都起不来，第一屏还留了一条后路：填电脑的「地址 + 口令」改成连电脑（同一个 Wi-Fi）。
 那条路改了密钥是改不动的 —— 写密钥、切环境这类动作服务端只认本机。
+
+#### 手机上起不来的时候看哪里
+
+第一屏会把 Node 那边的启动过程原样贴出来（阶段 + 那一行的输出），
+真正的原因——没拿到口令、某个包在 Node 18 上加载不了、端口被占——都在里面，不必猜。
+同一份记录还写进 App 私有目录的 `files/xf-rine/boot.log`（要调试包才读得到）。
+
+连电脑查的话：`adb shell am start -n com.xfrine.terminal/.MainActivity`，
+截屏 `adb exec-out screencap -p > x.png`（或者 `screencap` 到 /sdcard 再 `adb pull`）。
+**别指望 `adb logcat`**：小米/Redmi 这类系统对 adb 关着日志，`logcat -g` 里三个 ring buffer 全是
+`0 B readable`，Node 的输出一行也拿不到 —— 所以启动过程才要往页面上送一份。
 
 签名用的是自己生成的密钥：`mobile/android/keystore.properties` 和它指的那个 `.keystore`，
 两个文件别丢。换了签名，已经装过的手机不能覆盖升级，只能卸载重装。
@@ -159,6 +174,10 @@ pnpm pack:android
 | 停一下再拖，接缝处少一根 K 线 | Gate 的 `to` 是闭区间：`to=X` 会带回 X 那根，把它当重复切掉，那一段就少一根 | 要「X 之前的 N 根」就把 `to` 往前挪一根（`to = X - 周期`），正好 N 根，接缝严丝合缝 |
 | 翻到最老报 400 `Candlestick too long ago` | 交易所只留最近一万个点（1m 约七天） | 服务端把这条当「到头了」：回空页并记住别再问，前端看到不满一页就收手，不再报错 |
 | `pnpm pack:android` 一上来就报 `JAVA_HOME is not set` 或 `SDK location not found` | gradlew 只认 `JAVA_HOME`（或 PATH 上的 java），而 `android/local.properties` 不进版本库；仓库里其实带着 `.toolchain/jdk` 和 `.toolchain/sdk`，只是没告诉 Gradle | `mobile/tools/gradle.mjs` 按 `JAVA_HOME` → 仓库 `.toolchain` → Android Studio 自带 jbr 的顺序找 JDK，SDK 按 `ANDROID_HOME` → `local.properties` → 仓库 `.toolchain` 的顺序找，顺手把 `local.properties` 补上；找不到就直说该设哪个变量 |
+| 手机上一打开就停在「服务端起不来」，只写着一句「没开起端口」 | 真正的报错只进了 logcat，而 logcat 在某些系统上 adb 读不到，等于没有 | 启动过程通过桥（`bridge.channel`）一路送到页面，失败时连同最近几十行一起摆出来；同时写一份 `files/xf-rine/boot.log` |
+| 手机上 `TypeError: Cannot read properties of undefined (reading 'bind')`，栈里是 `undici/lib/interceptor/decompress.js` | 手机里是 nodejs-mobile 的 Node 18.20.4，而 `undici@8` 的 `engines` 写着 `node >= 22.19.0`：它在模块加载时就 `bind` 一个 Node 18 没有的 `zlib.createZstdDecompress` | 服务端的 `undici` 降到 6（官方支持 Node 18.17+，`Agent`/`ProxyAgent`/`fetch` 用法不变）。打包不会报错，只有真正在手机上加载时才炸 —— 所以手机端这条链路必须上机跑一遍，别只看 `pack:android` 成功 |
+| 手机上下各留一条边，内容不铺满 | 页面没写 `viewport-fit=cover`，`env(safe-area-inset-*)` 就全是 0，壳按「缩进去」排 | 页面写 `viewport-fit=cover`，壳把系统栏尺寸注入成 `--safe-area-inset-*`（`SystemBars` 插件），页面统一用 `--inset-*`；壳的 `initialViewportFitValueHint: 'cover'` 让首帧就按整屏排，不跳一下 |
+| 状态栏图标颜色和页面主题对不上 | 壳的默认值看的是**系统**深色/浅色，页面主题是自己选的 | `web/src/lib/theme.ts` 的 `syncSystemBars()` 在切主题时调 `SystemBars.setStyle`（深色底配浅色图标，反之亦然） |
 | `pnpm pack:win` 报 `connect ETIMEDOUT 20.205.243.166:443` | electron-builder 从 GitHub 取 Electron 压缩包和 winCodeSign，用它自己的 got；Node 不读系统代理，机器上代理开着也帮不上 | `desktop/tools/builder.mjs` 读一次 Windows 系统代理（和 `server/src/net.ts` 同一个来源）塞进 `HTTPS_PROXY` 和 `ELECTRON_GET_USE_PROXY`；第一次失败原样再来一次 |
 
 ## 第一次配置密钥
