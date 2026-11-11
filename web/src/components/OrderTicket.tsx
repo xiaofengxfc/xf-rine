@@ -19,6 +19,24 @@ interface Props {
   /** 用可用余额的百分之几开仓 */
   posPct: number;
   onPosPctChange: (v: number) => void;
+  /**
+   * 限价 / 止损价 / 止盈价三个框提在页面这一层。
+   *
+   * 为什么不让面板自己存：图上右键取价要把价格填进这几个框，
+   * 面板自己拿着状态，图表就够不着它们 —— 只能靠「传一个值进去再清空」这种办法，
+   * 而那个办法在同一个价连点两次时就不灵了。提上来之后，谁都能写，写进去就是所见即所得。
+   */
+  limitStr: string;
+  onLimitChange: (v: string) => void;
+  stopStr: string;
+  onStopChange: (v: string) => void;
+  targetStr: string;
+  onTargetChange: (v: string) => void;
+  /** 价格模式也提上去：右键「作为限价」时要把面板从「市价」切回「限价」 */
+  priceMode: 'market' | 'limit';
+  onPriceModeChange: (m: 'market' | 'limit') => void;
+  /** 换合约时面板要自己清空，清空动作回到页面上做 */
+  onResetPrices: () => void;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
   onRefresh: () => void;
   /**
@@ -34,15 +52,17 @@ interface Props {
 export default function OrderTicket({
   contract, armed, token, account, liveTrading, keysConfigured, env,
   posPct, onPosPctChange, onToast, onRefresh, onQueueProtect,
+  limitStr, onLimitChange, stopStr, onStopChange, targetStr, onTargetChange,
+  priceMode, onPriceModeChange, onResetPrices,
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
   const [sizeStr, setSizeStr] = useState('');
   /** 用户自己改过张数之后，就不再让「按比例算」覆盖他的输入 */
   const [sizeTouched, setSizeTouched] = useState(false);
-  const [stopStr, setStopStr] = useState('');
-  const [targetStr, setTargetStr] = useState('');
-  const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
-  const [limitStr, setLimitStr] = useState('');
+  const setStopStr = onStopChange;
+  const setTargetStr = onTargetChange;
+  const setPriceMode = onPriceModeChange;
+  const setLimitStr = onLimitChange;
   const [leverage, setLeverage] = useState(10);
   /**
    * 逐仓还是全仓。默认逐仓。
@@ -81,11 +101,11 @@ export default function OrderTicket({
     setSizeStr('');
     setSizeTouched(false);
     setPending(false);
-    setStopStr('');
-    setTargetStr('');
-    // 限价也一起清掉：换币种后留着上一个币的价格，点下去会被「价格偏离现价」拒掉
-    setLimitStr('');
+    // 三个价都清掉：换币种后留着上一个币的价格，点下去会被「价格偏离现价」拒掉
+    onResetPrices();
     autoLimitRef.current = false;
+    // onResetPrices 是页面给的稳定回调，不放进依赖会让「换合约」这件事漏掉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contract?.name]);
 
   // 限价框空着的时候，提交上去的其实是市价单（price 0），摘要里全是「—」，

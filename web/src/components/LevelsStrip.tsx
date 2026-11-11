@@ -123,6 +123,15 @@ export default function LevelsStrip({ levels, manual, price, priceRound, atr }: 
             <span>{lv.touches} 次触及</span>
             <span>{lv.widthAtr.toFixed(1)} ATR 宽</span>
           </div>
+          {lv.bucket ? (
+            // 上游在 A 股日线上标定的分档线：说明「这个分数在那一批样本里属于高档还是低档」。
+            // 措辞必须是「第几档」，不能写成胜率 —— 那份样本和加密盘口不是一个东西
+            <div className="meta">
+              <span title="排序分落在上游 A 股日线标定分位的第几档（1 低 5 高）。是参照，不是概率，也不是这里的胜率">
+                历史分位 Q{lv.bucket}
+              </span>
+            </div>
+          ) : null}
           <i
             className="bar"
             style={{ width: `${topScore > 0 ? (lv.score / topScore) * 100 : 0}%` }}

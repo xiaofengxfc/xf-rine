@@ -395,8 +395,68 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .tool-btn:hover { background: var(--bg-3); color: var(--text-0); }
 .tool-btn.on { background: var(--accent-dim); color: var(--accent); border-color: rgba(76,141,255,0.3); }
 
+/* 本地数据条：一眼看出「现在这张图的数据是谁」。选目录只在电脑上给，手机端只显示状态 */
+.local-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 10px; border-bottom: 1px solid var(--line-soft);
+  font-size: 11px; color: var(--text-1);
+  position: relative;
+}
+.local-bar.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.lb-tag {
+  padding: 1px 6px; border-radius: 3px;
+  border: 1px solid var(--line); color: var(--text-2);
+  font-size: 10px; letter-spacing: 0.04em;
+}
+.local-bar.on .lb-tag { border-color: var(--accent); color: var(--accent); }
+.lb-dir { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
+.lb-sel {
+  height: 20px; padding: 0 4px; font-size: 11px;
+  background: var(--bg-2); color: var(--text-0);
+  border: 1px solid var(--line); border-radius: 3px;
+}
+.lb-pick {
+  position: absolute; z-index: 30; left: 10px; top: 100%;
+  display: flex; gap: 6px; padding: 7px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.lb-pick .input { width: 320px; height: 24px; font-size: 11px; }
+
 .chart-wrap { position: relative; flex: 1; min-height: 0; }
 .chart-host { position: absolute; inset: 0; }
+
+/* 右键取价菜单：贴着鼠标出，四个去处各占一行。
+   它是「就地取一个价」，不是导航，所以不用遮罩糊住整张图 —— 只挡住点击穿透 */
+.price-menu-scrim { position: absolute; inset: 0; z-index: 20; }
+.price-menu {
+  position: absolute;
+  min-width: 186px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+  display: grid; gap: 1px;
+}
+.pm-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 4px 7px 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.pm-price { font-family: var(--mono); font-size: 13px; font-weight: 650; color: var(--text-0); }
+.pm-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; padding: 6px 8px; border-radius: 4px;
+  background: none; border: 0; color: var(--text-0);
+  font-size: 12px; text-align: left;
+}
+.pm-item:hover:not(:disabled) { background: var(--bg-3); }
+.pm-item:disabled { color: var(--text-2); }
+.pm-hint { font-size: 10px; color: var(--text-2); }
+.pm-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+.pm-foot { padding: 5px 8px 2px; font-size: 10px; color: var(--text-2); }
 
 .chart-badge {
   position: absolute; left: 10px; top: 8px;

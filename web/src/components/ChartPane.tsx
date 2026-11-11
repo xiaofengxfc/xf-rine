@@ -113,17 +113,35 @@ interface Props {
   /** 后台正在往左补历史 */
   backfilling?: boolean;
   onIntervalChange: (i: string) => void;
+  /**
+   * 周期按钮显示哪几个。
+   *
+   * 默认是交易所那七档；本地数据模式下换成文件里真有的那些（D1 / H1 / 15min…），
+   * 否则用户点一个目录里没有的周期，只会得到一张空图。
+   */
+  intervals?: string[];
   onManualLevels: (prices: number[]) => void;
   /** 解锁并连上了，图上那个「市价平」才可按 */
   canClose: boolean;
   /** 图上直接平仓。和持仓卡里那个是同一个接口，只是挪到手指边上 —— 手机上原来要滑到底才够得着 */
   onClosePosition: (contract: string, direction: 'long' | 'short') => void;
+  /**
+   * 右键取价：把鼠标所在的价格带进下单面板的 限价 / 止损 / 止盈，
+   * 或者直接覆盖当前持仓的止损止盈。四个动作在 `RightClickPick` 里定义。
+   */
+  onPickPrice: (price: number, what: PricePick) => void;
+  /** 这个合约上有没有仓。有仓才给「覆盖持仓止损/止盈」那两项 */
+  hasPosition: boolean;
 }
+
+/** 右键菜单里的四个去处 */
+export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
   contract, interval, bars, levels, positions, orders, multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
-  canClose, onClosePosition,
+  intervals = INTERVALS as unknown as string[],
+  canClose, onClosePosition, onPickPrice, hasPosition,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -244,8 +262,16 @@ export default function ChartPane({
   /** 图上那一步「确认平掉」按了没有。按合约+方向记，双向持仓时两边各管各的 */
   const [closing, setClosing] = useState<string | null>(null);
   const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
+  /** 右键菜单：贴着鼠标的位置画，带了它取到的那根 K 线所在的价格 */
+  const [menu, setMenu] = useState<{ x: number; y: number; price: number; time: number | null } | null>(null);
 
   barsRef.current = bars;
+  /** 右键取价按这个吸附。建图的 effect 只跑一次，所以走 ref 拿最新的 */
+  const roundRef = useRef(priceRound);
+  roundRef.current = priceRound;
+  /** 右键菜单里的动作也走 ref：effect 里挂的监听只挂一次 */
+  const pickRef = useRef(onPickPrice);
+  pickRef.current = onPickPrice;
 
   // ---- 建图 ----
   useEffect(() => {
@@ -445,6 +471,33 @@ export default function ChartPane({
     window.addEventListener('pointerup', onUp, CAPTURE);
     window.addEventListener('pointercancel', onUp, CAPTURE);
 
+    /**
+     * 右键取价。
+     *
+     * 价格从坐标轴换算，不从中枢价猜：鼠标停在哪一根价格上就该带哪一个，
+     * 吸到最小变动位上再进菜单（带一个 73590.8123 进止损框只会让交易所拒单）。
+     * 落在 K 线上时顺便记下那根的时间，菜单里写出来，免得「我点的是那一根」变成一句空话。
+     */
+    const onContextMenu = (e: MouseEvent) => {
+      const box = host.getBoundingClientRect();
+      const x = e.clientX - box.left;
+      const y = e.clientY - box.top;
+      // 坐标轴那一块不给取价：那里对应的价格没有意义
+      if (x < 0 || y < 0 || x > box.width || y > box.height) return;
+      const raw = price.coordinateToPrice(y - host.clientTop);
+      if (raw === null || !Number.isFinite(Number(raw))) return;
+      const value = Number(raw);
+      const step = roundRef.current > 0 ? roundRef.current : 0;
+      const snapped = step > 0 ? Math.round(value / step) * step : value;
+      let time: number | null = null;
+      const t = chart.timeScale().coordinateToTime(x);
+      if (t !== null) time = Number(t);
+      e.preventDefault();
+      e.stopPropagation();
+      setMenu({ x, y, price: snapped, time });
+    };
+    host.addEventListener('contextmenu', onContextMenu);
+
     chartRef.current = chart;
     priceRef.current = price;
     lineRef.current = line;
@@ -456,6 +509,7 @@ export default function ChartPane({
       window.clearTimeout(saveTimer);
       window.clearTimeout(releaseTimer);
       window.clearTimeout(lostTimer);
+      host.removeEventListener('contextmenu', onContextMenu);
       // 摘监听时 capture 必须和挂的时候一致，否则摘不掉（会留着引用旧的 ref）
       host.removeEventListener('pointerdown', onDown, true);
       host.removeEventListener('pointermove', onMove, true);
@@ -1031,7 +1085,7 @@ export default function ChartPane({
     <>
       <div className="chart-tools">
         <div className="seg">
-          {INTERVALS.map((i) => (
+          {intervals.map((i) => (
             <button key={i} className={i === interval ? 'on' : ''} onClick={() => onIntervalChange(i)}>{i}</button>
           ))}
         </div>
@@ -1168,6 +1222,59 @@ export default function ChartPane({
                 </div>
               );
             })}
+          </div>
+        )}
+        {menu && (
+          <div
+            className="price-menu-scrim"
+            onClick={() => setMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
+          >
+            <div
+              className="price-menu"
+              style={{
+                left: Math.min(menu.x, Math.max(0, (hostRef.current?.clientWidth ?? 400) - 200)),
+                top: Math.min(menu.y, Math.max(0, (hostRef.current?.clientHeight ?? 300) - 250)),
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="pm-head">
+                <span className="pm-price">{fmtPrice(menu.price, priceRound)}</span>
+                {menu.time !== null && <span className="dim">{fmtDate(menu.time)}</span>}
+              </div>
+              {([
+                ['limit', '作为限价', !hasPosition ? '' : ''],
+                ['stop', '作为止损价', ''],
+                ['target', '作为止盈价', ''],
+              ] as const).map(([what, label]) => (
+                <button
+                  key={what}
+                  className="pm-item"
+                  onClick={() => { pickRef.current(menu.price, what as PricePick); setMenu(null); }}
+                >
+                  <span>{label}</span>
+                  <span className="pm-hint">{what === 'limit' ? '下单面板' : what === 'stop' ? '下单面板' : '下单面板'}</span>
+                </button>
+              ))}
+              <div className="pm-sep" />
+              {([
+                ['posStop', '覆盖持仓止损'],
+                ['posTarget', '覆盖持仓止盈'],
+              ] as const).map(([what, label]) => (
+                <button
+                  key={what}
+                  className="pm-item"
+                  disabled={!hasPosition}
+                  title={hasPosition ? '立即改这张仓的止损/止盈（会撤掉原来那张触发单）' : '这个合约上还没有持仓'
+                  }
+                  onClick={() => { pickRef.current(menu.price, what as PricePick); setMenu(null); }}
+                >
+                  <span>{label}</span>
+                  <span className="pm-hint">{hasPosition ? '直接改仓' : '没有持仓'}</span>
+                </button>
+              ))}
+              <div className="pm-foot">右键取价 · 点空白处关掉</div>
+            </div>
           </div>
         )}
         {loading && <div className="loading">加载中…</div>}

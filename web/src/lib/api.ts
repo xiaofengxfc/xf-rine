@@ -111,11 +111,48 @@ export interface Level {
   distAtr: number;
   /** 最近一次触及距今多少根 bar，从没碰过是 -1 */
   barsSinceTouch: number;
+  /**
+   * 排序分落在历史分位的第几档（1-5）。
+   *
+   * 这是上游在 A 股日线上标定出来的分档线，只能说明「这个分在本样本里属于高档还是低档」，
+   * 不是胜率，也不是「守住概率」。界面上必须按这个口径写。
+   */
+  bucket?: number;
+}
+
+/** 本地数据目录里的一个品种，以及它有哪些周期 */
+export interface LocalInstrument {
+  symbol: string;
+  /** 文件名里的周期代号，如 D1 / H1 / 15min —— 原样带回去查 K 线 */
+  timeframes: string[];
+}
+
+export interface LocalDirInfo {
+  dir: string;
+  instruments: LocalInstrument[];
+  /** 这个目录里认得的数据文件数 */
+  files: number;
+  /** 记住的目录还在不在。被挪走、被删掉时是 false，界面要直说而不是空着 */
+  exists: boolean;
+  error?: string;
+}
+
+export interface LocalBars {
+  contract: string;
+  interval: string;
+  source: 'local';
+  bars: Bar[];
+  /** 文件里一共多少根，界面据此说「给了多少 / 一共多少」 */
+  total: number;
+  exhausted: boolean;
+  intervalSec: number;
 }
 
 export interface LevelsResponse {
   contract: string;
   interval: string;
+  /** 数据来自交易所实时 K 线，还是本地那个 Parquet 目录 */
+  source?: 'gate' | 'local';
   barsUsed: number;
   levels: Level[];
   atr: number;

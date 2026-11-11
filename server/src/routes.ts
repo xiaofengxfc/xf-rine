@@ -10,6 +10,10 @@ import { newsDigest } from './news.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
 import { sendFeedback, feedbackTarget, FeedbackError } from './feedback.js';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
+import { HOME_DIR } from './config.js';
+import { DataError, containedPath, readFile, scanDir, tfSeconds } from './localdata.js';
 
 export const router = Router();
 
@@ -186,6 +190,10 @@ function fail(res: Response, err: unknown): void {
   }
   if (err instanceof GateError) {
     res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.detail, status: err.status });
+    return;
+  }
+  if (err instanceof DataError) {
+    res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.message, status: err.status });
     return;
   }
   const msg = err instanceof Error ? err.message : String(err);
@@ -644,27 +652,132 @@ function priceTickOf(contract: string): number {
   } catch { return 0; }
 }
 
+const levelOpts = (req: Request) => ({
+  lookback: Math.round(qnum(req.query.lookback, 250, 60, 1000)),
+  maxOut: Math.round(qnum(req.query.maxOut, 10, 2, 20)),
+  maxDistAtr: qnum(req.query.maxDistAtr, 5, 0.5, 20),
+  nmsGapAtr: qnum(req.query.nmsGapAtr, 0.9, 0.2, 5),
+});
+
+/**
+ * 档位有两条数据来源：交易所的实时 K 线，或者你本地那个 Parquet 目录。
+ *
+ * 本地那条带 source=local&symbol=xxx&tf=H1 走，算法一字不差 —— 上游项目本来就是
+ * 「读本地 parquet 算位」，这条路才是它的主用法；交易所那条只是把同一套算法挂到实时行情上。
+ * 两条路算出来的都是「离现价多远」，只是现价的定义不同：本地数据的最后一根收盘价。
+ */
 router.get('/levels', wrap(async (req, res) => {
+  const source = String(req.query.source ?? 'gate') === 'local' ? 'local' : 'gate';
+  const limit = Math.round(qnum(req.query.limit, 500, 120, 5000));
+
+  if (source === 'local') {
+    requireLocal(req, '本地数据');
+    const symbol = String(req.query.symbol ?? '');
+    const tf = String(req.query.tf ?? 'D1').toUpperCase();
+    const root = requireDataDir();
+    const { bars } = await readFile(containedPath(root, symbol, tf));
+    const recent = limit > 0 ? bars.slice(Math.max(0, bars.length - limit)) : bars;
+    const set = withLive(detectLevels(recent, { tick: 0, ...levelOpts(req) }), recent[recent.length - 1]?.close ?? 0);
+    res.json({
+      contract: symbol,
+      interval: tf,
+      source: 'local',
+      firstTime: recent[0]?.time ?? 0,
+      lastTime: recent[recent.length - 1]?.time ?? 0,
+      barsUsed: recent.length,
+      ...set,
+    });
+    return;
+  }
+
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
-  const limit = Math.round(qnum(req.query.limit, 500, 120, 1000));
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
   const { bars } = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
   // 丢掉最后一根未走完的 K 线：半根 K 线的影线不该参与判位
   const closed = bars.slice(0, -1);
   const live = bars[bars.length - 1]?.close ?? 0;
-  const set = withLive(detectLevels(closed, {
-    tick: priceTickOf(contract),
-    lookback: Math.round(qnum(req.query.lookback, 250, 60, 1000)),
-    maxOut: Math.round(qnum(req.query.maxOut, 10, 2, 20)),
-    maxDistAtr: qnum(req.query.maxDistAtr, 5, 0.5, 20),
-    nmsGapAtr: qnum(req.query.nmsGapAtr, 0.9, 0.2, 5),
-  }), live);
+  const set = withLive(detectLevels(closed, { tick: priceTickOf(contract), ...levelOpts(req) }), live);
   res.json({
     contract,
     interval,
+    source: 'gate',
     barsUsed: closed.length,
     ...set,
+  });
+}));
+
+// ---------- 本地数据目录（移植上游的数据层） ----------
+
+/**
+ * 记住的数据目录存在哪。
+ *
+ * 上游是 /api/data_dir 把任意路径写进内存，下次继续用。在桌面端这等于给网页开了
+ * 一个「随便读你硬盘」的口子，所以这里加两道锁：写要 requireLocal（本机），
+ * 读出来的路径必须在 XFRINE_DATA_DIR_ALLOW 给的根目录下（没配就以第一次选的那个为根）。
+ */
+const DATA_DIR_FILE = join(HOME_DIR, 'data-dir.json');
+
+function readDataDir(): string {
+  try {
+    const j = JSON.parse(readFileSync(DATA_DIR_FILE, 'utf8')) as { dir?: string };
+    return String(j.dir ?? '');
+  } catch { return ''; }
+}
+
+function requireDataDir(): string {
+  const d = readDataDir();
+  if (!d) throw new DataError(400, 'NO_DIR', '还没选本地数据目录，先到设置页选一个');
+  return d;
+}
+
+router.get('/data/dir', wrap(async (req, res) => {
+  requireLocal(req, '本地数据目录');
+  const dir = readDataDir();
+  if (!dir) { res.json({ dir: '', instruments: [], files: 0, exists: false }); return; }
+  try {
+    res.json({ ...scanDir(dir), exists: true });
+  } catch (e) {
+    // 目录被删/被移动了不该让整页崩，如实说它在哪、现在什么状态
+    res.json({ dir, instruments: [], files: 0, exists: false, error: (e as Error).message });
+  }
+}));
+
+router.post('/data/dir', wrap(async (req, res) => {
+  // 只认本机、不要 arm 令牌：这一步不碰交易所、不动钱，只是记住「读哪个目录」。
+  // 要令牌的话就得先配密钥、先点解锁 —— 而想用本地数据的人往往根本不下单。
+  requireLocal(req, '选本地数据目录');
+  const raw = String((req.body as { dir?: string })?.dir ?? '').trim();
+  if (!raw) throw new DataError(400, 'BAD_INPUT', '缺少 dir');
+  // 先验一遍再存：存一个扫不出东西的目录，等于让后面每一步都在报错
+  const scan = scanDir(raw);
+  const allow = (process.env.XFRINE_DATA_DIR_ALLOW ?? '').trim();
+  if (allow) {
+    const roots = allow.split(';').map((x) => resolve(x.trim())).filter(Boolean);
+    const inside = roots.some((r) => scan.dir === r || scan.dir.startsWith(r + sep));
+    if (!inside) throw new DataError(403, 'OUTSIDE_ROOT', '这个目录不在允许的根目录里：' + roots.join(' / '));
+  }
+  writeFileSync(DATA_DIR_FILE, JSON.stringify({ dir: scan.dir, at: Date.now() }, null, 2), 'utf8');
+  res.json({ ok: true, ...scan });
+}));
+
+/** 读一个品种某个周期的 K 线。图表和档位都用它，返回的字段和 /candles 对齐 */
+router.get('/data/bars', wrap(async (req, res) => {
+  requireLocal(req, '本地数据');
+  const symbol = String(req.query.symbol ?? '');
+  const tf = String(req.query.tf ?? 'D1').toUpperCase();
+  const limit = Math.round(qnum(req.query.limit, 500, 30, 20_000));
+  const root = requireDataDir();
+  const { bars } = await readFile(containedPath(root, symbol, tf));
+  const recent = bars.slice(Math.max(0, bars.length - limit));
+  res.json({
+    contract: symbol,
+    interval: tf,
+    source: 'local',
+    bars: recent,
+    total: bars.length,
+    exhausted: recent.length === bars.length,
+    intervalSec: tfSeconds(tf),
   });
 }));
 

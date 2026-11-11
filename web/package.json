@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@capacitor/app": "^8.0.0",
-    "@capawesome/capacitor-nodejs": "^0.2.0",
     "lightweight-charts": "^5.2.1",
     "lightweight-charts-drawing": "^0.7.0",
     "react": "^19.0.0",

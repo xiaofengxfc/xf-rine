@@ -44,11 +44,11 @@ export interface Level {
   zoneHigh: number;
   role: 'support' | 'resistance';
   /**
-   * 排序分：log1p(触及次数) + 0.8×(1-最近性)。越大越该当关键位。
-   * 这是「相对强度」，不是概率，别当成守住的可能性来读。
+   * edge 分：log1p(触及次数) + 0.8×陈旧度。越大越该当「进场参考位」。
+   * 这是「相对强度」，不是概率 —— 上游实测把这类分数标成概率时 Brier 和常数预测一样。
    */
   score: number;
-  /** 触及后守住的比例（Wilson 下界，0-1） */
+  /** 触及后守住的比例（Wilson 下界，0-1）。事件数 < minEventsForWilson 时是保守值 0.25 */
   holdRate: number;
   /** 历史触及事件数（同一次进入只算一次） */
   touches: number;
@@ -56,11 +56,17 @@ export interface Level {
   holds: number;
   /** 越久没被碰过越强 = 1 - 最近性。从没碰过记 1 */
   stale: number;
+  /** 最近性：0 = 很久没碰过，1 = 就在最近几根碰到过（上游实测它对收益是反向的） */
+  recency: number;
   /**
    * 成交量剖面看「价格容易在这里停」的倾向（0 起，量纲大致 0-2，越大越容易停）。
    * 不参与排序 —— 原作者实测它「守住率高但收益率差」，是「会停」不是「能赚」。
    */
   pStall: number;
+  /** 整数关口得分（0-1）。上游实测无信息量、权重已归零，只留作对照 */
+  roundScore: number;
+  /** edge 分落在历史分位第几档（0-3），对应 bucketStat() 的样本外实测表现 */
+  bucket: number;
   /** 区宽 / ATR */
   widthAtr: number;
   /** 距现价百分比（中枢相对最新价，带符号） */
@@ -132,6 +138,31 @@ export interface LevelOptions {
   touchTargetAtr?: number;
   /** 事件少于这个数时不给 Wilson 下界，直接给保守值 */
   minTouchEvents?: number;
+  // --- 证据权重（上游 V3Params，一个都别随手改，每个都有对照实验支撑） ---
+  /** 定位面：成交量剖面 */
+  wVp?: number;
+  /** 定位面：收盘价堆积 */
+  wClose?: number;
+  /** 定位面：枢轴聚集（V3 里只用于定位，不参与排序） */
+  wPivot?: number;
+  /** 排序：log1p(触及事件数) */
+  wEvents?: number;
+  /** 排序：陈旧度 */
+  wStale?: number;
+  /** 排序：Wilson 守住率（上游 train/test 符号翻转，归零） */
+  wHoldWilson?: number;
+  /** 排序：成交量剖面（实测守住率高但收益率负，移出排序） */
+  wVpEdge?: number;
+  /** 排序：枢轴聚集（支撑上无信息，归零） */
+  wPivotEdge?: number;
+  /** 事件数到多少才信 Wilson 下界 */
+  minEventsForWilson?: number;
+  /** pStall：成交量剖面权重 */
+  sVp?: number;
+  /** pStall：收盘价堆积权重 */
+  sClose?: number;
+  /** pStall：区宽权重 */
+  sWidth?: number;
 }
 
 const DEFAULTS: Required<LevelOptions> = {
@@ -158,6 +189,20 @@ const DEFAULTS: Required<LevelOptions> = {
   touchBreakAtr: 0.5,
   touchTargetAtr: 1,
   minTouchEvents: 2,
+  // 以下全部照抄上游 V3Params。每一项后面都有 38000 个已触及关键位上的对照实验，
+  // 不是调参调出来的手感值。
+  wVp: 1.0,
+  wClose: 0.8,
+  wPivot: 1.6,
+  wEvents: 1.0,
+  wStale: 0.8,
+  wHoldWilson: 0.0,
+  wVpEdge: 0.0,
+  wPivotEdge: 0.0,
+  minEventsForWilson: 3,
+  sVp: 1.0,
+  sClose: 0.8,
+  sWidth: 0.3,
 };
 
 const LOG2 = Math.log(2);
@@ -356,7 +401,6 @@ function tickGuess(closes: number[]): number {
   if (px <= 0) return 0.01;
   return px < 1000 ? 0.01 : Math.pow(10, Math.floor(Math.log10(px)) - 4);
 }
-
 // ---------- 因果 ZigZag 枢轴（上游 src/srlab/pivots.py） ----------
 
 export interface Pivots {
@@ -441,7 +485,7 @@ export function zigzag(bars: Bar[], atrArr: number[], kAtr = 2): Pivots {
 
 /**
  * 枢轴剖面：低点是潜在支撑、高点是潜在阻力，但破位后角色互换，
- * 所以两个面各自保留对方 40% 的贡献。
+ * 所以两个面各自保留对方 40% 的贡献（上游 detectors._pivot_profiles）。
  */
 function pivotProfiles(
   bars: Bar[], atrArr: number[], b: Bins, atrValue: number, p: Required<LevelOptions>,
@@ -449,29 +493,29 @@ function pivotProfiles(
   const zeros = new Array(b.nb).fill(0);
   const zz = zigzag(bars, atrArr, p.pivotK);
   const t = bars.length - 1;
-  const idx: number[] = [];
   const price: number[] = [];
   const kind: number[] = [];
   const wts: number[] = [];
+  let used = 0;
   for (let i = 0; i < zz.idx.length; i++) {
-    if (zz.confirmIdx[i]! > t) continue;           // 还没被确认，不能用
+    if (zz.confirmIdx[i]! > t) continue;            // 还没被确认，不能用
     if (zz.idx[i]! < t - p.pivotLookback) continue; // 太老
     const age = t - zz.idx[i]!;
     const rec = Math.exp((-LOG2 * age) / Math.max(p.pivotHalfLife, 1e-9));
     const sig = clamp(zz.legAtr[i]!, 0.5, 8);       // 形成这个枢轴的行程越大越显著
-    idx.push(i);
     price.push(zz.price[i]!);
     kind.push(zz.kind[i]!);
     wts.push(rec * sig);
+    used++;
   }
-  if (idx.length === 0) return { sup: zeros, res: zeros, used: 0 };
+  if (price.length === 0) return { sup: zeros, res: zeros, used: 0 };
 
   const kb = Math.max(0.5, (p.pivotKernelAtr * atrValue) / b.binW);
   const loP: number[] = [];
   const loW: number[] = [];
   const hiP: number[] = [];
   const hiW: number[] = [];
-  for (const i of idx) {
+  for (let i = 0; i < price.length; i++) {
     if (kind[i] === -1) { loP.push(price[i]!); loW.push(wts[i]!); }
     else { hiP.push(price[i]!); hiW.push(wts[i]!); }
   }
@@ -479,12 +523,12 @@ function pivotProfiles(
   const resRaw = pointProfile(hiP, hiW, b, kb);
   const sup = robustZ(supRaw.map((v, i) => v + 0.4 * resRaw[i]!));
   const res = robustZ(resRaw.map((v, i) => v + 0.4 * supRaw[i]!));
-  return { sup, res, used: idx.length };
+  return { sup, res, used };
 }
 
 /**
- * 区宽：由证据面的局部离散度决定（半高宽），再夹到 [widthMin, widthMax]×ATR。
- * 上游实测旧做法给出的区宽是 2.2~5.7 ATR，那才是「高胜率」的来源 —— 区越宽当然越容易守住。
+ * 区宽：由证据面的局部离散度决定（相对中位数的半高），再夹到 [widthMin, widthMax]×ATR。
+ * 上游实测旧做法给出的区宽是 2.2~5.7 ATR，那才是「高胜率」的真正来源 —— 区越宽当然越容易守住。
  */
 function zoneBounds(
   surf: number[], px: number[], i: number, atrValue: number, p: Required<LevelOptions>,
@@ -504,7 +548,7 @@ function zoneBounds(
 /**
  * 历史触及统计。返回守住率（Wilson 下界）、事件数、守住数、距今多少根。
  *
- * 与「数假突破」的差别：
+ * 与「数假突破」的差别（上游 detectors._touch_stats）：
  *   - 同一次进入区间只算一次事件（冷却 touchGap 根）
  *   - 方向校验：支撑要求上一根收盘在区上方（自上而下测试），阻力反之
  *   - 阈值 ATR 化：破位 = 收盘越过区外 break×ATR(当时)，达标 = 反向走出 target×ATR
@@ -519,6 +563,7 @@ function touchStats(
   if (hiEnd - histLo < 30) return none;
 
   const n = hiEnd - histLo;
+  if (n < 20) return none;
   const h: number[] = [];
   const l: number[] = [];
   const c: number[] = [];
@@ -576,11 +621,43 @@ function touchStats(
   return { holdRate: wilsonLower(holds, tot), events: tot, holds, sinceTouch };
 }
 
+/**
+ * 整数关口。上游实测：支撑上 p=0.70 不显著，阻力上显著为**负**，所以权重归零。
+ * 函数留着，方便以后用 1.10 / 0.35 这类加密盘口特征重做对照时直接改权重。
+ */
+function roundBonus(center: number, atrValue: number): number {
+  if (center <= 0) return 0;
+  const s = Math.pow(10, Math.floor(Math.log10(center)) - 1);
+  let best = 0;
+  for (const [mult, wt] of [[1, 0.4], [5, 0.7], [10, 1]] as const) {
+    const step = s * mult;
+    const d = Math.abs(center - Math.round(center / step) * step);
+    best = Math.max(best, wt * Math.exp(-0.5 * (d / Math.max(0.2 * atrValue, 1e-12)) ** 2));
+  }
+  return best;
+}
+
+/** 最近性：最近一次进入区间距今的指数衰减。上游实测「阻力越新鲜越弱」，所以排序用的是 1-recency */
+function recencyOf(
+  bars: Bar[], zlo: number, zhi: number, histLo: number,
+): number {
+  const n = bars.length - histLo;
+  let lastIdx = -1;
+  for (let i = 0; i < n; i++) {
+    const b = bars[histLo + i]!;
+    if (b.low <= zhi && b.high >= zlo) lastIdx = i;
+  }
+  if (lastIdx < 0) return 0;
+  const age = n - 1 - lastIdx;
+  return Math.exp((-LOG2 * age) / 120);
+}
+
 // ---------- 候选生成 ----------
 
 /**
  * 候选 = 定位面上的极值点。极值不够时用满足间距的次高点补齐到 quota 个：
- * 上游的教训是每侧只产 1~2 个位时，和「每侧固定 3 个」的对照组没法公平比较。
+ * 上游的教训是每侧只产 1~2 个位时，和「每侧固定 3 个」的对照组没法公平比较
+ * （placebo 召回 0.404 vs V2 0.256，其中相当一部分只是「输出得更多」）。
  */
 function candidates(
   loc: number[], px: number[], price: number, role: 'support' | 'resistance',
@@ -606,6 +683,69 @@ function candidates(
 }
 
 // ---------- 主流程 ----------
+
+/**
+ * 一个关键位属于历史分位里的哪一档（上游 score_calibration.json 的 edge_edges）。
+ *
+ * 为什么给这个而不是概率：上游在 53823 个关键位上测过，输出的「下次守住概率」
+ * Brier 0.1836，常数预测 0.1842 —— 零区分度，所以作者自己删掉了那个概率。
+ * 留下的是「这一档在样本外的实测守住率」，那是有样本量支撑的统计量。
+ * 注意那是 A 股日线的样本，搬到加密永续上只当参考，不当结论。
+ */
+const EDGE_EDGES: Record<'support' | 'resistance', number[]> = {
+  support: [1.5476556520345706, 2.0794415416798357, 2.4340219896700375, 2.7817775059574643],
+  resistance: [1.6094379124341003, 2.1066924785399594, 2.4849066497880004, 2.8279203563494315],
+};
+
+/** 上游 data/score_calibration.json 的 stall_edges：pStall 的分档线（界面上把停滞倾向说成「容易停 / 一般」用） */
+const STALL_EDGES: Record<'support' | 'resistance', number[]> = {
+  support: [0.9628853569086716, 1.2127014013569162, 1.4472008675982697, 1.7798506367283644],
+  resistance: [0.9888361010576564, 1.3133972295853353, 1.5948333420019745, 1.9066127897880796],
+};
+
+/**
+ * 上游 data/score_calibration.json 的 buckets 原样搬过来：每一档在**样本外**股票上的实测表现。
+ *
+ * 只能当参考，不能当结论，原因三条，都很硬：
+ *   1. 样本是 A 股日线，不是加密永续 —— 标的和周期都换了；
+ *   2. n 是「触及后十个交易日走出结果」的样本量，加密盘口一天就走完同样的行程；
+ *   3. 阻挡档的 fwd_ret 全是负的（-0.42% ~ -1.21%），那是统计口径里「做空到这条阻力位」的
+ *      历史平均，不是「在这里进场能赚」。上游自己也是这么注明的。
+ * 所以界面只印「这一档历史上」，并注明样本来源，不给任何「胜率」措辞。
+ */
+const EDGE_BUCKETS: Record<'support' | 'resistance', { holdRate: number; n: number; fwdRetPct: number; edgeAtr: number }[]> = {
+  support: [
+    { holdRate: 0.6979, n: 3856, fwdRetPct: 0.4152, edgeAtr: 0.1222 },
+    { holdRate: 0.7286, n: 3909, fwdRetPct: 0.4806, edgeAtr: 0.2076 },
+    { holdRate: 0.7409, n: 4219, fwdRetPct: 0.4861, edgeAtr: 0.2173 },
+    { holdRate: 0.7466, n: 4080, fwdRetPct: 0.8089, edgeAtr: 0.2962 },
+    { holdRate: 0.7645, n: 4000, fwdRetPct: 0.7788, edgeAtr: 0.3563 },
+  ],
+  resistance: [
+    { holdRate: 0.7311, n: 4879, fwdRetPct: -1.208, edgeAtr: -0.9611 },
+    { holdRate: 0.7649, n: 4985, fwdRetPct: -0.7248, edgeAtr: -0.8893 },
+    { holdRate: 0.7938, n: 4927, fwdRetPct: -0.4237, edgeAtr: -0.8383 },
+    { holdRate: 0.7942, n: 5054, fwdRetPct: -0.733, edgeAtr: -0.9108 },
+    { holdRate: 0.7961, n: 4709, fwdRetPct: -0.6838, edgeAtr: -1.0917 },
+  ],
+};
+
+/** 分数落在第几档（0-4）。区间左闭右开，两端由首末档兜住 */
+function bucketOf(edges: number[], v: number): number {
+  let q = 0;
+  while (q < edges.length && v >= edges[q]!) q++;
+  return q;
+}
+
+/** 某个关键位所属档的样本外实测表现（A 股日线；加密盘口只当参考） */
+export function bucketStat(role: 'support' | 'resistance', bucket: number) {
+  return EDGE_BUCKETS[role][Math.min(4, Math.max(0, bucket))]!;
+}
+
+/** pStall 落在第几档（0-4），界面上把它说成「很容易停 / 容易停 / 一般 / …」 */
+export function stallBucket(role: 'support' | 'resistance', pStall: number): number {
+  return bucketOf(STALL_EDGES[role], pStall);
+}
 
 export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
   const p: Required<LevelOptions> = { ...DEFAULTS, ...opts };
@@ -657,29 +797,40 @@ export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
 
   for (const role of ['support', 'resistance'] as const) {
     // 定位面：三个证据加权。它只决定「去哪里找」，不参与最终排序
-    const surf = role === 'support' ? pv.sup : pv.res;
-    const loc = px.map((_, i) => 1.0 * vp[i]! + 0.8 * cp[i]! + 1.6 * surf[i]!);
+    const side = role === 'support' ? pv.sup : pv.res;
+    const loc = px.map((_, i) => p.wVp * vp[i]! + p.wClose * cp[i]! + p.wPivot * side[i]!);
 
     for (const i of candidates(loc, px, last, role, atrValue, minD, p)) {
       const zone = zoneBounds(loc, px, i, atrValue, p);
       const ts = touchStats(input, atrArr, zone.lo, zone.hi, role, histLo, p);
-      // 陈旧度：越久没被碰过越强。从没碰过记 1（上游实测方向和直觉相反）
-      const stale = ts.sinceTouch < 0 ? 1 : 1 - Math.exp((-LOG2 * ts.sinceTouch) / 120);
-      // 排序分：只有两个实测稳定的因子
-      const score = Math.log1p(Math.max(ts.events, 0)) + 0.8 * stale;
-      // 停滞倾向：不参与排序，只作展示（价格在这里容易停，不代表进场能赚）
-      const pStall = 1.0 * vp[i]! + 0.8 * cp[i]! + 0.3 * ((zone.hi - zone.lo) / atrValue);
+      // 最近性 / 陈旧度：上游实测「越久没被碰过越强」，和直觉相反，但两个互斥股票池方向一致
+      const recency = recencyOf(input, zone.lo, zone.hi, histLo);
+      const stale = 1 - recency;
+      // edge 分：只放实测「进场收益」同向的证据（事件数 + 陈旧度）
+      const wil = ts.events >= p.minEventsForWilson ? ts.holdRate : 0;
+      const edge = p.wEvents * Math.log1p(Math.max(ts.events, 0))
+        + p.wStale * stale
+        + p.wHoldWilson * wil
+        + p.wVpEdge * vp[i]!
+        + p.wPivotEdge * side[i]!;
+      // pStall：价格在这里「停得住」的倾向，不参与排序，只供放止损 / 目标位参考
+      const pStall = p.sVp * vp[i]! + p.sClose * cp[i]! + p.sWidth * (zone.hi - zone.lo) / atrValue;
       out.push({
         price: px[i]!,
         zoneLow: zone.lo,
         zoneHigh: zone.hi,
         role,
-        score,
+        score: edge,
         holdRate: ts.holdRate,
         touches: ts.events,
         holds: ts.holds,
         stale,
+        recency,
         pStall,
+        roundScore: roundBonus(px[i]!, atrValue),
+        // 1-5 档：给界面印「这一档历史上」用的。分位线来自上游 A 股日线的标定，
+        // 只在界面上当参考，不参与排序、也不叫概率
+        bucket: bucketOf(EDGE_EDGES[role], edge) + 1,
         widthAtr: (zone.hi - zone.lo) / atrValue,
         distancePct: ((px[i]! - last) / last) * 100,
         distAtr: (px[i]! - last) / atrValue,
@@ -721,3 +872,4 @@ export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
     pivots: pv.used,
   };
 }
+

@@ -3,8 +3,13 @@ import type { CapacitorConfig } from '@capacitor/cli';
 /**
  * 手机端。
  *
- * 装的是整个程序，不是一块连电脑的屏幕：Node 运行时（nodejs-mobile）跑在 App 进程里，
- * 服务端就在手机上算，行情、支撑阻力、新闻、AI、下单全都在本地完成。
+ * 手机只是一块屏幕：所有计算在电脑上做（行情、支撑阻力、下单），
+ * 手机负责显示和下单，通过局域网连电脑上跑的同一个服务端。
+ *
+ * 这里不再挂 Node 运行时插件：把整个后端塞进 APK 的那套已经去掉了，
+ * 代价是多几十兆原生库、每个算法改动都要重打包、换机换系统一堆加载失败的兼容问题 ——
+ * 而手机本来也用不上「读本地数据目录」和「连交易所代理」这些只有电脑才有的东西。
+ *
  * 页面这一层仍然只有 web/dist 一份，和桌面端、浏览器里看到的一样。
  */
 const config: CapacitorConfig = {
@@ -12,12 +17,6 @@ const config: CapacitorConfig = {
   appName: '巡风',
   webDir: '../web/dist',
   plugins: {
-    Nodejs: {
-      // 服务端打好的产物放在 web/dist/nodejs/，见 tools/bundle-server.mjs
-      nodeDir: 'nodejs',
-      // 手动启动：BootGate 要先定好数据目录再起引擎
-      startMode: 'manual',
-    },
     /**
      * 系统栏（状态栏、手势条）。
      *
@@ -37,8 +36,9 @@ const config: CapacitorConfig = {
     /**
      * 页面自己的源用 http。
      *
-     * 内置服务端是 http://127.0.0.1:8787，没有证书；页面要是从 https://localhost 出来，
-     * 浏览器会按混合内容把请求全掐掉，表现是「服务端明明起着，页面一片空白」。
+     * WebView 从 http://localhost 加载页面，而电脑上的服务端也是 http ——
+     * 页面要是从 https://localhost 出来，浏览器会按混合内容把请求全掐掉，
+     * 表现是「地址填对了、服务端明明起着，页面一片空白」。
      */
     androidScheme: 'http',
     cleartext: true,

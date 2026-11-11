@@ -4,14 +4,17 @@ import {
   type Account, type AppConfig, type Bar, type ContractInfo,
   type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
+  type LocalInstrument, type LocalDirInfo, type LocalBars,
 } from './lib/api.ts';
 import { INTERVAL_SEC, mergeNewer, mergeOlder } from './lib/candles.ts';
+import { fmtPrice } from './lib/format.ts';
 import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
-import ChartPane from './components/ChartPane.tsx';
+import ChartPane, { type PricePick } from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
 import TopBar from './components/TopBar.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
+import LocalBar from './components/LocalBar.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
 import PositionsCard from './components/PositionsCard.tsx';
 import NewsCard from './components/NewsCard.tsx';
@@ -124,6 +127,27 @@ export default function App() {
   /** 手机上左栏是抽屉：点顶栏的「合约」打开，选完自动收 */
   const [railOpen, setRailOpen] = useState(false);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
+  /**
+   * 本地数据源（移植过来的那套 Parquet 目录）。
+   *
+   * 打开之后图表、档位都改从本地文件读，交易所那条路原样留着 —— 两条路算档位用的是
+   * 同一份算法，区别只在 K 线从哪来：实时行情，还是你硬盘上那批历史文件。
+   */
+  const [local, setLocal] = useState<{ dir: string; instruments: LocalInstrument[]; files: number } | null>(null);
+  const [localOn, setLocalOn] = useState(false);
+  /** 本地模式下选中的品种和周期（周期代号用文件名里的那套：D1 / H1 / 15min…） */
+  const [localSym, setLocalSym] = useState('');
+  const [localTf, setLocalTf] = useState('D1');
+  /**
+   * 下单面板的三个价提在这一层。
+   *
+   * 图上右键取价要写进这三个框，面板自己拿着状态图表就够不着。提上来之后
+   * 右键 → 价格进框 → 下面那张多空盈亏表立刻按这个价重算，是一条直线。
+   */
+  const [limitStr, setLimitStr] = useState('');
+  const [stopStr, setStopStr] = useState('');
+  const [targetStr, setTargetStr] = useState('');
+  const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const [posPct, setPosPct] = useState(prefs0.posPct);
@@ -212,7 +236,22 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange);
   }, [railOpen]);
 
-  const marketKey = `${contract}:${interval}`;
+  /** 本地模式下真正在看的那一对品种/周期。周期不在这个品种里就退回它有的第一个 */
+  const localPick = useMemo(() => {
+    const inst = local?.instruments.find((i) => i.symbol === localSym);
+    if (!inst) return null;
+    const tf = inst.timeframes.includes(localTf) ? localTf : (inst.timeframes[0] ?? 'D1');
+    return { symbol: inst.symbol, tf };
+  }, [local, localSym, localTf]);
+
+  /**
+   * 「当前在看什么」的标识。
+   *
+   * 本地模式下由本地那一对决定，交易所那套不能参与 —— 否则图表、缓存、
+   * 每一条跟着 key 走的逻辑都会被两份数据互相顶掉。
+   */
+  const marketKey = localOn && localPick ? `${localPick.symbol}:${localPick.tf}` : `${contract}:${interval}`;
+
   // 只有归属当前币种和周期的数据才交给界面。切币那一帧旧数据还在 state 里，
   // 这一层直接挡掉，图表和右侧面板就不可能显示上一个币种的价格。
   const fresh = market.key === marketKey;
@@ -371,6 +410,55 @@ export default function App() {
   // 选过的东西记下来，刷新后接着看同一个
   useEffect(() => { savePrefs({ contract, interval, posPct }); }, [contract, interval, posPct]);
 
+  /** 拉一次目录状态：记住了哪个目录、里面有哪些品种周期 */
+  const loadLocal = useCallback(async () => {
+    try {
+      const d = await jget<LocalDirInfo>('/api/data/dir');
+      setLocal({ dir: d.dir, instruments: d.instruments, files: d.files });
+      if (!d.dir) { setLocalOn(false); return; }
+      // 记住的品种还在就留着，不在就跳到第一个
+      setLocalSym((cur) => {
+        if (d.instruments.some((i) => i.symbol === cur)) return cur;
+        return d.instruments[0]?.symbol ?? '';
+      });
+    } catch { /* 静默：本地数据是可选项，读不到不影响看盘 */ }
+  }, []);
+
+  /**
+   * 手机上选不了目录：那个接口只认本机回环地址（它是「读你硬盘」的入口）。
+   * 与其让用户点了之后收到 403，不如一开始就说清楚只能在电脑上选。
+   */
+  const canPickLocal = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    const h = window.location.hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+  }, []);
+
+  /**
+   * 选 / 换一个本地数据目录。
+   *
+   * 服务端只接受本机调用（那是读硬盘的接口），失败时把原因原样说出来 ——
+   * 手机上点这个按钮看到「只允许本机访问」，比看到一个空列表有用。
+   */
+  const pickLocalDir = useCallback(async (dir: string) => {
+    try {
+      const r = await jsend<{ ok: boolean; dir: string; instruments: LocalInstrument[]; files: number }>(
+        'POST', '/api/data/dir', { dir });
+      setLocal({ dir: r.dir, instruments: r.instruments, files: r.files });
+      setLocalSym(r.instruments[0]?.symbol ?? '');
+      setLocalOn(r.instruments.length > 0);
+      push('ok', '已切到本地数据', r.instruments.length + ' 个品种 · ' + r.files + ' 个文件');
+    } catch (e) {
+      push('err', '这个目录用不了', (e as Error).message);
+    }
+  }, [push]);
+
+  /** 退出本地模式：回到交易所实时行情，本地那套选择留着（下次点回来还是这个品种） */
+  const exitLocal = useCallback(() => {
+    setLocalOn(false);
+    void loadMarket(contract, interval);
+  }, [contract, interval]);
+
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
     const seq = ++marketSeqRef.current;
@@ -380,6 +468,29 @@ export default function App() {
     const cached = marketCacheRef.current.get(key) ?? null;
     if (cached) setMarket({ key, ...cached });
     setLoading(!cached);
+
+    // 本地数据模式：交易所那条路整段跳过。本地文件没有合约参数（没有乘数、费率），
+    // info 留空 —— 下单面板本来就会在没有合约时禁用，不会拿本地价去交易所下单。
+    if (localOn) {
+      try {
+        const lv = await jget<LevelsResponse>(
+          '/api/levels?source=local&symbol=' + encodeURIComponent(name) + '&tf=' + encodeURIComponent(tf) + '&limit=500',
+        );
+        const opened = await jget<LocalBars>(
+          '/api/data/bars?symbol=' + encodeURIComponent(name) + '&tf=' + encodeURIComponent(tf) + '&limit=' + OLDER_PAGE,
+        );
+        if (seq !== marketSeqRef.current) return;
+        setMarket({ key, info: null, bars: opened.bars, levels: lv });
+        setHistoryEnd(opened.exhausted);
+        if (opened.exhausted) noMoreOlderRef.current = true;
+      } catch (e) {
+        if (seq === marketSeqRef.current) push('err', '本地数据读不了', (e as Error).message);
+      } finally {
+        if (seq === marketSeqRef.current) setLoading(false);
+      }
+      return;
+    }
+
     try {
       const [c, k, lv] = await Promise.all([
         jget<ContractInfo>(`/api/contracts/${name}`),
@@ -402,7 +513,7 @@ export default function App() {
     } finally {
       if (seq === marketSeqRef.current) setLoading(false);
     }
-  }, [push]);
+  }, [push, localOn]);
 
   const loadLevelsOnly = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
@@ -468,8 +579,88 @@ export default function App() {
     }
   }, [token, push, loadPrivate]);
 
+  /**
+   * 把右键取到的价直接挂到当前持仓上。
+   *
+   * 只改点了的那一边，另一边保持原样：/api/bracket 是覆盖语义（先撤掉这一边已有的
+   * 触发单，再挂你填的价）。所以另一边必须从「现在挂着的触发单」里读回来一起传，
+   * 否则「右键改止损」会顺手把止盈撤掉 —— 用户以为只动了一边，其实裸了一边。
+   *
+   * 价格顺序就是语义：这一边的触发单里，多头止损在标记价下方、止盈在上方，空头反过来。
+   */
+  const applyToPosition = useCallback(async (kind: 'stop' | 'target', price: number) => {
+    if (!token) { push('err', '还没解锁交易', '先点右上角「解锁交易」'); return; }
+    const pos = positions.find((p) => p.contract === contract);
+    if (!pos) { push('err', '这个合约上没有持仓', contract); return; }
+    // 这一边现有的触发单按价格在多空之间分：多头止损在下、止盈在上，空头反过来。
+    // 价格顺序就是语义 —— 交易所的触发单里没有「这是止损」这个字段。
+    const mine = priceOrders.filter((o) => o.contract === contract && o.direction === pos.direction);
+    const below = mine.filter((o) => o.triggerPrice < pos.markPrice).map((o) => o.triggerPrice);
+    const above = mine.filter((o) => o.triggerPrice > pos.markPrice).map((o) => o.triggerPrice);
+    const stopList = pos.direction === 'long' ? below : above;
+    const targetList = pos.direction === 'long' ? above : below;
+    /** 同一侧可能挂着不止一张，取离现价最近的那张（也就是真正在护仓的那张） */
+    const nearest = (xs: number[]) => xs.reduce((a, b) => (Math.abs(b - pos.markPrice) < Math.abs(a - pos.markPrice) ? b : a), 0);
+    const stopNow = kind === 'stop' ? price : nearest(stopList);
+    const targetNow = kind === 'target' ? price : nearest(targetList);
+    try {
+      await jsend('POST', '/api/bracket', {
+        contract, direction: pos.direction, stop: stopNow, target: targetNow,
+      }, token);
+      const round = pos.contract === contract ? roundMap.get(contract) ?? 0.1 : 0.1;
+      push('ok', (kind === 'stop' ? '止损' : '止盈') + '已改成 ' + fmtPrice(price, round),
+        pos.direction === 'long' ? '多头 · ' + contract : '空头 · ' + contract);
+      void loadPrivate();
+    } catch (e) {
+      push('err', '改止损止盈失败', (e as Error).message);
+    }
+    // priceRound 只用来写提示文案，不放进依赖：它定义在这段代码下面，
+    // 而且换精度不该让这个回调重新生成一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, push, positions, priceOrders, contract, loadPrivate]);
+
+  /**
+   * 右键取价：图上的价 -> 下单面板 / 当前持仓的止损止盈。
+   *
+   * 前三个就地写进面板，规则是「只填这一格、不动别的」：
+   *   - 「作为限价」顺带把面板切到限价，否则填了价还是按市价发单，填了等于没填；
+   *   - 止损和止盈各管各的框 —— 右键两次就能把两边都填上，
+   *     换成「覆盖另一个框」会让人莫名其妙丢掉刚填的那个数。
+   * 后两个直接改仓，见 applyToPosition。
+   */
+  const pickPrice = useCallback((price: number, what: PricePick) => {
+    if (!(price > 0)) return;
+    const s = String(Number(price.toFixed(10)));
+    if (what === 'limit') { setLimitStr(s); setPriceMode('limit'); }
+    else if (what === 'stop') setStopStr(s);
+    else if (what === 'target') setTargetStr(s);
+    else void applyToPosition(what === 'posStop' ? 'stop' : 'target', price);
+  }, [applyToPosition]);
+
+  /** 换合约时把三个价清空。面板把自己清不掉 —— 状态在这一层 */
+  const resetTicketPrices = useCallback(() => {
+    setLimitStr('');
+    setStopStr('');
+    setTargetStr('');
+  }, []);
+
+  // 首屏问一次本地目录：上次选过的目录下次打开还在，不用每次都重选
+  useEffect(() => { void loadLocal(); }, [loadLocal]);
+
   useEffect(() => { void loadConfig(); void loadTickers(); }, [loadConfig, loadTickers]);
   useEffect(() => { void loadMarket(contract, interval); }, [contract, interval, loadMarket]);
+
+  // 本地模式下，品种/周期一变就换图。用 localPick 而不是 localTf：
+  // 换品种时周期会被兜底，兜出来的那个才是真正要加载的
+  useEffect(() => {
+    if (!localOn || !localPick) return;
+    void loadMarket(localPick.symbol, localPick.tf);
+  }, [localOn, localPick, loadMarket]);
+
+  /** 本地模式下图表上的「周期」按钮换成文件里实际有的那些 */
+  const localTfs = useMemo(() => {
+    return local?.instruments.find((i) => i.symbol === localSym)?.timeframes ?? [];
+  }, [local, localSym]);
 
   /**
    * 首屏数据一落地就补历史，不等用户拖动。
@@ -826,9 +1017,21 @@ export default function App() {
         {railOpen && <div className="rail-scrim" onClick={() => setRailOpen(false)} />}
 
         <main className="center">
+          <LocalBar
+            dir={local?.dir ?? ''}
+            instruments={local?.instruments ?? []}
+            files={local?.files ?? 0}
+            canPick={canPickLocal}
+            symbol={localSym}
+            tf={localOn ? (localPick?.tf ?? 'D1') : 'D1'}
+            onSymbol={setLocalSym}
+            onTf={setLocalTf}
+            onPickDir={(d) => void pickLocalDir(d)}
+            onExit={exitLocal}
+          />
           <ChartPane
-            contract={contract}
-            interval={interval}
+            contract={localOn ? (localPick?.symbol ?? contract) : contract}
+            interval={localOn ? (localPick?.tf ?? interval) : interval}
             bars={bars}
             levels={levels?.levels ?? []}
 
@@ -839,15 +1042,19 @@ export default function App() {
             markPrice={markPrice}
             priceRound={priceRound}
             stale={privateStale}
-            resetKey={`${contract}:${interval}`}
+            resetKey={marketKey}
             loading={loading}
             historyEnd={historyEnd}
             backfilling={backfilling}
             onNeedOlder={needOlder}
-            onIntervalChange={setInterval}
+            // 本地模式下周期按钮只能给文件里真有的那几个，点了也没有的周期等于把人骗到空白图上
+            intervals={localOn ? localTfs : undefined}
+            onIntervalChange={localOn ? setLocalTf : setInterval}
             onManualLevels={onManualLevels}
             canClose={armed && Boolean(token)}
             onClosePosition={(name, dir) => { void closeFromChart(name, dir); }}
+            onPickPrice={pickPrice}
+            hasPosition={myPositions.length > 0}
           />
           <LevelsStrip
             levels={levels?.levels ?? []}
@@ -875,6 +1082,15 @@ export default function App() {
             onToast={push}
             onRefresh={loadPrivate}
             onQueueProtect={queueProtect}
+            limitStr={limitStr}
+            onLimitChange={setLimitStr}
+            stopStr={stopStr}
+            onStopChange={setStopStr}
+            targetStr={targetStr}
+            onTargetChange={setTargetStr}
+            priceMode={priceMode}
+            onPriceModeChange={setPriceMode}
+            onResetPrices={resetTicketPrices}
           />
 
           <PositionsCard

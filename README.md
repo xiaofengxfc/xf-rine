@@ -46,7 +46,17 @@ Windows 上直接双击 `start.bat` 也行。
 
 ## 手机上用
 
-同一个地址，手机上打开就是手机的排法。想装成 App 的话见下面「打包成安装包」。
+手机端**只是电脑的一块屏幕**，所有计算都在电脑上做：行情、支撑阻力、下单。
+
+怎么连：
+
+1. 电脑上打开巡风，设置页「手机连接」里打开「允许局域网访问」，那里会显示本机的局域网地址和一串口令。
+2. 手机连同一个 Wi-Fi，打开 App（或者浏览器直接输那个地址），填地址和口令，点连接。
+3. 连过一次就记住了，下次启动先试它，通了直接进主界面。
+
+手机端不再自带服务端：原来是把 Node 运行时和整个后端塞进 APK，能离线用，代价是 APK 多几十兆原生库、
+每个算法改动都要重打包、换机换系统一堆加载失败的兼容问题，而那台手机上跑的仍是读不到本地数据、
+连不上交易所代理的同一份后端。现在这些都在电脑上。
 
 手机上打开时：
 
@@ -101,11 +111,11 @@ pnpm pack:android
 打包机要有 JDK 17 以上和 Android SDK。脚本按 `JAVA_HOME` / `ANDROID_HOME` → 仓库里的 `.toolchain/jdk`、`.toolchain/sdk`
 → Android Studio 自带 jbr 的顺序找，都没有才报错，并说清该设哪个变量（见 `mobile/tools/gradle.mjs`）。
 
-装进去的是整个程序，不是一块连电脑的屏幕。Node 运行时（nodejs-mobile）跟着 App 一起装，
-服务端就在手机上算：K 线、支撑阻力、新闻、AI、下单，全在本地完成。电脑可以关着，
-也不用在同一个 Wi-Fi。
+装进去的是一块屏幕，不是整个程序。APK 里没有 Node 运行时，也没有服务端：
+打开后第一屏让你填电脑的地址和口令，之后所有计算都在电脑上（见上面「手机上用」）。
 
-- 第一次打开会慢几秒：要把内置的服务端从 APK 里解出来、起进程、等接口通。之后是秒开。
+- 第一次打开就一屏表单，填完点连接；连过一次就记住，下次秒进。
+- 电脑没开、或者不在同一个 Wi-Fi，就停在那一屏并说明是哪一种情况 —— 不会进到主界面看一屏空图表。
 - 全面屏按「画到系统栏底下、自己让位」来排：页面写 `viewport-fit=cover`，壳把系统栏和挖孔的尺寸
   注入成 `--safe-area-inset-*`，页面里统一用 `--inset-*` 这四个变量（见 `web/src/styles.css` 开头）。
   少写那句 viewport，手机上就会白留上下两条边 —— 这就是 `env(safe-area-inset-*)` 全是 0 的样子。
@@ -115,14 +125,13 @@ pnpm pack:android
 - 交易所如果开了 IP 白名单，要填的是**手机**的出口地址（实盘页那一格显示的就是它）。换个网络就会变，
   手机走流量和走 Wi-Fi 出来的地址不一样。
 
-内置服务端万一怎么都起不来，第一屏还留了一条后路：填电脑的「地址 + 口令」改成连电脑（同一个 Wi-Fi）。
-那条路改了密钥是改不动的 —— 写密钥、切环境这类动作服务端只认本机。
+改密钥、切环境这类动作服务端只认本机，所以在手机上改不动 —— 到电脑上改。
+真要改，就用电脑上的浏览器打开 `127.0.0.1:<端口>`。
 
-#### 手机上起不来的时候看哪里
+#### 连不上的时候看哪里
 
-第一屏会把 Node 那边的启动过程原样贴出来（阶段 + 那一行的输出），
-真正的原因——没拿到口令、某个包在 Node 18 上加载不了、端口被占——都在里面，不必猜。
-同一份记录还写进 App 私有目录的 `files/xf-rine/boot.log`（要调试包才读得到）。
+第一屏会把上一次连接失败的原因写出来（口令不对 / 连不上 / 那个地址上跑的不是巡风），
+不必猜。多数情况是这两种：电脑上的「允许局域网访问」没开；或者 Windows 防火墙第一次的弹窗被点了「取消」。
 
 连电脑查的话：`adb shell am start -n com.xfrine.terminal/.MainActivity`，
 截屏 `adb exec-out screencap -p > x.png`（或者 `screencap` 到 /sdcard 再 `adb pull`）。
@@ -140,7 +149,7 @@ pnpm pack:android
 |---|---|---|
 | 电脑安装版 | `%APPDATA%\巡风\.env` | 卸载不删，重装回来还在 |
 | 电脑端开发态（`pnpm -F desktop start`） | `%APPDATA%\巡风-dev\.env` | 调界面时用，改坏了不影响装好的那份 |
-| 手机 App | App 私有目录 `files/xf-rine/.env` | 只有卸载 App 才会没 |
+| 手机 App | 不存 | 只是块屏幕：连的哪台电脑、口令是什么，存在浏览器本地；密钥在电脑上 |
 | 仓库里跑（`pnpm start`） | `server/.env` | 开发用，和上面几个无关 |
 
 入口都是同一个环境变量 `XFRINE_HOME`，没设就退回「服务端自己所在目录的上一级」。
@@ -161,24 +170,16 @@ pnpm pack:android
 | 双击第二次，开出第二个窗口 | 没做单实例 | `requestSingleInstanceLock`：第二个实例把第一个窗口顶到前面就退 |
 | 手机浏览器打开一片空白，接口 401 | 页面在 `http://localhost`（或 `https://…`），接口在 `http://192.168.x.x:8787`，跨域和口令两道都没过 | `/api` 加 CORS 和预检；从别的机器来的请求要 `x-remote-token`，口令在电脑设置页里 |
 | 手机 App 一片空白 | 页面是 `https://localhost`，请求 `http://127.0.0.1:8787` 被判成混合内容，直接掐掉 | `server.androidScheme` 改成 `http`，清单里加 `usesCleartextTraffic` |
-| 手机上「没有另起一个进程」这回事 | 桌面端是把服务端当子进程拉起来的，Android 上这套不成立 | 换成 nodejs-mobile：Node 运行时跑在 App 进程里，服务端在本地算 |
-| 内置服务端起着，页面还是连不上 | App 从 `http://localhost` 出来，接口在 `127.0.0.1:8787`，是跨源 | `/api` 带 CORS 和预检 |
-| 升级 App 后密钥没了 | 数据目录要是放在服务端解压出来的目录里，升级重解压就被覆盖 | 数据单开一层 `files/xf-rine`，和运行时目录隔开 |
-| 手机上别的 App 也能摸到那个端口 | Android 的 127.0.0.1 是整个设备共用的，不是单个 App 私有的 | 手机上要求连本机也带口令（`XFRINE_REQUIRE_TOKEN`），口令每次启动随机生成，只有 App 自己的页面知道 |
-| 原生插件编不过：`ninja: error: mkdir(...)` | CMake 把源码绝对路径镜像进中间目录，pnpm 的深路径 + 变体目录一叠就三百多字符，Windows 上超限 | 打包前把插件复制到 `android/plugins/`（路径短一百多字符），见 `mobile/tools/prepare-android.mjs` |
-| APK 八十九兆 | Android 6 起原生库默认不压缩，Node 运行时那个 .so 八十三兆原样进包 | `jniLibs.useLegacyPackaging = true` + 清单 `extractNativeLibs`，压到 34 MB |
-| 三种架构都打进去 | nodejs-mobile 的原生库按 ABI 各一份 | `abiFilters 'arm64-v8a'`，只留现在手机用的那个（要装老设备再加回 `armeabi-v7a`） |
+| APK 从包里解一份服务端出来，换台手机就加载失败 | 原方案是把 nodejs-mobile 和整个后端打进 APK，原生库按 ABI 各一份，还要解压到私有目录再起进程 | 整条去掉：手机只连电脑（见「手机上用」）。包小了，也没有「原生库加载失败」这类只能在真机上才暴露的问题 |
 | 按返回键直接退出程序 | 安卓默认行为 | 先关浮层（设置页、左上角抽屉），没人接手才退出 |
 | `pnpm pack:win` 报成功，`release/` 里还是上一次的安装包 | 脚本写的是 `-F desktop`，桌面端的包名其实叫 `xunfeng`。pnpm 找不到只警告一句，退出码照样 0 | 过滤条件改成按目录：`pnpm --filter ./desktop dist`（手机端同理用 `./mobile`）。改完看 `release/` 的时间戳，别信退出码 |
-| 手机端弹 `The Node.js runtime is already running.` | 页面重载、点重试、从后台回来都会再调一次 `Nodejs.start()`，插件第二次就回这句英文 | 这不是故障，运行时本来就在跑。代码里按「已经在跑」处理，照常等端口；端口真等不到才报错，并把启动时的原因带出来 |
 | 往回拖 K 线，一页要干等一两秒 | 服务端按「合约:周期:根数:before」缓存整页、四秒就过期，同一段历史拖回来还得再问一次交易所（实测 1.4~4 秒） | 改成按「合约:周期」攒一条时间轴：已经拉过的区间直接切一段出来，实测 4 毫秒；只有要的窗口确实在时间轴外面才去补一页 |
 | 往前翻一段后左边一直是空的，像 K 线残缺 | 前端一边并一边 `slice(-3000)`，刚补进来的那页当场被挤掉；补到上限后根数不再变，又掉进「只写最后两根」的增量分支，补来的历史根本没画 | 到上限就不补了（宁可不加也不删），并进来的一律整段重画；翻页改成一页 1000 根，上限两万根 |
 | 补历史时画面先「转移」一下才显示 K 线 | 两个来源：挤掉最老数据后视口稳不住，被弹回最新一屏；以及「拿到更旧快照」那条路会调 `fullLoad()` 重置视口 | 两种情况都不再动视口。拿 5.2.1 的库实测过：`setData` 前面插一千根，可见时间一秒不变（逻辑区间自己从 0~160 变成 1000~1160），所以任何「按根数平移」都是帮倒忙 |
 | 停一下再拖，接缝处少一根 K 线 | Gate 的 `to` 是闭区间：`to=X` 会带回 X 那根，把它当重复切掉，那一段就少一根 | 要「X 之前的 N 根」就把 `to` 往前挪一根（`to = X - 周期`），正好 N 根，接缝严丝合缝 |
 | 翻到最老报 400 `Candlestick too long ago` | 交易所只留最近一万个点（1m 约七天） | 服务端把这条当「到头了」：回空页并记住别再问，前端看到不满一页就收手，不再报错 |
 | `pnpm pack:android` 一上来就报 `JAVA_HOME is not set` 或 `SDK location not found` | gradlew 只认 `JAVA_HOME`（或 PATH 上的 java），而 `android/local.properties` 不进版本库；仓库里其实带着 `.toolchain/jdk` 和 `.toolchain/sdk`，只是没告诉 Gradle | `mobile/tools/gradle.mjs` 按 `JAVA_HOME` → 仓库 `.toolchain` → Android Studio 自带 jbr 的顺序找 JDK，SDK 按 `ANDROID_HOME` → `local.properties` → 仓库 `.toolchain` 的顺序找，顺手把 `local.properties` 补上；找不到就直说该设哪个变量 |
-| 手机上一打开就停在「服务端起不来」，只写着一句「没开起端口」 | 真正的报错只进了 logcat，而 logcat 在某些系统上 adb 读不到，等于没有 | 启动过程通过桥（`bridge.channel`）一路送到页面，失败时连同最近几十行一起摆出来；同时写一份 `files/xf-rine/boot.log` |
-| 手机上 `TypeError: Cannot read properties of undefined (reading 'bind')`，栈里是 `undici/lib/interceptor/decompress.js` | 手机里是 nodejs-mobile 的 Node 18.20.4，而 `undici@8` 的 `engines` 写着 `node >= 22.19.0`：它在模块加载时就 `bind` 一个 Node 18 没有的 `zlib.createZstdDecompress` | 服务端的 `undici` 降到 6（官方支持 Node 18.17+，`Agent`/`ProxyAgent`/`fetch` 用法不变）。打包不会报错，只有真正在手机上加载时才炸 —— 所以手机端这条链路必须上机跑一遍，别只看 `pack:android` 成功 |
+
 | 手机上下各留一条边，内容不铺满 | 页面没写 `viewport-fit=cover`，`env(safe-area-inset-*)` 就全是 0，壳按「缩进去」排 | 页面写 `viewport-fit=cover`，壳把系统栏尺寸注入成 `--safe-area-inset-*`（`SystemBars` 插件），页面统一用 `--inset-*`；壳的 `initialViewportFitValueHint: 'cover'` 让首帧就按整屏排，不跳一下 |
 | 状态栏图标颜色和页面主题对不上 | 壳的默认值看的是**系统**深色/浅色，页面主题是自己选的 | `web/src/lib/theme.ts` 的 `syncSystemBars()` 在切主题时调 `SystemBars.setStyle`（深色底配浅色图标，反之亦然） |
 | `pnpm pack:win` 报 `connect ETIMEDOUT 20.205.243.166:443` | electron-builder 从 GitHub 取 Electron 压缩包和 winCodeSign，用它自己的 got；Node 不读系统代理，机器上代理开着也帮不上 | `desktop/tools/builder.mjs` 读一次 Windows 系统代理（和 `server/src/net.ts` 同一个来源）塞进 `HTTPS_PROXY` 和 `ELECTRON_GET_USE_PROXY`；第一次失败原样再来一次 |
@@ -389,6 +390,34 @@ Gate 有单向持仓和双向持仓两种模式，账户在哪一种由交易所
 等价于实时算，不碰未来数据（`pnpm check:levels` 会验这一条）。
 
 **守住率不是概率保证**：事件少于 2 次时给的是保守下界 0.25；触及 3 次守住 3 次也不等于 100%。
+
+### 本地数据（Parquet / CSV）
+
+代码在 `server/src/localdata.ts`，接口是 `/api/data/*`，界面在图表上面那条「本地数据」。
+
+上游的主用法就是「读一批本地 parquet 算位」，这条一样能用：选一个目录，里面放
+`品种_周期.parquet`（也认 `.csv`），文件名里的周期认 `D1 / H1 / 15min / 5min / daily / 60min` 这几种写法，
+列名认 `time / open / high / low / close / tick_volume`（`volume` 也行，大小写无所谓）。
+
+- 时间单位按**整列**判一次（毫秒 / 秒 / 上游 A 股那种「秒÷1000」），不逐行猜 —— 逐行猜会让同一列里一半被乘 1000、一半被当秒，时间轴当场崩掉。
+- 清洗：停牌行（量 ≤ 0）、结构性坏行（high < low 之类）丢掉；日线按自然日归一，同一天多条留最后一条。
+- **不做复权**。上游那套复权是为 A 股除权设计的，这里没搬；拿它读没复权的 A 股 CSV，除权日的断层会原样进来。
+- 选目录只在电脑上给（那个接口是「读你硬盘」的入口，只认本机回环地址），目录会记住，下次打开还在。
+
+## 移植说明和来源
+
+算法（`server/src/levels.ts`）和数据层（`server/src/localdata.ts`）移植自
+[Detect_support_and_resistance_levels](https://github.com/rosemarycox5334-debug/Detect_support_and_resistance_levels)
+（作者 rosemarycox5334-debug，**GPL-3.0**）。
+
+- 这两个文件以及因此受影响的整份代码，按 GPL-3.0 分发；原项目的许可和版权归原作者。
+- **没有移植前端**：上游的界面是 Flask + Plotly 生成的 HTML，这里换成 React 自己画。
+- **没有移植 Python 运行时**：上游是 Flask + Pandas/NumPy/SciPy。这套东西装不进 exe，也装不进 APK，
+  而算法本身是纯数值计算，用 TypeScript 重写一份没有精度上的损失（`pnpm check:levels` 会验因果性、
+  体积守恒、区宽夹逼等 8 项）。
+- 标定表（`EDGE_EDGES / STALL_EDGES / EDGE_BUCKETS`）是从上游 `data/score_calibration.json` 原样抄的。
+  那份样本是 **A 股日线**，搬到加密永续上只当参照 —— 界面上写的是「历史分位 Q1~Q5」，不叫胜率。
+  上游自己也测过：输出的「下次守住概率」Brier 0.1836，常数预测 0.1842，等于零区分度，所以那个概率被删掉了。
 
 ## 止损止盈怎么填
 
