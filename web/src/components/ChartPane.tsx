@@ -928,10 +928,27 @@ export default function ChartPane({
 
   // ---- 图上的横线：持仓均价、挂着的限价单、支撑阻力 ----
   useEffect(() => {
-    const price = priceRef.current;
-    if (!price) return;
+    /**
+     * 这批横线挂在「现在看得见的那条序列」上，不能固定挂在 K 线上。
+     *
+     * 库里的价位线是跟着序列画的：序列一 visible=false，它的整批价位线就都不画，
+     * 连轴上的价签和线中间那行字也一起没了（CustomPriceLinePaneView /
+     * CustomPriceLinePriceAxisView 开头都先看 series.visible()）。
+     * 成交稀疏的合约会自动切成折线，那时 K 线序列是藏着的 —— 横线挂在它上面，
+     * 整批标注就一起消失，用户看到的就是「支撑阻力有时候不见了」。
+     * 手动画线是 primitive，不受这条规则管，所以只有这批标注会没。
+     */
+    const owner = drawMode === 'line' ? lineRef.current : priceRef.current;
+    if (!owner) return;
 
-    for (const line of levelLinesRef.current) price.removePriceLine(line);
+    // 两条序列都清一遍：换画法时上一批挂在另一条上，只清看得见那条会留下孤儿，
+    // 下次切回来它们跟着一起显出来 —— 同一档在图上画了两遍
+    const both: (ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>)[] = [];
+    if (priceRef.current) both.push(priceRef.current);
+    if (lineRef.current) both.push(lineRef.current);
+    for (const s of both) {
+      for (const line of levelLinesRef.current) s.removePriceLine(line);
+    }
     levelLinesRef.current = [];
 
     const all = barsRef.current;
@@ -1022,17 +1039,26 @@ export default function ChartPane({
      * 但线中间那个标题还在，实时价格那个标签也始终压在上面 —— 标全是优先的。
      */
     for (const it of items) {
-      const line = price.createPriceLine({
-        price: it.price,
-        color: it.color,
-        lineWidth: it.width,
-        lineStyle: it.style,
-        axisLabelVisible: true,
-        title: it.title,
-      });
-      levelLinesRef.current.push(line);
+      // 算不出坐标的价位（NaN、字段缺失）画上去也不会显示，还会把轴上的价签顶掉
+      if (!Number.isFinite(it.price)) continue;
+      try {
+        levelLinesRef.current.push(owner.createPriceLine({
+          price: it.price,
+          color: it.color,
+          lineWidth: it.width,
+          lineStyle: it.style,
+          axisLabelVisible: true,
+          title: it.title,
+        }));
+      } catch (err) {
+        // 一条画不上不能连累后面几条，更不能冒泡到 React 把整页拆了
+        console.warn('[chart] 一条横线没画上', it.title, err);
+      }
     }
-  }, [zones, positions, orders, priceRound]);
+    // storageKey 也在依赖里：切币种、切周期会把整张图重建（见上面建图那段），
+    // 新图上一条横线都没有；只等 zones 变的话，档位请求慢一拍或者失败一次，
+    // 标注就一直不回来。drawMode 同理：换画法要换一条序列挂。
+  }, [zones, positions, orders, priceRound, drawMode, storageKey]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
