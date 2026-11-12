@@ -38,10 +38,13 @@ export async function listModels(ai: AiConfig = config.ai): Promise<string[]> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
   let res: FetchResponse;
+  let text: string;
   try {
     // 单条出网路径的上限要给到这次请求的截止时间：net.ts 默认 8 秒，比这里声明的 15 秒短，
     // 不传的话 15 秒永远轮不到，而且超时会被说成「连不上」
     res = await netFetch(url, { headers: { Authorization: `Bearer ${ai.apiKey}` }, signal: ctrl.signal }, { attemptMs: 15_000 });
+    // 读 body 也要在超时里：计时器以前在拿到响应头就清了，body 慢速滴漏的中转站能让这个 await 永远挂着
+    text = await res.text();
   } catch (e) {
     const err = e as Error;
     // AbortSignal.timeout 抛的是 TimeoutError，只认 AbortError 会把超时误报成连不上
@@ -51,7 +54,6 @@ export async function listModels(ai: AiConfig = config.ai): Promise<string[]> {
     clearTimeout(timer);
   }
 
-  const text = await res.text();
   if (!res.ok) {
     const snippet = text.slice(0, 200);
     if (res.status === 401 || res.status === 403) {
@@ -273,31 +275,39 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
   };
   if (opts.jsonMode) body.response_format = { type: 'json_object' };
 
-  const send = async (payload: Record<string, unknown>): Promise<FetchResponse> => {
+  /**
+   * 发一次请求，**连 body 一起读完**才算返回。
+   *
+   * 以前只等到响应头就把计时器清了，正文交给外面的 res.text() 去读 ——
+   * 那一步没有任何超时：中转站慢慢滴字节，这个 await 就永远挂着，
+   * 页面一直在转圈，服务端这条 socket 也一直占着。现在 body 也在截止时间里。
+   */
+  const send = async (payload: Record<string, unknown>): Promise<{ res: FetchResponse; text: string }> => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 45_000);
     try {
-      return await netFetch(url, {
+      const res = await netFetch(url, {
         method: 'POST',
         signal: ctl.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(payload),
         // 模型回答本来就慢（四五十秒是常态），net.ts 的 8 秒上限必须按这里的截止时间放宽
       }, { attemptMs: opts.timeoutMs ?? 45_000 });
+      return { res, text: await res.text() };
     } finally {
       clearTimeout(timer);
     }
   };
 
   let res: FetchResponse;
+  let text: string;
   try {
-    res = await send(body);
+    ({ res, text } = await send(body));
     // 不少中转站不认 response_format，去掉再试一次
     if (opts.jsonMode && (res.status === 400 || res.status === 422)) {
-      // 这一份回包不会再用：读掉它，连接才能还回池子（不读就一直占着一条）
-      await res.text().catch(() => '');
+      // 上一份回包的正文已经在 send 里读掉了，连接能还回池子
       const { response_format: _drop, ...plain } = body;
-      res = await send(plain);
+      ({ res, text } = await send(plain));
     }
   } catch (e) {
     const err = e as Error;
@@ -306,7 +316,6 @@ async function postChat(opts: ChatOpts): Promise<ChatResult> {
     throw new AiError(502, 'AI_NETWORK', `连不上模型接口：${err.message}`);
   }
 
-  const text = await res.text();
   if (!res.ok) {
     const map: Record<number, [string, string]> = {
       401: ['AI_KEY_INVALID', '密钥被拒绝，检查设置页里的 AI 密钥'],

@@ -196,8 +196,13 @@ export default function OrderTicket({
     if (!keysConfigured) return '未配置 API 密钥';
     if (!liveTrading) return '服务端 LIVE_TRADING=false，下单被禁用';
     if (!armed) return '先点右上角解锁交易';
-    // 限价空着的时候张数必然是 0，先说限价 —— 不然「张数至少 1」会把人引到错的地方
-    if (priceMode === 'limit' && !(priceUsed > 0)) return '限价必须大于 0';
+    /**
+     * 限价模式下限价必须是一个正数。
+     *
+     * 这条要排在张数前面：比例算张数时除的就是这个价，价空着张数会是 0 或 1，
+     * 提示成「张数至少 1」会把人引到另一个框去改。
+     */
+    if (priceMode === 'limit' && !(priceUsed > 0)) return '限价还没填：先填一个价格再下单';
     if (size < sizeMin) return `张数至少 ${sizeMin}`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
     if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
@@ -297,7 +302,9 @@ export default function OrderTicket({
   return (
     <section className="card">
       <div className="card-head">
-        <h3>下单 · {contract?.name.replace('_USDT', '') ?? '—'}</h3>
+        {/* 可选链只护到 .name：contract 为 null 时这里会变成 undefined.replace()，整页被 ErrorBoundary 吃掉。
+            本地数据模式下 info 就是 null（没有合约参数），这条路径是能走到的 */}
+        <h3>下单 · {(contract?.name ?? '').replace('_USDT', '') || '—'}</h3>
         <span className="dim" style={{ fontSize: 10 }}>1 张 = {mult || '—'} 币</span>
       </div>
       <div className="card-body">

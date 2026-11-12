@@ -1130,12 +1130,13 @@ export default function ChartPane({
 
       <div className="chart-wrap">
         <div className="chart-host" ref={hostRef} />
+        {/* 价格和右侧轴、档位带、持仓卡用同一个口径：冷门币跳到 0.00001 时 toFixed 不会写出两个数 */}
         {legend && (
           <div className="chart-badge">
-            <span>O {legend.o ?? '—'}</span>
-            <span className="up">H {legend.h ?? '—'}</span>
-            <span className="down">L {legend.l ?? '—'}</span>
-            <span>C {legend.c}</span>
+            <span>O {legend.o == null ? '—' : fmtPrice(legend.o, priceRound)}</span>
+            <span className="up">H {legend.h == null ? '—' : fmtPrice(legend.h, priceRound)}</span>
+            <span className="down">L {legend.l == null ? '—' : fmtPrice(legend.l, priceRound)}</span>
+            <span>C {fmtPrice(legend.c, priceRound)}</span>
             <span>V {Math.round(legend.v)}</span>
           </div>
         )}

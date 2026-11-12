@@ -21,7 +21,9 @@ export function pendingOrderLines(orders: OpenOrder[]): OrderLine[] {
   for (const o of orders) {
     if (o.status !== 'open') continue;
     if (!(o.price > 0)) continue;
-    const size = Math.abs(o.left || o.size);
+    // left 是「还剩多少张」，0 是合法值（全部成交、状态还没翻过来的那一瞬间）。
+    // 用 || 会把 0 换成原始总量，画出一条其实已经没了的线
+    const size = Math.abs(o.left ?? o.size);
     if (!(size > 0)) continue;
     out.push({
       id: o.id,

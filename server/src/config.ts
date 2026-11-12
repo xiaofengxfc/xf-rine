@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
@@ -248,6 +248,12 @@ export function writeEnv(patch: Record<string, string>): void {
   }
   // 这个文件里是 Gate 的私钥和 AI 密钥：只给自己读
   writeFileSync(ENV_PATH, out.join('\n').replace(/\n+$/, '') + '\n', { encoding: 'utf8', mode: 0o600 });
+  /**
+   * mode 只在**文件新建**时生效。.env 通常是旧版本或用户手建的，权限早就成了 0644，
+   * 原地覆盖不会把它改回来 —— 密钥就这么一直半个世界可读。这里再显式收紧一次。
+   * Windows 上 chmod 基本是空操作，失败也没关系，不能因为它把保存流程弄挂。
+   */
+  try { chmodSync(ENV_PATH, 0o600); } catch { /* 文件系统不支持就算了 */ }
   // dotenv 只在启动时读过一次文件，之后写进去的值进不了 process.env。
   // 不手动同步的话 reloadConfig() 读到的还是旧值：保存返回成功、文件也变了，
   // 但进程里一点没动，必须重启才生效。

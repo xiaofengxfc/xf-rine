@@ -291,6 +291,13 @@ export interface AppConfig {
   envPath?: string;
   /** 手机端要填的地址和口令。口令只在本机打开页面时才有值 */
   remote?: { enabled: boolean; urls: string[]; token: string | null };
+  /**
+   * 这个请求是不是从这台电脑上发出来的（服务端按回环地址判定）。
+   *
+   * 「选本地数据目录」读的是硬盘，只有本机才能用。前端不能靠 window.location.hostname 猜：
+   * 桌面壳和局域网地址下那个值和请求来源对不上。
+   */
+  local?: boolean;
   /** 反馈寄到哪。信箱内嵌在服务端，页面只显示、不给改 */
   feedback?: { to: string; from: string; ready: boolean };
 }

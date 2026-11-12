@@ -205,13 +205,28 @@ export function kindLabel(kind: string): string {
   return KINDS[kind] ?? KINDS.other!;
 }
 
+/**
+ * 塞进头部字段（Subject 之类）之前先掐掉换行。
+ *
+ * MIME 头部是按行分隔的：标题里带一个 \r\n，后面那段就成了另一个头 ——
+ * 用户反馈是公开接口，等于让任何人往这封信里加 Bcc、加 Content-Type。
+ * 纯 ASCII 标题走的是不编码那条路，换行会原样落进头部，所以必须在最前面拦掉。
+ */
+function headerSafe(v: string): string {
+  return v.replace(/[\r\n]+/g, ' ').trim();
+}
+
 /** RFC 2047：标题里有中文就得编码，否则 163 会按 GBK 收成乱码 */
 function encodeHeader(v: string): string {
   if (/^[\x20-\x7e]*$/.test(v)) return v;
   return '=?UTF-8?B?' + Buffer.from(v, 'utf8').toString('base64') + '?=';
 }
 
-/** 正文按 base64 走：不用操心折行和点转义，中文也不会被中间某个环节转码 */
+/**
+ * 正文按 base64 走：不用操心折行和点转义，中文也不会被中间某个环节转码。
+ * base64 的字母表里没有 '.'，所以正文里也不可能拼出 SMTP 的结束符 "\r\n.\r\n" ——
+ * 这也是选 base64 而不是 8bit 的原因之一。
+ */
 function base64Body(text: string): string {
   const b = Buffer.from(text.replace(/\r?\n/g, '\r\n'), 'utf8').toString('base64');
   const lines = b.match(/.{1,76}/g) ?? [''];
@@ -275,7 +290,7 @@ function buildMessage(input: FeedbackInput, s: FeedbackSettings, id: string): st
   return [
     'From: "巡风反馈" <' + s.from + '>',
     'To: <' + s.to + '>',
-    'Subject: ' + encodeHeader('【巡风】' + kindLabel(input.kind) + '：' + input.title),
+    'Subject: ' + encodeHeader('【巡风】' + kindLabel(input.kind) + '：' + headerSafe(input.title)),
     'Date: ' + rfc2822(now),
     'Message-ID: <' + id + '@xf-rine>',
     'X-Mailer: xf-rine',

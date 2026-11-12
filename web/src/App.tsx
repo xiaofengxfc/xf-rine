@@ -343,10 +343,16 @@ export default function App() {
         }
       }
     } finally {
-      if (pumpGenRef.current === gen) {
-        pumpingKeyRef.current = '';
-        setBackfilling(false);
-      }
+      /**
+       * 这一轮不管是怎么收的（补完、出错、还是切了币种被 stale 提前收手），
+       * 都要把「正在补历史」关掉。
+       *
+       * 以前只有还是同一轮才关。可切换币种时新一代已经开跑，条件不成立 ——
+       * 那一页就一直挂着「正在补历史」，直到下一次真补完为止。
+       * 关掉是无害的：新一代开跑时自己会再 setBackfilling(true)。
+       */
+      if (pumpGenRef.current === gen) pumpingKeyRef.current = '';
+      setBackfilling(false);
     }
   }, [push]);
 
@@ -427,12 +433,14 @@ export default function App() {
   /**
    * 手机上选不了目录：那个接口只认本机回环地址（它是「读你硬盘」的入口）。
    * 与其让用户点了之后收到 403，不如一开始就说清楚只能在电脑上选。
+   *
+   * 判断以服务端说的为准（/config 的 local 字段），不再看 window.location.hostname：
+   * 桌面壳里页面可能是 file:// 或 0.0.0.0，局域网访问时又是个 192.168.x.x ——
+   * 那个判断和请求真实的来源对不上，按钮会一直显示「只能在电脑上选」。
+   * config 还没回来时先按可用处理：多一个按钮好过把一个能用的功能藏起来，
+   * 真不能用时服务端会回 403，理由照原样显示出来。
    */
-  const canPickLocal = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    const h = window.location.hostname;
-    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
-  }, []);
+  const canPickLocal = config ? config.local !== false : true;
 
   /**
    * 选 / 换一个本地数据目录。
@@ -452,12 +460,6 @@ export default function App() {
       push('err', '这个目录用不了', (e as Error).message);
     }
   }, [push]);
-
-  /** 退出本地模式：回到交易所实时行情，本地那套选择留着（下次点回来还是这个品种） */
-  const exitLocal = useCallback(() => {
-    setLocalOn(false);
-    void loadMarket(contract, interval);
-  }, [contract, interval]);
 
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
@@ -514,6 +516,19 @@ export default function App() {
       if (seq === marketSeqRef.current) setLoading(false);
     }
   }, [push, localOn]);
+
+  /**
+   * 退出本地模式：回到交易所实时行情，本地那套选择留着（下次点回来还是这个品种）。
+   *
+   * 位置必须在 loadMarket 之后，依赖里也必须有它。
+   * 以前它写在 loadMarket 前面、依赖只写了 [contract, interval] ——
+   * 拿到的是「localOn 还是 true」的那一版闭包，一点就把请求又打回本地文件那条路，
+   * 界面看着什么都没变，等于退不出去。
+   */
+  const exitLocal = useCallback(() => {
+    setLocalOn(false);
+    void loadMarket(contract, interval);
+  }, [contract, interval, loadMarket]);
 
   const loadLevelsOnly = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;

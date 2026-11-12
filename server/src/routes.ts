@@ -888,6 +888,15 @@ router.get('/config', (req, res) => {
   const remote = remoteAccess();
   const local = /127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(req.socket.remoteAddress ?? '');
   res.json({
+    /**
+     * 这个请求是不是从这台电脑上发出来的。
+     *
+     * 「选本地数据目录」读的是硬盘，服务端只认回环地址。前端以前靠自己看
+     * window.location.hostname 猜 —— 可桌面壳（Electron 的 file:// 或 0.0.0.0）
+     * 和局域网地址下，那个判断和真实来源根本对不上，按钮要么永远禁用、要么点了才 403。
+     * 现在由服务端在这里说了算。
+     */
+    local,
     env: config.env,
     envLabel: envLabel(),
     restBaseUrl: restBaseUrl(),

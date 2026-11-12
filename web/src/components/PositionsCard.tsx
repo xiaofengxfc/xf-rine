@@ -187,23 +187,37 @@ export default function PositionsCard({
     } finally { setBusy(null); }
   }
 
+  /**
+   * 撤单要锁一下。
+   *
+   * 网络慢的时候连点两下，第二个请求回来时单已经没了，交易所报「找不到」——
+   * 界面上就成了一次成功的操作报「撤单失败」，用户会再点一次。
+   */
   async function cancelOrder(id: string) {
     if (!token) return;
+    const tag = 'cancel-order-' + id;
+    if (busy === tag) return;
+    setBusy(tag);
     try {
       await jsend('DELETE', '/api/order/' + id, undefined, token);
       onToast('ok', '已撤单', id);
       if (orderEdit?.id === id) setOrderEdit(null);
       onRefresh();
     } catch (e) { onToast('err', '撤单失败', (e as Error).message); }
+    finally { setBusy(null); }
   }
 
   async function cancelTrigger(id: string) {
     if (!token) return;
+    const tag = 'cancel-trigger-' + id;
+    if (busy === tag) return;
+    setBusy(tag);
     try {
       await jsend('DELETE', '/api/price-order/' + id, undefined, token);
       onToast('ok', '已撤销触发单', id);
       onRefresh();
     } catch (e) { onToast('err', '撤单失败', (e as Error).message); }
+    finally { setBusy(null); }
   }
 
   async function saveOrderEdit() {
@@ -578,7 +592,9 @@ export default function PositionsCard({
                           : orphan
                             ? '这一边已经没有持仓了，挂不上新保护，这张单只能撤'
                             : '改这一边的止损止盈'}
-                      disabled={!armed || !o.direction || !protection || orphan}
+                      // protection 只用来写文案：认不出是不是保护单的条件单确实改不了，那由「条件单不是保护单」那句说明，
+                      // 但把它也塞进 disabled 会让某些服务端回成 protective:false 的保护单永远改不了，只能撤了重挂（中间还裸仓）
+                      disabled={!armed || !o.direction || orphan || !protection}
                       onClick={() => {
                         if (!o.direction) return;
                         const cur = bracketOf(o.contract, dir);

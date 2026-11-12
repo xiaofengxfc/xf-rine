@@ -82,10 +82,25 @@ function linkOf(block: string): string {
   return m?.[1] ? m[1].trim() : '';
 }
 
+/**
+ * 一个源最多读这么多字节、解析这么多条。
+ *
+ * 这些地址是写死的公开 RSS，但返回什么由对方决定。超出的部分直接丢 —— 新闻只要最新的那些。
+ */
+const FEED_MAX_BYTES = 2 * 1024 * 1024;
+const FEED_MAX_ITEMS = 200;
+
 function parseFeed(xml: string, source: string): RawItem[] {
-  const blocks = xml.match(/<item[\s>][\s\S]*?<\/item>/gi) ?? xml.match(/<entry[\s>][\s\S]*?<\/entry>/gi) ?? [];
+  /**
+   * 开标签写成 `<item>` 或 `<item ...>`，不再用 `[\s>]` 那种写法：
+   * 它和后面的 `[\s\S]*?` 在畸形 XML 上会回溯得很凶。
+   */
+  const blocks = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi)
+    ?? xml.match(/<entry(?:\s[^>]*)?>[\s\S]*?<\/entry>/gi)
+    ?? [];
   const out: RawItem[] = [];
   for (const block of blocks) {
+    if (out.length >= FEED_MAX_ITEMS) break;
     const title = tag(block, 'title');
     if (!title) continue;
     const raw = tag(block, 'pubDate') || tag(block, 'published') || tag(block, 'updated') || tag(block, 'dc:date');
@@ -112,7 +127,9 @@ async function fetchFeed(feed: { name: string; url: string }): Promise<{ items: 
       headers: { 'user-agent': 'Mozilla/5.0 (compatible; xf-rine/1.0)', accept: 'application/rss+xml, application/xml, text/xml' },
     });
     if (!res.ok) return { items: [], stat: { name: feed.name, ok: false, count: 0, error: `HTTP ${res.status}` } };
-    const items = parseFeed(await res.text(), feed.name);
+    // 读之前先把字节数卡住：一个坏掉的源可以吐几百 MB，整个搬进内存再跑正则，事件循环就卡住了
+    const raw = Buffer.from(await res.arrayBuffer());
+    const items = parseFeed(raw.subarray(0, FEED_MAX_BYTES).toString('utf8'), feed.name);
     return { items, stat: { name: feed.name, ok: true, count: items.length } };
   } catch (e) {
     const msg = e instanceof Error ? (e.name === 'AbortError' ? '超时' : e.message) : String(e);
@@ -201,7 +218,13 @@ const BEARISH = [
   'liquidation', 'delist', 'warning', 'fear', 'correction', 'downside', 'slashes', 'probe',
 ];
 
-const NEGATORS = ['not', "n't", 'no', 'never', 'without', 'denies', 'deny'];
+/**
+ * 否定词写成正则，并允许后面跟空格、标点或 "a/an"。
+ *
+ * 以前是拿 `includes(' n\'t ')` 去比 —— n't 永远和下一个词连在一起（hasn't crashed），
+ * 那个带空格的模式一个都匹配不上，所有缩写否定全被判成了肯定。
+ */
+const NEGATOR_RE = /(?:\b(?:not|no|never|without|den(?:y|ies|ied))\b|n't\b)/;
 
 function sentimentOf(text: string): number {
   const lower = ` ${text.toLowerCase()} `;
@@ -222,7 +245,8 @@ function sentimentOf(text: string): number {
   let score = 0;
   for (const h of hits) {
     const near = lower.slice(Math.max(0, h.at - 40), h.at);
-    const negated = NEGATORS.some((n) => near.includes(` ${n} `));
+    // 命中词前面那 40 个字符里有没有否定。不能用 includes 比带空格的词，缩写都连在一起
+    const negated = NEGATOR_RE.test(near);
     score += negated ? -h.dir : h.dir;
   }
   return Math.max(-1, Math.min(1, score / 3));
