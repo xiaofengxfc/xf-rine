@@ -14,7 +14,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Bar, Level, OpenOrder, Position } from '../lib/api.ts';
+import type { Bar, OpenOrder, Position, Zone } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
@@ -89,7 +89,7 @@ interface Props {
   contract: string;
   interval: string;
   bars: Bar[];
-  levels: Level[];
+  zones: Zone[];
 
   /** 当前合约的真实持仓，用来在图上标出成本线（双向模式可能多空各一条） */
   positions: Position[];
@@ -132,17 +132,27 @@ interface Props {
   onPickPrice: (price: number, what: PricePick) => void;
   /** 这个合约上有没有仓。有仓才给「覆盖持仓止损/止盈」那两项 */
   hasPosition: boolean;
+  /**
+   * 研究台模式：只留 K 线和关键位，藏掉下单相关的互动。
+   *
+   * 研究台看的是本地历史数据，右键「带入下单面板」、图上平仓、周期按钮那些
+   * 在这里要么没有意义（本地数据没有合约参数），要么已经在页面上另有一套控件。
+   */
+  research?: boolean;
 }
 
 /** 右键菜单里的四个去处 */
 export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
-  contract, interval, bars, levels, positions, orders, multiplier, markPrice, priceRound,
+  contract, interval, bars, zones, positions, orders, multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
   intervals = INTERVALS as unknown as string[],
-  canClose, onClosePosition, onPickPrice, hasPosition,
+  canClose, onClosePosition, onPickPrice, hasPosition, research = false,
 }: Props) {
+  /** 右键菜单要不要弹，靠 ref 读：它挂在图表初始化那次 effect 里，不能进依赖数组 */
+  const researchRef = useRef(false);
+  researchRef.current = research;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -495,6 +505,8 @@ export default function ChartPane({
       e.preventDefault();
       e.stopPropagation();
       setMenu({ x, y, price: snapped, time });
+      // 研究台不看盘下单：右键取价那一套（带入限价/止损/止盈）在那儿没有去处
+      if (researchRef.current) return;
     };
     host.addEventListener('contextmenu', onContextMenu);
 
@@ -958,21 +970,25 @@ export default function ChartPane({
     }
 
     // 档位按离现价远近排，近的排在前面。
-    // 分数是相对强度（触及次数 + 陈旧度），不是概率，所以标签里不写百分比，只写次数。
-    // 一律画实线：这版算法算出来的分数没有上限（1.x 到 3.x 都常见），
+    // 线上写的是**模型概率**：触及概率区分度强（AUC 0.73~0.77），守住概率校准好但排序弱
+    // （AUC 0.59~0.61），所以两个都标、都不加「胜率」这种词。
+    // 一律画实线：这版算法算出来的强度分没有上限（1.x 到 3.x 都常见），
     // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
     // 主次靠远近距离分：最近的两条加粗，其余正常。
-    const byNear = [...levels].sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
-    byNear.forEach((lv, i) => {
+    const byNear = [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
+    const pctOf = (v: number | null) => (v === null ? '—' : Math.round(v * 100) + '%');
+    byNear.forEach((z, i) => {
       items.push({
-        price: lv.price,
+        price: z.center,
         rank: 3 + i * 0.01,
-        color: lv.role === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)',
+        color: z.zone_type === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)',
         width: i < 2 ? 2 : 1,
         style: LineStyle.Solid,
         // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
-        title: (lv.role === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(lv.price, priceRound)
-          + ' · 触及 ' + lv.touches + ' 次 · 守住 ' + Math.round(lv.holdRate * 100) + '%',
+        title: (z.zone_type === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(z.center, priceRound)
+          + ' · 触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold)
+          + ' · 测试 ' + z.n_events + ' 次'
+          + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : ''),
       });
     });
 
@@ -999,7 +1015,7 @@ export default function ChartPane({
       });
       levelLinesRef.current.push(line);
     }
-  }, [levels, positions, orders, priceRound]);
+  }, [zones, positions, orders, priceRound]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
@@ -1063,12 +1079,18 @@ export default function ChartPane({
   return (
     <>
       <div className="chart-tools">
-        <div className="seg">
-          {intervals.map((i) => (
-            <button key={i} className={i === interval ? 'on' : ''} onClick={() => onIntervalChange(i)}>{i}</button>
-          ))}
-        </div>
-        <div className="tool-divider" />
+        {research ? (
+          <span className="dim" style={{ fontSize: 11 }}>研究台 · {interval} · 纯本地历史数据</span>
+        ) : (
+          <>
+          <div className="seg">
+            {intervals.map((i) => (
+              <button key={i} className={i === interval ? 'on' : ''} onClick={() => onIntervalChange(i)}>{i}</button>
+            ))}
+          </div>
+          <div className="tool-divider" />
+          </>
+        )}
         {/* 画法：自动只在「平价线过半」时改折线，冷门币不再是一排断续的小方块 */}
         {(['auto', 'candle', 'line'] as const).map((m) => (
           <button
@@ -1082,6 +1104,7 @@ export default function ChartPane({
             {m === 'auto' ? '自动' : m === 'candle' ? 'K线' : '折线'}
           </button>
         ))}
+        {!research && (<>
         <div className="tool-divider" />
         {TOOLS.map((t) => (
           <button
@@ -1120,13 +1143,14 @@ export default function ChartPane({
         >
           ⌦
         </button>
+        </>)}
         <div className="spacer" style={{ flex: 1 }} />
         {bars.length > 0 && (
           <span className="dim" style={{ fontSize: 10.5 }} title="已经拿到的 K 线根数，以及最老那一根的时间">
             {backfilling ? '正在补历史 · ' : ''}{bars.length} 根 · 最早 {fmtDate(bars[0]!.time)}
           </span>
         )}
-        <span className="dim" style={{ fontSize: 10.5 }}>画线自动存本地</span>
+        {!research && <span className="dim" style={{ fontSize: 10.5 }}>画线自动存本地</span>}
       </div>
 
       <div className="chart-wrap">

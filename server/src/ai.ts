@@ -96,19 +96,27 @@ export interface AiSnapshot {
   barLow: number;
   change24h: number;
   /**
-   * 关键位。score 是相对强度（触及次数 + 陈旧度），不是概率；
-   * holdRate 是历史上触及后守住的比例（Wilson 下界）；pStall 是「价格容易在这停」的倾向。
+   * 关键位（引擎算的，和界面上的档位带同源）。
+   *
+   *   edge    排序分 = log1p(触及次数) + 0.8×陈旧度。相对强度，不是概率
+   *   pTouch  触及概率（%）：未来若干根 K 线内，价格走到这个位
+   *   pHold   守住概率（%）：走到之后反弹而不是跌穿。校准好（说 75% 实际 75.4%），
+   *           但区分度弱（AUC 0.59~0.61），不适合比较相邻两条位
+   *   nEvents 历史被测试次数
+   *   pStall  成交量剖面看「价格容易在这里停」的倾向，不参与排序
+   *   bucket  这条位所属的历史分位档（Q1~Q5）
    */
   levels: {
     price: number;
     zone: number[];
     role: string;
-    score: number;
-    holdRate: number;
-    touches: number;
-    holds: number;
+    edge: number;
+    pTouch: number | null;
+    pHold: number | null;
+    nEvents: number;
     pStall: number;
     distancePct: number;
+    bucket: string | null;
   }[];
 
   news: { stance: string; sentiment: number; headlines: string[] };
@@ -146,7 +154,11 @@ const SYSTEM_PROMPT = `你是一名加密货币日内交易的分析助手，服
 - 只用材料里给出的数字，不要编造材料里没有的价格、指标或新闻。
 - 技术面和新闻面互相矛盾时，必须写进 conflicts。
 - 结论与给出的关键位冲突时（例如叫人多，但现价正好压在一条被反复验证的阻力区下面），必须写进 conflicts。
-- 关键位的 score 是相对强度，不是概率，不要把它当成「守住的可能性」来讲。
+- 关键位带两个概率：pTouch 是「价格会不会走到这里」，pHold 是「走到了会不会守住」。
+  触及概率区分度强，可以拿来做判断；守住概率的绝对值可信（校准误差 <2pp），
+  但区分度弱，不要因为两条相邻的位守住概率差几个点就说一条比另一条更值得做。
+- edge 是排序用的相对强度（触及次数 + 陈旧度），不是概率，不要当成「守住的可能性」来讲。
+- 没有 pTouch/pHold（模型未就绪）时，只能说位置和距离，不要编造概率。
 - 数据不足就判 wait，不要为了给出结论而猜。
 - 只输出一个 JSON 对象，不要 markdown 代码块，不要任何额外说明文字。
 
@@ -170,7 +182,7 @@ function userPrompt(s: AiSnapshot): string {
     '24小时涨跌幅%': s.change24h,
     K线根数: s.barsUsed,
     覆盖小时: s.spanHours,
-    // score 是相对强度不是概率；距离带符号，负=在现价下方
+    // edge 是相对强度不是概率；pTouch/pHold 是百分数；距离带符号，负=在现价下方
     识别出的位: s.levels.slice(0, 8),
 
     新闻情绪分: s.news.sentiment,

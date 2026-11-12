@@ -2,9 +2,14 @@ import { fmtPct, fmtPrice } from '../lib/format.ts';
 import type { Ticker } from '../lib/api.ts';
 import { toggleTheme, useTheme } from '../lib/theme.ts';
 
+export type View = 'desk' | 'research';
+
 interface Props {
   ticker: Ticker | undefined;
   env: 'testnet' | 'live';
+  /** 当前页面：日内台（交易）还是研究台（本地数据算关键位） */
+  view: View;
+  onView: (v: View) => void;
   priceRound: number;
   interval: string;
   wsAlive: boolean;
@@ -18,7 +23,8 @@ interface Props {
 }
 
 export default function TopBar({
-  ticker, env, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured, onToggleArm, onOpenSettings, onOpenRail,
+  ticker, env, view, onView, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
+  onToggleArm, onOpenSettings, onOpenRail,
 }: Props) {
   const chg = ticker?.change24h ?? 0;
   const theme = useTheme();
@@ -28,8 +34,14 @@ export default function TopBar({
 
       <div className="brand">
         <b>巡风</b>
-        <span>Gate 永续</span>
+        <span className="wide-only">Gate 永续</span>
         <em className={`env-badge ${env}`}>{env === 'testnet' ? '模拟盘' : '实盘'}</em>
+      </div>
+
+      {/* 两个页面的切换。研究台不碰交易所，所以它在这里只有名字，没有环境徽标 */}
+      <div className="view-switch">
+        <button className={view === 'desk' ? 'on' : ''} onClick={() => onView('desk')}>日内台</button>
+        <button className={view === 'research' ? 'on' : ''} onClick={() => onView('research')}>研究台</button>
       </div>
 
       <div className="ticker-head">

@@ -74,6 +74,18 @@ function webDistDir() {
     : path.join(__dirname, '..', '..', 'web', 'dist');
 }
 
+/**
+ * 关键位引擎（Python sidecar）在哪。
+ *
+ * 安装版里是 PyInstaller 打出来的 exe，跟着 resources 一起装进来；
+ * 开发态不设这个变量 —— 服务端会自己去仓库里找 sidecar/service.py 和 .venv 的解释器。
+ */
+function sidecarExe() {
+  if (!app.isPackaged) return '';
+  const p = path.join(process.resourcesPath, 'sidecar', 'xfrine-sidecar.exe');
+  return fs.existsSync(p) ? p : '';
+}
+
 // ---------- 日志 ----------
 
 function logFile() {
@@ -232,6 +244,9 @@ function spawnServer() {
     // 告诉服务端「你的父进程死了就跟着退」，见 server/src/index.ts
     XFRINE_PARENT_PIPE: '1',
   };
+  // 引擎的位置：没打进包（或干脆没打包引擎）就不设，服务端会去找仓库里的那份并报「未就绪」
+  const engine = sidecarExe();
+  if (engine) env.XFRINE_SIDECAR = engine;
   // 从别的 Electron 程序继承来的变量对子进程没意义，还可能干扰它
   delete env.ELECTRON_RUN_AS_NODE_INSPECT;
 

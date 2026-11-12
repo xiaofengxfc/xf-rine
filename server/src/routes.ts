@@ -5,15 +5,20 @@ import {
 } from './config.js';
 import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
-import { detectLevels, type Bar, type Direction, type Level, type LevelSet } from './levels.js';
+import type { Bar } from './bar.js';
+import type { Direction, Zone } from './sr/types.js';
+import * as sr from './sr/client.js';
+import { SidecarError } from './sr/client.js';
+import { mountResearch } from './sr/research.js';
 import { newsDigest } from './news.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
 import { sendFeedback, feedbackTarget, FeedbackError } from './feedback.js';
+import { DataError } from './errors.js';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { HOME_DIR } from './config.js';
-import { DataError, containedPath, readFile, scanDir, tfSeconds } from './localdata.js';
+
 
 export const router = Router();
 
@@ -211,6 +216,17 @@ function fail(res: Response, err: unknown): void {
   }
   if (err instanceof DataError) {
     res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.message, status: err.status });
+    return;
+  }
+  /**
+   * 引擎没起来 / 算挂了。
+   *
+   * 这种情况不是「请求写错了」，是「这一块能力现在没有」：前端按 ENGINE_UNAVAILABLE
+   * 显示「关键位引擎未就绪」并给出原因，而不是弹一条红色的 500。
+   */
+  if (err instanceof SidecarError) {
+    const status = err.unavailable ? 503 : 500;
+    res.status(status).json({ error: err.code, detail: err.message, engine: true });
     return;
   }
   const msg = err instanceof Error ? err.message : String(err);
@@ -638,30 +654,79 @@ router.get('/candles', wrap(async (req, res) => {
 // ---------- 档位 ----------
 
 /**
- * 把检测器算出来的距离改挂到「现价」上。
+ * 把关键位的距离改挂到「现价」上。
  *
- * detectLevels 只能看到已经收盘的 K 线，它嘴里的 last 是上一根收盘价；
- * 界面上要的是「离现在这个价格有多远」，所以这里按最新成交价重算一遍距离和角色。
- * 角色也要重算：现价穿过一条位之后，原来在头顶的阻力就变成脚下的支撑。
+ * 引擎只看得见已经收盘的 K 线，它嘴里的 last 是上一根收盘价；界面上要的是
+ * 「离现在这个价格有多远」，所以按最新成交价重算距离。角色也跟着重算：
+ * 现价穿过一条位之后，原来在头顶的阻力就变成脚下的支撑。
  */
-function withLive(s: LevelSet, live: number): LevelSet {
-  if (!(live > 0)) return s;
-  const a = s.atr > 0 ? s.atr : 0;
-  const levels = s.levels.map((l) => ({
-    ...l,
-    distancePct: ((l.price - live) / live) * 100,
-    distAtr: a > 0 ? (l.price - live) / a : l.distAtr,
-    role: (l.zoneHigh < live ? 'support' : l.zoneLow > live ? 'resistance' : l.price <= live ? 'support' : 'resistance') as 'support' | 'resistance',
-  }));
-  const near = (role: 'support' | 'resistance'): Level | null => {
-    const pool = levels.filter((x) => x.role === role);
-    if (pool.length === 0) return null;
-    return pool.reduce((x, y) => (Math.abs(y.distAtr) < Math.abs(x.distAtr) ? y : x));
-  };
-  return { ...s, last: live, levels, nearestSupport: near('support'), nearestResistance: near('resistance') };
+function withLiveZones(zones: Zone[], live: number, atrValue: number): Zone[] {
+  if (!(live > 0)) return zones;
+  const a = atrValue > 0 ? atrValue : 0;
+  return zones.map((z) => {
+    const role: Zone['zone_type'] = z.high < live ? 'support'
+      : z.low > live ? 'resistance'
+        : z.center <= live ? 'support' : 'resistance';
+    return {
+      ...z,
+      distance_pct: Number((((z.center - live) / live) * 100).toFixed(4)),
+      distance_atr: a > 0 ? Number(((z.center - live) / a).toFixed(4)) : z.distance_atr,
+      zone_type: role,
+      zone_label: role === 'support' ? '支撑带' : '压力带',
+    };
+  });
 }
 
-/** 合约的最小变动价。读不到就让检测器自己按收盘价估 */
+/** 某一侧离现价最近的那个位 */
+function nearestOf(zones: Zone[], role: 'support' | 'resistance'): Zone | null {
+  const pool = zones.filter((z) => z.zone_type === role);
+  if (pool.length === 0) return null;
+  return pool.reduce((x, y) => (Math.abs(y.distance_atr) < Math.abs(x.distance_atr) ? y : x));
+}
+
+/**
+ * 交易所周期名 -> 引擎认的周期代号。
+ *
+ * 引擎那边的多周期共振按 D1/H4/H1 这套名字认，交易所用 1h/4h/1d。
+ * 对不上就等于「邻居周期一个都没找到」，共振永远是 1。
+ */
+const GATE_TF_TO_STD: Record<string, string> = {
+  '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30',
+  '1h': 'H1', '4h': 'H4', '8h': 'H8', '1d': 'D1', '7d': 'W1',
+};
+
+/**
+ * 邻居周期的 K 线（共振用）。
+ *
+ * 共振要拿同一品种的其他周期各算一遍。每根 K 线都去交易所现拉的话，档位每刷一次就是
+ * 四五趟往返，太贵；所以这里只在时间轴里已经有这一段时直接用，没有就拉一页并缓存五分钟。
+ * 拉不到就当这个周期不存在 —— 共振少算一层，好过让整条档位请求失败。
+ */
+const MTF_TTL_MS = 5 * 60_000;
+const MTF_LADDER = ['15m', '30m', '1h', '4h', '8h', '1d'];
+const mtfCache = new Map<string, { at: number; bars: Bar[] }>();
+
+async function mtfFrames(contract: string, interval: string): Promise<{ tf: string; bars: Bar[] }[]> {
+  const idx = MTF_LADDER.indexOf(interval);
+  if (idx < 0) return [];
+  const wanted = [MTF_LADDER[idx + 1], MTF_LADDER[idx + 2], MTF_LADDER[idx - 1]].filter((x): x is string => Boolean(x));
+  const out: { tf: string; bars: Bar[] }[] = [];
+  for (const iv of wanted) {
+    const code = GATE_TF_TO_STD[iv];
+    if (!code) continue;
+    const key = contract + ':' + iv;
+    const hit = mtfCache.get(key);
+    if (hit && Date.now() - hit.at < MTF_TTL_MS) { out.push({ tf: code, bars: hit.bars }); continue; }
+    try {
+      const page = await loadCandles(contract, iv, 600, false, undefined, MTF_TTL_MS);
+      mtfCache.set(key, { at: Date.now(), bars: page.bars });
+      out.push({ tf: code, bars: page.bars });
+    } catch { /* 这个周期拿不到就算了 */ }
+  }
+  return out;
+}
+
+/** 合约的最小变动价。读不到就让引擎按收盘价估 */
 function priceTickOf(contract: string): number {
   try {
     const c = contractsNow().find((x) => x.name === contract);
@@ -669,40 +734,43 @@ function priceTickOf(contract: string): number {
   } catch { return 0; }
 }
 
-const levelOpts = (req: Request) => ({
-  lookback: Math.round(qnum(req.query.lookback, 250, 60, 1000)),
-  maxOut: Math.round(qnum(req.query.maxOut, 10, 2, 20)),
-  maxDistAtr: qnum(req.query.maxDistAtr, 5, 0.5, 20),
-  nmsGapAtr: qnum(req.query.nmsGapAtr, 0.9, 0.2, 5),
-});
-
 /**
  * 档位有两条数据来源：交易所的实时 K 线，或者你本地那个 Parquet 目录。
  *
- * 本地那条带 source=local&symbol=xxx&tf=H1 走，算法一字不差 —— 上游项目本来就是
- * 「读本地 parquet 算位」，这条路才是它的主用法；交易所那条只是把同一套算法挂到实时行情上。
- * 两条路算出来的都是「离现价多远」，只是现价的定义不同：本地数据的最后一根收盘价。
+ * 两条路走的是同一个引擎（Python sidecar 里的上游 V3Fusion），区别只在 K 线从哪来：
+ * 本地那条把目录和品种名交给引擎，它自己读文件；交易所那条由这里把 K 线喂进去。
+ * 算出来的都是「离现价多远」，只是现价的定义不同：本地数据的最后一根收盘价。
  */
 router.get('/levels', wrap(async (req, res) => {
   const source = String(req.query.source ?? 'gate') === 'local' ? 'local' : 'gate';
   const limit = Math.round(qnum(req.query.limit, 500, 120, 5000));
+  // 每侧最多几个位：引擎的 n_zones 就是「单侧上限」
+  const nZones = Math.round(qnum(req.query.n_zones ?? req.query.maxOut, 3, 1, 8));
+  const dirRaw = String(req.query.direction ?? 'both').toLowerCase();
+  const dir: Direction = dirRaw === 'long' || dirRaw === 'short' ? dirRaw : 'both';
+  const mtf = String(req.query.mtf ?? 'true').toLowerCase() !== 'false';
 
   if (source === 'local') {
     requireLocal(req, '本地数据');
     const symbol = String(req.query.symbol ?? '');
     const tf = String(req.query.tf ?? 'D1').toUpperCase();
-    const root = requireDataDir();
-    const { bars } = await readFile(containedPath(root, symbol, tf));
-    const recent = limit > 0 ? bars.slice(Math.max(0, bars.length - limit)) : bars;
-    const set = withLive(detectLevels(recent, { tick: 0, ...levelOpts(req) }), recent[recent.length - 1]?.close ?? 0);
+    const r = await sr.analyzeLocal({
+      dir: requireDataDir(), symbol, tf, n_zones: nZones, direction: dir, mtf, n_bars: 0,
+    });
+    const zones = withLiveZones(r.zones, r.current_price, r.engine.atr);
     res.json({
-      contract: symbol,
-      interval: tf,
+      contract: r.symbol,
+      interval: r.tf,
       source: 'local',
-      firstTime: recent[0]?.time ?? 0,
-      lastTime: recent[recent.length - 1]?.time ?? 0,
-      barsUsed: recent.length,
-      ...set,
+      barsUsed: r.data_bars,
+      last: r.current_price,
+      atr: r.engine.atr,
+      zones,
+      nearestSupport: nearestOf(zones, 'support'),
+      nearestResistance: nearestOf(zones, 'resistance'),
+      summary: r.summary,
+      engine: r.engine,
+      mtf_zones: r.mtf_zones,
     });
     return;
   }
@@ -714,15 +782,31 @@ router.get('/levels', wrap(async (req, res) => {
   // 丢掉最后一根未走完的 K 线：半根 K 线的影线不该参与判位
   const closed = bars.slice(0, -1);
   const live = bars[bars.length - 1]?.close ?? 0;
-  const set = withLive(detectLevels(closed, { tick: priceTickOf(contract), ...levelOpts(req) }), live);
+  const frames = [
+    { tf: GATE_TF_TO_STD[interval] ?? interval.toUpperCase(), bars: closed },
+    ...(mtf ? await mtfFrames(contract, interval) : []),
+  ];
+  const r = await sr.analyzeBars({
+    symbol: contract, tf: frames[0]!.tf, frames, n_zones: nZones, direction: dir,
+    mtf, tick: priceTickOf(contract),
+  });
+  const zones = withLiveZones(r.zones, live, r.engine.atr);
   res.json({
     contract,
     interval,
     source: 'gate',
     barsUsed: closed.length,
-    ...set,
+    last: live || r.current_price,
+    atr: r.engine.atr,
+    zones,
+    nearestSupport: nearestOf(zones, 'support'),
+    nearestResistance: nearestOf(zones, 'resistance'),
+    summary: r.summary,
+    engine: r.engine,
+    mtf_zones: r.mtf_zones,
   });
 }));
+
 
 // ---------- 本地数据目录（移植上游的数据层） ----------
 
@@ -748,15 +832,48 @@ function requireDataDir(): string {
   return d;
 }
 
+/**
+ * 记住一个数据目录。
+ *
+ * 上游把路径直接写进内存，谁都能改。这里两道锁：
+ *   1. 写只认本机（requireLocal）—— 选目录等于让程序读你的硬盘
+ *   2. 配了 XFRINE_DATA_DIR_ALLOW 时，路径必须落在它给的根目录下
+ *
+ * 目录本身还能不能读出 K 线由引擎判断，这里只保证「路径存在、在允许范围里」。
+ */
+function storeDataDir(rawInput: string): string {
+  const raw = (rawInput ?? '').trim();
+  if (!raw) throw new DataError(400, 'BAD_INPUT', '缺少 dir');
+  const abs = resolve(raw);
+  if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+    throw new DataError(404, 'NO_DIR', '这个目录不存在：' + abs);
+  }
+  const allow = (process.env.XFRINE_DATA_DIR_ALLOW ?? '').trim();
+  if (allow) {
+    const roots = allow.split(';').map((x) => resolve(x.trim())).filter(Boolean);
+    const inside = roots.some((r) => abs === r || abs.startsWith(r + sep));
+    if (!inside) throw new DataError(403, 'OUTSIDE_ROOT', '这个目录不在允许的根目录里：' + roots.join(' / '));
+  }
+  writeFileSync(DATA_DIR_FILE, JSON.stringify({ dir: abs, at: Date.now() }, null, 2), 'utf8');
+  return abs;
+}
+
+/**
+ * 目录里有哪些品种。
+ *
+ * 解析交给引擎（Python 那边的 local_data_loader），和真正读文件用的是同一套命名规则 ——
+ * 两边各写一份迟早会漂：列表里有、点进去读不到，是最难解释的一类故障。
+ */
 router.get('/data/dir', wrap(async (req, res) => {
   requireLocal(req, '本地数据目录');
   const dir = readDataDir();
   if (!dir) { res.json({ dir: '', instruments: [], files: 0, exists: false }); return; }
   try {
-    res.json({ ...scanDir(dir), exists: true });
+    const out = await sr.instruments(dir);
+    res.json({ dir: out.data_dir, instruments: out.instruments, files: (out as { files?: number }).files ?? 0, exists: true });
   } catch (e) {
-    // 目录被删/被移动了不该让整页崩，如实说它在哪、现在什么状态
-    res.json({ dir, instruments: [], files: 0, exists: false, error: (e as Error).message });
+    // 目录在，但引擎没起来 / 读不了：如实说，别让整页崩
+    res.json({ dir, instruments: [], files: 0, exists: true, error: (e as Error).message });
   }
 }));
 
@@ -764,18 +881,13 @@ router.post('/data/dir', wrap(async (req, res) => {
   // 只认本机、不要 arm 令牌：这一步不碰交易所、不动钱，只是记住「读哪个目录」。
   // 要令牌的话就得先配密钥、先点解锁 —— 而想用本地数据的人往往根本不下单。
   requireLocal(req, '选本地数据目录');
-  const raw = String((req.body as { dir?: string })?.dir ?? '').trim();
-  if (!raw) throw new DataError(400, 'BAD_INPUT', '缺少 dir');
-  // 先验一遍再存：存一个扫不出东西的目录，等于让后面每一步都在报错
-  const scan = scanDir(raw);
-  const allow = (process.env.XFRINE_DATA_DIR_ALLOW ?? '').trim();
-  if (allow) {
-    const roots = allow.split(';').map((x) => resolve(x.trim())).filter(Boolean);
-    const inside = roots.some((r) => scan.dir === r || scan.dir.startsWith(r + sep));
-    if (!inside) throw new DataError(403, 'OUTSIDE_ROOT', '这个目录不在允许的根目录里：' + roots.join(' / '));
+  const dir = storeDataDir(String((req.body as { dir?: string })?.dir ?? ''));
+  try {
+    const out = await sr.instruments(dir);
+    res.json({ ok: true, dir: out.data_dir, instruments: out.instruments, files: (out as { files?: number }).files ?? 0 });
+  } catch (e) {
+    res.json({ ok: true, dir, instruments: [], files: 0, error: (e as Error).message });
   }
-  writeFileSync(DATA_DIR_FILE, JSON.stringify({ dir: scan.dir, at: Date.now() }, null, 2), 'utf8');
-  res.json({ ok: true, ...scan });
 }));
 
 /** 读一个品种某个周期的 K 线。图表和档位都用它，返回的字段和 /candles 对齐 */
@@ -785,16 +897,15 @@ router.get('/data/bars', wrap(async (req, res) => {
   const tf = String(req.query.tf ?? 'D1').toUpperCase();
   const limit = Math.round(qnum(req.query.limit, 500, 30, 20_000));
   const root = requireDataDir();
-  const { bars } = await readFile(containedPath(root, symbol, tf));
-  const recent = bars.slice(Math.max(0, bars.length - limit));
+  const out = await sr.localBars(root, symbol, tf, limit);
   res.json({
     contract: symbol,
     interval: tf,
     source: 'local',
-    bars: recent,
-    total: bars.length,
-    exhausted: recent.length === bars.length,
-    intervalSec: tfSeconds(tf),
+    bars: out.bars,
+    total: out.total,
+    exhausted: out.returned >= out.total,
+    intervalSec: stepSeconds(tf),
   });
 }));
 
@@ -817,7 +928,13 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
   const { bars } = await loadCandles(contract, interval, 300);
   const closed = bars.slice(0, -1);
   const live = bars[bars.length - 1]?.close ?? 0;
-  const set = withLive(detectLevels(closed, { tick: priceTickOf(contract) }), live);
+  const tfCode = GATE_TF_TO_STD[interval] ?? interval.toUpperCase();
+  // 关键位交给引擎算。AI 看的是同一个引擎的结论，不是另一套近似
+  const analysis = await sr.analyzeBars({
+    symbol: contract, tf: tfCode, frames: [{ tf: tfCode, bars: closed }],
+    n_zones: 3, direction: 'both', mtf: false, tick: priceTickOf(contract),
+  });
+  const zones = withLiveZones(analysis.zones, live, analysis.engine.atr);
   const news = await newsDigest(contract, 6).catch(() => null);
 
   let barHigh = live;
@@ -840,26 +957,28 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
     contract,
     interval,
     last: px(live),
-    atr: px(set.atr),
-    rangeHigh: px(set.rangeHigh),
-    rangeLow: px(set.rangeLow),
+    atr: px(analysis.engine.atr),
+    rangeHigh: px(barHigh),
+    rangeLow: px(barLow),
     barsUsed: closed.length,
     spanHours: Number((t1 > t0 ? (t1 - t0) / 3600 : 0).toFixed(1)),
     barHigh: px(barHigh),
     barLow: px(barLow),
     change24h: Number(change24h.toFixed(2)),
-    levels: set.levels.map((l) => ({
-      price: px(l.price),
-      zone: [px(l.zoneLow), px(l.zoneHigh)],
+    levels: zones.slice(0, 8).map((z) => ({
+      price: px(z.center),
+      zone: [px(z.low), px(z.high)],
       // 模型读中文材料，角色也给它中文
-      role: l.role === 'support' ? '支撑' : '阻力',
-      // 排序分只有两个因子，别让模型当成概率读；守住率是统计出来的
-      score: Number(l.score.toFixed(2)),
-      holdRate: Number(l.holdRate.toFixed(2)),
-      touches: l.touches,
-      holds: l.holds,
-      pStall: Number(l.pStall.toFixed(2)),
-      distancePct: Number(l.distancePct.toFixed(2)),
+      role: z.zone_type === 'support' ? '支撑' : '阻力',
+      // 相对强度（触及次数 + 陈旧度），不是概率
+      edge: Number(z.edge_score.toFixed(2)),
+      // 双概率：触及概率区分度强、守住概率校准好但排序弱，两者都要给
+      pTouch: z.p_touch === null ? null : Number((z.p_touch * 100).toFixed(0)),
+      pHold: z.p_hold === null ? null : Number((z.p_hold * 100).toFixed(0)),
+      nEvents: z.n_events,
+      pStall: Number(z.p_stall.toFixed(2)),
+      distancePct: Number(z.distance_pct.toFixed(2)),
+      bucket: z.bucket,
     })),
 
     news: {
@@ -2268,3 +2387,17 @@ router.get('/tickers', wrap(async (_req, res) => {
 }));
 
 export type { Direction };
+
+/**
+ * 研究台接口（/research/*）：数据目录、单品种分析、全市场扫描。
+ *
+ * 放在文件末尾挂载：它依赖的 wrap / fail / requireLocal 都在上面定义，
+ * 提前调用会踩到 const 的暂时性死区（启动即 ReferenceError）。
+ */
+mountResearch(router, {
+  requireLocal,
+  getDataDir: readDataDir,
+  setDataDir: storeDataDir,
+  fail,
+  wrap: (fn) => wrap(fn),
+});

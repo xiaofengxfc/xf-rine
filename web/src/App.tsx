@@ -12,7 +12,8 @@ import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
 import ChartPane, { type PricePick } from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
-import TopBar from './components/TopBar.tsx';
+import TopBar, { type View } from './components/TopBar.tsx';
+import ResearchDesk from './components/ResearchDesk.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
 import LocalBar from './components/LocalBar.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
@@ -126,6 +127,27 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 手机上左栏是抽屉：点顶栏的「合约」打开，选完自动收 */
   const [railOpen, setRailOpen] = useState(false);
+  /**
+   * 两个页面：日内台（看盘下单）和研究台（本地数据算关键位）。
+   *
+   * 研究台不依赖交易所，也不碰仓位；交易台那边的一切状态在切换时都留着，
+   * 切回来还是原来那个币种、那个周期。
+   */
+  const [view, setViewState] = useState<View>(() => (window.location.hash === '#research' ? 'research' : 'desk'));
+
+  /**
+   * 切页面时把 hash 一起改掉。
+   *
+   * 这不只是好看：桌面端和手机端都能把「研究台」存成书签 / 主屏图标，
+   * 打开就是那一页；调样式时也能直接开 #research 核对，不用每次都点一下。
+   */
+  const setView = useCallback((v: View) => {
+    setViewState(v);
+    try {
+      const url = v === 'research' ? '#research' : window.location.pathname + window.location.search;
+      window.history.replaceState(null, '', url);
+    } catch { /* 某些 WebView 不让改，忽略 */ }
+  }, []);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
   /**
    * 本地数据源（移植过来的那套 Parquet 目录）。
@@ -1008,10 +1030,12 @@ export default function App() {
 
   return (
     <>
-      <div className={`app${railOpen ? ' rail-open' : ''}`}>
+      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}`}>
         <TopBar
           env={config?.env ?? 'live'}
           ticker={ticker}
+          view={view}
+          onView={setView}
           priceRound={priceRound}
           interval={interval}
           wsAlive={wsAlive}
@@ -1049,7 +1073,7 @@ export default function App() {
             contract={localOn ? (localPick?.symbol ?? contract) : contract}
             interval={localOn ? (localPick?.tf ?? interval) : interval}
             bars={bars}
-            levels={levels?.levels ?? []}
+            zones={levels?.zones ?? []}
 
             positions={myPositions}
             orders={myOrders}
@@ -1073,7 +1097,7 @@ export default function App() {
             hasPosition={myPositions.length > 0}
           />
           <LevelsStrip
-            levels={levels?.levels ?? []}
+            zones={levels?.zones ?? []}
             manual={manualLevels}
             price={ticker?.last || levels?.last || 0}
             priceRound={priceRound}
@@ -1081,6 +1105,12 @@ export default function App() {
 
           />
         </main>
+
+        {view === 'research' && (
+          <main className="research-main">
+            <ResearchDesk canPick={canPickLocal} onToast={push} />
+          </main>
+        )}
 
         <aside className="side">
 

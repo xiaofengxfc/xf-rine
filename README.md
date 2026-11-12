@@ -1,9 +1,11 @@
 # 巡风 · Gate 永续日内台
 
 单人在本地跑的交易终端。看 K 线、看算出来的支撑阻力价格带、手动下单并自己填止损止盈。
+另有一个研究台：读本地 K 线，算支撑阻力带和它的双概率，全市场扫描。
 
 ![模拟盘](docs/screenshot.png)
 ![实盘](docs/screenshot-live.png)
+![研究台](docs/screenshot-research.png)
 
 ## 能做什么
 
@@ -26,11 +28,23 @@
 - 把技术面和新闻面一起交给大模型，给一个偏多、偏空或观望的判断，并指出矛盾在哪。
 - 深色、浅色两套配色，一键切换，K 线图的底色和网格跟着换。
 
+下面这几条来自「研究台」，也是这次把上游项目整套搬过来的部分：
+
+- 每个关键位给两个概率：**触及概率**（未来若干根内价格会不会走到这里）和**守住概率**（走到之后是反弹还是跌穿），
+  界面上两个都写，不合并成一个说不清的「胜率」。
+- 多周期共振：同一个品种的其他周期各算一遍，同一个价位在几个周期上都成立就标出来。
+- 全市场扫描：一个目录里几十上百个品种一次算完，按「触及 × 守住」排序，点一行进单品种深度分析。
+- 本地 parquet / csv 直接读，三种文件名约定（`{品种}主连_{周期}`、`{品种}_{周期}`、`{代码}_daily`）都认，
+  时间戳是秒、毫秒、还是「秒 ÷ 1000」都自动判。
+- A 股数据走复权路径（有权威因子就用，缺了会明说「这份是不复权」），不会因为除权跳空把关键位算歪。
+
 ## 需要什么
 
 - Node.js 22 或更高版本。
 - pnpm。
+- **Python 3.10 以上**（关键位引擎跑在 Python 里，见下面「引擎」一节）。
 - Gate.io 的 API 密钥。到 Gate 的「API 管理」创建，权限勾选 **合约交易 · 读写**。不要开提现权限。
+  不交易、只看研究台的话可以不配。
 
 ## 启动
 
@@ -43,6 +57,106 @@ pnpm start          # 启动服务，http://127.0.0.1:8787
 开发模式用 `pnpm dev`。它会同时起前端热更新（5273 端口）和后端（8787 端口），前端把 `/api` 和 `/ws` 转发给后端。
 
 Windows 上直接双击 `start.bat` 也行。
+
+### 引擎（Python）
+
+关键位的算法是上游原版 Python 实现（numpy/pandas），跑在一个独立进程里，Node 通过回环 HTTP 调它。
+第一次要建一次虚拟环境：
+
+```bash
+python -m venv sidecar/.venv
+sidecar/.venv/Scripts/pip install -r sidecar/requirements.txt   # Linux/macOS 用 sidecar/.venv/bin/pip
+```
+
+引擎是**懒启动**的：第一次要算关键位时才拉起来，端口和口令都是随机的，只绑 127.0.0.1。
+只想看盘、不需要档位的人可以不装，交易台的其它功能不受影响 —— 只是档位区会写明「引擎未就绪」。
+
+一行命令自检引擎和数据层：
+
+```bash
+sidecar/.venv/Scripts/python sidecar/cli.py health
+sidecar/.venv/Scripts/python sidecar/cli.py analyze --dir sidecar/data/klines --symbol BTC_USDT --tf D1
+```
+
+## 引擎与研究台
+
+### 为什么要单独一个进程
+
+算关键位的是上游项目 **Detect_support_and_resistance_levels** 的原版实现（V3 融合算法 + 双概率模型 +
+评分标定表）。这部分用 numpy/pandas 写，搬进 Node 只能重写一遍，而「重写一遍」和「移植」是两件事：
+以后上游改了参数、重训了模型，重写的版本对不上，也没法验证。
+
+所以：**Python 只负责算，Node 只负责接口和界面**。两边用回环 HTTP 通信，各自管各自的进程。
+Python 崩了不会把交易台拖下来，交易台的请求也进不了 Python 的解释器。
+
+### 两条数据来源，同一个引擎
+
+| 来源 | 怎么走 | 用在 |
+|---|---|---|
+| 交易所实时行情 | 服务端把已收盘的 K 线喂给引擎 | 日内台的档位带、图上的线、AI 快照 |
+| 本地 parquet / csv | 把目录和品种名交给引擎，它自己读文件 | 研究台的深度分析、全市场扫描、AI 快照之外的离线研究 |
+
+两条路算出来的是同一套东西，区别只在 K 线从哪来。距离都按「离现价多远」重算，现价的定义不同：
+实时行情用最新成交价，本地数据用最后一根收盘价。
+
+### 研究台在做什么
+
+页面顶栏切到「研究台」（地址栏 `#research` 直接进）。选一个数据目录，它会：
+
+1. 列出目录里的品种和周期，自动分析第一个品种；
+2. 单品种深度分析：三张卡（标的 / 最近关键位 / 关键位统计）、K 线叠加档位、逐位明细表；
+3. 全市场扫描：按有效概率排序，支持筛选、分页，点一行进单品种分析。
+
+数字的口径写在页面上，不靠猜：
+
+- **触及概率**：未来若干根内走到这个位的概率。上游在 130 只训练 + 130 只互斥测试股票上实测
+  AUC 0.77 / 0.73（支撑 / 阻力），区分度强。
+- **守住概率**：走到之后反弹而不是跌穿的概率。AUC 只有 0.59 / 0.61 —— 区分度弱，
+  但校准很好（模型说 75% 的那批实际 75.4% 守住）。所以它的绝对值可以看，**不适合用来比较相邻两条位**。
+- **有效概率** = 触及 × 守住，扫描表按它排序。
+- **Q1~Q5**：这条位的强度落在历史第几档。分档线和「该档在样本外的实测守住率」来自上游在 A 股日线上的
+  标定样本，搬到加密/期货上只能当参照，不是这里的胜率。
+- **共振**：这条位同时在哪些周期上成立。
+
+### 训练与回测
+
+上游那套评测框架一起搬过来了（`sidecar/scripts/`）：
+
+```bash
+# 走查回测：产出 levels_*.parquet / geo_*.parquet / report.txt
+sidecar/.venv/Scripts/python sidecar/scripts/run_eval.py --quick \
+  --data-dir <你的 A 股数据目录> --out out/eval
+
+# 用上面产出的 levels parquet 重训双概率模型
+sidecar/.venv/Scripts/python sidecar/scripts/train_probability.py out/eval --out data/prob_models.json
+```
+
+数据目录可以用 `--data-dir` 指定（也认环境变量 `XFRINE_ASHARE_DIR`），复权口径用 `--adjust`
+（`factor` 用权威因子 / `none` 不复权）。自备数据或合成数据跑评测时用 `--adjust none`。
+
+其它脚本：`build_factors.py`（构建复权因子缓存）、`prob_model.py` / `prob_scale_period_exp.py`（概率模型对照实验）、
+`score_search.py`（排序因子搜索）、`check_adjustment.py` / `validate_adjustment.py` / `eval_heuristic.py`（复权口径验证）。
+
+### 接口
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/research/health` | 引擎自检：模型、校准表、Python 版本 |
+| `GET /api/research/dir` · `POST /api/research/dir` | 读 / 设本地数据目录（写只认本机） |
+| `GET /api/research/analyze` | 单品种深度分析（`symbol` / `tf` / `n_zones` / `direction` / `mtf`） |
+| `GET /api/research/scan` | 全市场扫描，按有效概率排序 |
+| `GET /api/levels` | 日内台用的档位（`source=gate` 实时 / `source=local` 本地） |
+
+### 打包
+
+桌面安装包会把引擎一起打进去，用户机器上不需要装 Python：
+
+```bash
+pnpm pack:win      # 先打前端，再用 PyInstaller 打引擎，最后 electron-builder 出安装包
+pnpm pack:sidecar  # 只打引擎（产物在 sidecar/dist/xfrine-sidecar/）
+```
+
+代价是安装包大了不少（numpy / pandas / pyarrow 跟着进去）。开发态和仓库里跑仍然用 `sidecar/.venv`。
 
 ## 手机上用
 
@@ -574,3 +688,15 @@ pnpm check:candles --api=http://127.0.0.1:8787  # 改问本地服务端，看 Ap
 - 图上的价位标签按优先级抢位子（持仓均价 > 挂着的限价单 > 离现价近的档位），挤在一起时低优先级那条只画线不写字。哪条能说话取决于当时的可视价格跨度，所以缩放后重新加载一次结论可能变。
 - 图上不画止损止盈。它们是交易所里的单，价写在持仓卡和下单面板的摘要里 —— 图上一旦画了，容易让人以为那是「算出来的建议位」，而真正要紧的是那张单到底挂没挂上。
 - 图上画的是：持仓均价（黄）、强平价（橘色虚线）、挂着的限价单（紫）、算出来的支撑阻力（绿/红实线）。这四条线在图表右上角的价格轴上会互相让位子，挤在一起时优先级低的只画线不写字。
+
+
+## 许可
+
+本项目以 **GNU General Public License v3.0** 发布（见 [LICENSE](LICENSE)）。
+
+原因很直接：关键位引擎那一整块（`sidecar/` 下的 srlab、sr_engine、local_data_loader、scripts）
+是从 [Detect_support_and_resistance_levels](https://github.com/rosemarycox5334-debug/Detect_support_and_resistance_levels)
+原样移植过来的，那个项目是 GPL-3.0，派生作品就得跟着走同一个许可。移植部分保留了上游的文件头与注释。
+
+想在不承担 GPL 义务的前提下使用非引擎部分（交易台、界面、桌面/手机壳），
+需要先把 `sidecar/` 整个换掉 —— 现在档位、AI 快照、研究台三处都依赖它。

@@ -28,3 +28,27 @@ mobile/android/keystore.properties
 mobile/android/plugins/
 *.keystore
 *.jks
+
+# ---- 关键位引擎（Python sidecar） ----
+# 虚拟环境、PyInstaller 产物、缓存都不进版本库
+sidecar/.venv/
+sidecar/output/
+sidecar/out/
+sidecar/build/
+sidecar/dist/
+__pycache__/
+*.pyc
+
+# 但引擎自带的模型 / 校准表 / 复权因子必须进库：
+# 少一个文件，安装版就没有概率，而且界面上只会显示成「模型缺失」，没人知道该去哪找
+!sidecar/data/
+!sidecar/data/**
+
+# 运行时文件：记住的本地数据目录（每台机器不一样）
+server/data-dir.json
+
+# 引擎目录里的样例数据与评测产物：体积大、和机器上的行情无关，不进版本库
+# （模型、校准表、复权因子在上面已经显式放行）
+sidecar/data/klines/
+sidecar/data/dataset/
+sidecar/data/fetch.log

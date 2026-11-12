@@ -21,6 +21,10 @@ extraResources:
       - '!nodejs/**'
   - from: out/server.cjs
     to: server/server.cjs
+  # 关键位引擎（PyInstaller 打出来的 onedir）。服务端启动时用 XFRINE_SIDECAR 指过来。
+  # 没打的话 pnpm pack:win 会先跑 node sidecar/tools/build-exe.mjs 再进来，不会缺。
+  - from: ../sidecar/dist/xfrine-sidecar
+    to: sidecar
 
 asar: true
 compression: normal

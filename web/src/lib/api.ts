@@ -86,38 +86,79 @@ export interface Bar {
   time: number; open: number; high: number; low: number; close: number; volume: number;
 }
 
-export interface Level {
-  /** 区中枢 */
-  price: number;
-  zoneLow: number;
-  zoneHigh: number;
-  role: 'support' | 'resistance';
-  /** 排序分（触及次数 + 陈旧度）。是相对强度，不是概率，别当守住的可能性读 */
-  score: number;
-  /** 历史上触及后守住的比例（Wilson 下界，0-1）。样本不足时给 0.25 */
-  holdRate: number;
-  /** 触及事件数 / 其中守住几次 */
-  touches: number;
-  holds: number;
-  /** 越久没被碰过越强（0-1） */
+/**
+ * 一条支撑/阻力带。字段名就是引擎（Python sidecar）输出的名字，没做改名。
+ *
+ * 概率三件套的口径（引擎侧实测，界面上必须按这个说法写）：
+ *   p_touch     未来若干根内价格走到这个位的概率。区分度强（AUC 0.73~0.77）
+ *   p_hold      走到之后反弹而不是跌穿的概率。校准好（说 75% 实际 75.4%），
+ *               但区分度弱（AUC 0.59~0.61）：绝对值能看，别拿它比较相邻两个位
+ *   p_effective 两者相乘，批量扫描按它排序
+ * bucket 是「这个位的强度落在历史第几档」，bucket_hold_rate 是那一档在样本外的实测守住率。
+ */
+export interface Zone {
+  p_touch: number | null;
+  p_hold: number | null;
+  p_effective: number | null;
+  /** 区中枢 / 上下沿 */
+  center: number;
+  low: number;
+  high: number;
+  zone_type: 'support' | 'resistance';
+  zone_label: string;
+  /** 距现价（%，带符号，负=在下方）/ ATR 倍数 / 区宽 ATR */
+  distance_pct: number;
+  distance_atr: number;
+  width_atr: number;
+  width_pct: number | null;
+  /** 排序分 = log1p(触及次数) + 0.8×陈旧度。相对强度，不是概率 */
+  edge_score: number;
+  /** 历史被测试次数 / 陈旧度 */
+  n_events: number;
   stale: number;
-  /** 「价格容易在这里停」的倾向，不参与排序 */
-  pStall: number;
-  /** 区宽 / ATR */
-  widthAtr: number;
-  /** 距现价（%，带符号，负=在下方） */
-  distancePct: number;
-  /** 距现价 / ATR */
-  distAtr: number;
-  /** 最近一次触及距今多少根 bar，从没碰过是 -1 */
-  barsSinceTouch: number;
-  /**
-   * 排序分落在历史分位的第几档（1-5）。
-   *
-   * 这是上游在 A 股日线上标定出来的分档线，只能说明「这个分在本样本里属于高档还是低档」，
-   * 不是胜率，也不是「守住概率」。界面上必须按这个口径写。
-   */
-  bucket?: number;
+  /** 「价格容易在这里停」的倾向（不参与排序）及其历史分档 */
+  p_stall: number;
+  stall_bucket: string | null;
+  vp_strength: number;
+  /** 强度分档（Q1~Q5）与该档的样本外实测 */
+  bucket: string | null;
+  bucket_hold_rate: number | null;
+  bucket_fwd_ret: number | null;
+  bucket_n: number | null;
+  /** 共振周期数（1 = 只有本周期）/ 具体是哪几个周期 */
+  tf_count: number;
+  tfs: string;
+}
+
+/** 方向化摘要：最近位、最强位、趋势、一句话结论、以及那段必须说清的口径说明 */
+export interface AnalysisSummary {
+  direction: string;
+  direction_label: string;
+  nearest: Zone | null;
+  best: Zone | null;
+  trend_label: string;
+  trend_detail: string;
+  headline: string;
+  caveat: string;
+}
+
+export interface EngineInfo {
+  atr: number;
+  atr_pct: number | null;
+  calibrated: boolean;
+  calib_meta: Record<string, unknown>;
+  prob_ready: boolean;
+  prob_meta: Record<string, unknown>;
+  adjust_mode?: string;
+  adjust_source?: string;
+  n_ex_rights?: number;
+  adjust_warning?: string | null;
+}
+
+export interface MtfGroup {
+  tf: string;
+  tf_label: string;
+  zones: Zone[];
 }
 
 /** 本地数据目录里的一个品种，以及它有哪些周期 */
@@ -154,16 +195,14 @@ export interface LevelsResponse {
   /** 数据来自交易所实时 K 线，还是本地那个 Parquet 目录 */
   source?: 'gate' | 'local';
   barsUsed: number;
-  levels: Level[];
+  zones: Zone[];
   atr: number;
   last: number;
-  rangeHigh: number;
-  rangeLow: number;
-  nearestSupport: Level | null;
-  nearestResistance: Level | null;
-  /** 回看的 bar 数，以及用到的已确认枢轴数（自查用） */
-  lookback: number;
-  pivots: number;
+  nearestSupport: Zone | null;
+  nearestResistance: Zone | null;
+  summary: AnalysisSummary;
+  engine: EngineInfo;
+  mtf_zones: MtfGroup[];
 }
 
 export interface Position {
@@ -328,3 +367,104 @@ export type WsMessage =
   | { type: 'hello'; ts: number }
   | { type: 'subscribed'; contract: string; interval: string }
   | { type: 'gate_down' };
+
+
+// ---------- 研究台（/api/research/*） ----------
+
+/** 引擎自检。ok=false 时 detail 说明为什么没起来（没装 python / 缺依赖 / 崩了） */
+export interface ResearchHealth {
+  ok: boolean;
+  detail?: string;
+  engine?: string;
+  python?: string;
+  numpy?: string;
+  probReady?: boolean;
+  calibrated?: boolean;
+  probMeta?: Record<string, unknown>;
+  calibMeta?: Record<string, unknown>;
+}
+
+/** 数据目录 + 品种列表 */
+export interface ResearchDir {
+  dir: string;
+  exists: boolean;
+  count: number;
+  instruments: LocalInstrument[];
+  files: number;
+  tfLabels?: Record<string, string>;
+  /** 目录在、但引擎读不了时的说明 */
+  warning?: string;
+}
+
+/** 单品种分析结果。字段与引擎输出一致，图表用 kline（列式，unix 秒） */
+export interface ResearchAnalysis {
+  symbol: string;
+  symbol_label: string;
+  tf: string;
+  tf_label: string;
+  current_price: number;
+  change_pct: number;
+  window: number;
+  n_zones: number;
+  data_bars: number;
+  zones: Zone[];
+  mtf_zones: MtfGroup[];
+  summary: AnalysisSummary;
+  engine: EngineInfo;
+  direction: string;
+  direction_label: string;
+  kline?: {
+    time: number[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[];
+  };
+  kline_total: number;
+}
+
+/** 批量扫描的一行 */
+export interface ScanRow {
+  symbol: string;
+  tf: string;
+  current_price: number;
+  change_pct: number;
+  n_zones: number;
+  nearest_support: number | null;
+  nearest_support_dist_pct: number | null;
+  nearest_resistance: number | null;
+  nearest_resistance_dist_pct: number | null;
+  p_touch: number | null;
+  p_hold: number | null;
+  p_effective: number | null;
+  edge_score: number | null;
+  n_events: number | null;
+  width_atr: number | null;
+  nearest_distance_pct: number | null;
+  nearest_distance_atr: number | null;
+  bucket: string | null;
+  p_stall: number | null;
+  trend_label: string;
+  direction: string;
+  data_bars: number;
+  atr_pct: number | null;
+  adjusted: boolean;
+  adjust_source: string | null;
+}
+
+export interface ResearchScan {
+  summary: {
+    total: number;
+    analyzed: number;
+    failed: number;
+    n_adjusted: number;
+    n_unadjusted: number;
+    tf: string;
+    tf_label: string;
+    window: number;
+    n_zones: number;
+    direction: string;
+    direction_label: string;
+    data_dir: string;
+    calibrated: boolean;
+    prob_ready: boolean;
+  };
+  rows: ScanRow[];
+  errors: { symbol: string; reason: string }[];
+}

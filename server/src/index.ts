@@ -7,6 +7,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { config, keyHint, restBaseUrl, envLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
 import { router } from './routes.js';
 import { MarketHub } from './gate/market.js';
+import { stopSidecar } from './sr/client.js';
 import { refreshProxy, proxyState, routeStats } from './net.js';
 
 const app = express();
@@ -210,7 +211,13 @@ server.listen(config.port, config.host, () => {
   console.log('');
 });
 
-const bye = () => { hub.close(); server.close(); process.exit(0); };
+const bye = () => {
+  hub.close();
+  server.close();
+  // 引擎是子进程：不主动停，Node 退出后它会变成孤儿占着内存
+  stopSidecar();
+  process.exit(0);
+};
 process.on('SIGINT', bye);
 process.on('SIGTERM', bye);
 
