@@ -905,35 +905,17 @@ export default function ChartPane({
     for (const line of levelLinesRef.current) price.removePriceLine(line);
     levelLinesRef.current = [];
 
-    // 线可以多，字不能挤。每条线都留着，但右侧轴标签和标题按优先级抢位子：
-    // 同一段价位上只让一条说话，剩下的只画线不写字。
     const all = barsRef.current;
     const last = all[all.length - 1]?.close ?? 0;
-    // 阈值必须按「当前看得见的那一段」算，不能按固定根数：
-    // 缩放到只看几十根时价格跨度小，按固定根数算出来的间距会把标签全放过。
-    const chart = chartRef.current;
-    const vis = chart?.timeScale().getVisibleLogicalRange();
-    const from = vis ? Math.max(0, Math.floor(vis.from)) : Math.max(0, all.length - 180);
-    const to = vis ? Math.min(all.length - 1, Math.ceil(vis.to)) : all.length - 1;
-    const win = all.slice(from, to + 1);
-    let hi = -Infinity;
-    let lo = Infinity;
-    for (const b of win) { if (b.high > hi) hi = b.high; if (b.low < lo) lo = b.low; }
-    const span = Number.isFinite(hi) && Number.isFinite(lo) ? hi - lo : 0;
-    // 3.5% 的可视价格跨度，换算成像素大约是一个轴标签的高度
-    const minGap = span > 0 ? span * 0.035 : 0;
-    const slots: number[] = [];
 
     interface Item {
       price: number;
-      /** 越小越先占位 */
+      /** 越小越排在前面：顺序只决定画线的先后，不再决定谁有资格写字 */
       rank: number;
       color: string;
       width: 1 | 2;
       style: LineStyle;
       title: string;
-      /** 想不想显示标签 */
-      wants: boolean;
     }
 
     const items: Item[] = [];
@@ -947,7 +929,6 @@ export default function ChartPane({
         width: 2,
         style: LineStyle.Solid,
         title: positions.length > 1 ? (p.direction === 'long' ? '多单均价' : '空单均价') : '持仓均价',
-        wants: true,
       });
     }
 
@@ -961,7 +942,6 @@ export default function ChartPane({
         width: 1,
         style: LineStyle.Dashed,
         title: positions.length > 1 ? (p.direction === 'long' ? '多单强平' : '空单强平') : '强平价',
-        wants: true,
       });
     }
 
@@ -974,11 +954,10 @@ export default function ChartPane({
         width: 2,
         style: LineStyle.Dashed,
         title: o.label,
-        wants: true,
       });
     }
 
-    // 档位按离现价远近排，近的先说话。
+    // 档位按离现价远近排，近的排在前面。
     // 分数是相对强度（触及次数 + 陈旧度），不是概率，所以标签里不写百分比，只写次数。
     // 一律画实线：这版算法算出来的分数没有上限（1.x 到 3.x 都常见），
     // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
@@ -994,29 +973,29 @@ export default function ChartPane({
         // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
         title: (lv.role === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(lv.price, priceRound)
           + ' · 触及 ' + lv.touches + ' 次 · 守住 ' + Math.round(lv.holdRate * 100) + '%',
-        // 离得近的四条说价，其余只画线：一屏七八个标签会把图糊住
-        wants: i < 4,
       });
     });
 
     items.sort((a, b) => a.rank - b.rank);
 
+    /**
+     * 一条线一份标注，一条都不省。
+     *
+     * 以前这里按「离现价远近」抢位子：只有最近的四条写价，其余既没有轴标签也没有标题；
+     * 再叠加一层按可视价格跨度算的拥挤判定，价位挨得近的那些档位连线中间的字都没了。
+     * 用户看到的就是「图上只标了几条支撑阻力」。
+     *
+     * 现在每条都带轴标签和标题。挨在一起的档位，右侧轴上的价签会互相挡住两块，
+     * 但线中间那个标题还在，实时价格那个标签也始终压在上面 —— 标全是优先的。
+     */
     for (const it of items) {
-      let label = false;
-      if (it.wants) {
-        const crowded = minGap > 0 && slots.some((q) => Math.abs(q - it.price) < minGap);
-        if (!crowded) {
-          label = true;
-          slots.push(it.price);
-        }
-      }
       const line = price.createPriceLine({
         price: it.price,
         color: it.color,
         lineWidth: it.width,
         lineStyle: it.style,
-        axisLabelVisible: label,
-        title: label ? it.title : '',
+        axisLabelVisible: true,
+        title: it.title,
       });
       levelLinesRef.current.push(line);
     }
