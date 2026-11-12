@@ -232,7 +232,9 @@ export default function OrderTicket({
   })();
 
   async function submit() {
-    if (!contract || !token) return;
+    if (!contract) return;
+    // 点了没反应是最难查的一种：没解锁就直说，别静默返回
+    if (!token) { onToast('err', '交易没解锁', '先点右上角的「解锁交易」'); return; }
     setBusy(true);
     try {
       try {

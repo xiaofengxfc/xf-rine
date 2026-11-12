@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  jget, jsend,
+  jget, jsend, setNotArmedHandler,
   type Account, type AppConfig, type Bar, type ContractInfo,
   type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
@@ -53,8 +53,6 @@ const MAX_BARS = 20000;
 
 const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
-/** 解锁令牌的有效期，和服务端 routes.ts 的 ARM_TTL_MS 对齐 */
-const ARM_TTL_MS = 10 * 60 * 1000;
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
 interface Prefs {
@@ -122,6 +120,18 @@ export default function App() {
   const [privateErr, setPrivateErr] = useState<string | null>(null);
   const [armed, setArmed] = useState(false);
   const [token, setToken] = useState<string | null>(null);
+  /** 令牌给轮询那类请求用：那些 effect 不该因为解锁状态变了就整条重建 */
+  const tokenRef = useRef<string | null>(null);
+  tokenRef.current = token;
+  /**
+   * 服务端对这个令牌的核对结果。null = 还没问过。
+   *
+   * 令牌存在服务端内存里，服务重启或者在另一台设备上锁定过之后就没了，
+   * 页面自己看不出来。每 3 秒的 /api/private-state 会带回来一次，照它落锁。
+   * 结果和令牌一起记：解锁的那一瞬间，手上还留着上一次的旧结果，
+   * 只比「有没有效」会把刚解锁的会话立刻按回去。
+   */
+  const [armCheck, setArmCheck] = useState<{ token: string; ok: boolean } | null>(null);
   const [wsAlive, setWsAlive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -203,8 +213,6 @@ export default function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number>(0);
-  /** 解锁令牌的到期计时器 */
-  const armTimerRef = useRef(0);
   const lastBarRef = useRef<{ at: number; closed: boolean }>({ at: 0, closed: true });
   /** 行情请求序号。切币种时让晚回来的旧请求作废。 */
   const marketSeqRef = useRef(0);
@@ -651,9 +659,23 @@ export default function App() {
     try {
       // 一次取全：账户、持仓、委托、触发单。分四次发的话，四份回包来自四个时刻，
       // 持仓和它的止损单可能一个新一个旧，看起来就像「止损没挂上」。
-      const s = await jget<PrivateState>('/api/private-state');
+      const t = tokenRef.current;
+      const s = await jget<PrivateState>('/api/private-state', {
+        // 把解锁令牌一起带上：服务端据此回一句「这个令牌还算不算数」
+        headers: t ? { 'x-arm-token': t } : undefined,
+      });
       if (seq !== privateSeqRef.current) return;
-      setAccount(s.account); setPositions(s.positions); setOrders(s.orders); setPriceOrders(s.priceOrders);
+      /**
+       * 零张的记录不是仓。
+       *
+       * 交易所对全仓会一直保留一条 size=0 的记录（remember cross_leverage_limit 用），
+       * 服务端已经过滤过一道，这里再挡一次：这条记录一旦溜进来，图上和持仓卡里
+       * 就会出现一个「0 张 / 开仓 0.0000 / 盈亏 0.00」的假仓，还会让右键「覆盖持仓止损」
+       * 以为这一边有仓。
+       */
+      const live = s.positions.filter((p) => Math.abs(p.size) > 0);
+      setAccount(s.account); setPositions(live); setOrders(s.orders); setPriceOrders(s.priceOrders);
+      if (t) setArmCheck({ token: t, ok: s.armed === true });
       setPrivateAt(Date.now());
       setPrivateErr(null);
     } catch (e) {
@@ -986,17 +1008,17 @@ export default function App() {
 
   // ---------- 交易解锁 ----------
 
-  /** 落锁：清掉本地令牌和到期计时器。服务端那边的令牌到点也会失效，两边一起走 */
-  const clearArmTimer = useCallback(() => {
-    if (armTimerRef.current) { window.clearTimeout(armTimerRef.current); armTimerRef.current = 0; }
-  }, []);
-
+  /**
+   * 落锁：页面这边清掉令牌。
+   *
+   * 解锁没有时间限制，一直有效到你锁定、切换环境、或者关掉下单开关 ——
+   * 只靠一个倒计时兜底，会让盯盘到一半的人莫名其妙被锁在门外。
+   */
   const lockTrading = useCallback((title?: string, detail?: string) => {
-    clearArmTimer();
     setArmed(false);
     setToken(null);
     if (title) push('ok', title, detail);
-  }, [clearArmTimer, push]);
+  }, [push]);
 
   const toggleArm = useCallback(async () => {
     if (armed) {
@@ -1005,22 +1027,16 @@ export default function App() {
       return;
     }
     try {
-      const r = await jsend<{ armed: boolean; token?: string; expiresAt?: number }>('POST', '/api/trade/arm', { on: true });
+      const r = await jsend<{ armed: boolean; token?: string }>('POST', '/api/trade/arm', { on: true });
       if (!r.armed || !r.token) return;
       setArmed(true);
       setToken(r.token);
-      const left = Math.max(1000, (r.expiresAt ?? Date.now() + ARM_TTL_MS) - Date.now());
-      clearArmTimer();
-      // 到点自动落锁。不这么做的话，页面上会一直写着「交易已解锁」，
-      // 直到某次下单被服务端用 NOT_ARMED 拒掉才发现早就过期了。
-      armTimerRef.current = window.setTimeout(() => {
-        lockTrading('交易已自动锁定', '解锁有效期 10 分钟，要接着交易请再点一次「解锁交易」');
-      }, left);
-      push('ok', '交易已解锁', '10 分钟内有效，随时可锁定');
+      // 解锁后一直有效：只有你主动锁定、换环境、或者关掉下单开关才会失效
+      push('ok', '交易已解锁', '一直有效，随时可锁定');
     } catch (e) {
       push('err', '无法解锁交易', (e as Error).message);
     }
-  }, [armed, clearArmTimer, lockTrading, push]);
+  }, [armed, lockTrading, push]);
 
   // 换环境就等于换账户：服务端会把旧令牌全部作废，页面这边也跟着落锁，
   // 免得上一个环境的解锁状态被带到实盘上。
@@ -1044,7 +1060,28 @@ export default function App() {
     if (config && !config.liveTrading) lockTrading();
   }, [config, lockTrading]);
 
-  useEffect(() => clearArmTimer, [clearArmTimer]);
+  /**
+   * 服务端不认这个令牌了：页面跟着落锁。
+   *
+   * 两条路都走这里 —— 每 3 秒的核对（服务重启、在别处锁定过），
+   * 以及某次下单被 NOT_ARMED 当场拒掉。少了这条，页面会一直写着「交易已解锁」，
+   * 而每一次操作都只回一句「未解锁交易」。
+   */
+  useEffect(() => {
+    if (!armed || !token) return;
+    if (!armCheck || armCheck.token !== token || armCheck.ok) return;
+    lockTrading('交易已锁定', '服务端已经不认这次解锁了（服务重启过，或者被锁定过）。要交易请再点一次「解锁交易」');
+  }, [armed, token, armCheck, lockTrading]);
+
+  // 哪一步在下单/平仓时被服务端用 NOT_ARMED 拒掉，也立刻落锁
+  useEffect(() => {
+    setNotArmedHandler(() => {
+      // 压根没解锁过的人点下单本来就会看到这句，不必弹两次
+      if (!tokenRef.current) return;
+      lockTrading('交易已锁定', '服务端已经不认这次解锁了。要交易请再点一次「解锁交易」');
+    });
+    return () => setNotArmedHandler(null);
+  }, [lockTrading]);
 
   const ticker = useMemo(() => tickers.find((t) => t.contract === contract), [tickers, contract]);
   /**
@@ -1167,6 +1204,7 @@ export default function App() {
 
             positions={myPositions}
             orders={myOrders}
+            priceOrders={priceOrders}
 
             multiplier={info?.multiplier ?? 0}
             markPrice={markPrice}

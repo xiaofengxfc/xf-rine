@@ -1,5 +1,18 @@
 import { apiUrl, authHeaders } from './endpoint.ts';
 
+/**
+ * 解锁令牌失效的通知。
+ *
+ * 令牌在服务端内存里，服务重启或者在别处锁定过之后就没了 ——
+ * 页面自己看不出来，仍写着「交易已解锁」。任何一个需要解锁的请求被 NOT_ARMED
+ * 拒掉时，这里立刻通知界面落锁，别让人对着一个假的已解锁状态反复点。
+ */
+let notArmedHandler: (() => void) | null = null;
+
+export function setNotArmedHandler(fn: (() => void) | null): void {
+  notArmedHandler = fn;
+}
+
 export class ApiError extends Error {
   label: string;
   status: number;
@@ -16,6 +29,7 @@ async function parse<T>(res: Response): Promise<T> {
   try { body = text ? JSON.parse(text) : null; } catch { /* not json */ }
   if (!res.ok) {
     const b = body as { error?: string; detail?: string } | null;
+    if (res.status === 403 && b?.error === 'NOT_ARMED') notArmedHandler?.();
     throw new ApiError(b?.error ?? `HTTP_${res.status}`, b?.detail ?? text.slice(0, 300), res.status);
   }
   return body as T;
@@ -293,6 +307,8 @@ export interface PrivateState {
   positions: Position[];
   orders: OpenOrder[];
   priceOrders: PriceOrder[];
+  /** 这次请求带的解锁令牌在服务端还有效吗。页面每 3 秒照它对一次「交易已解锁」 */
+  armed?: boolean;
 }
 
 /** 行情推送上来的那一帧：最新价、标记价、24 小时涨跌、资金费 */

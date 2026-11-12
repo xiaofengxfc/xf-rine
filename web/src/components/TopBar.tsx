@@ -90,7 +90,7 @@ export default function TopBar({
       {/* 窄屏放不下那句话，只留一个点，鼠标悬停能看全 */}
       <i className={`status-dot ws-dot ${wsAlive ? 'live' : 'off'}`} title={wsAlive ? '行情已连接' : '行情断开'} />
 
-      <button className={`arm-btn ${armed ? 'on' : ''}`} onClick={onToggleArm} title="解锁后 10 分钟内可以下单">
+      <button className={`arm-btn ${armed ? 'on' : ''}`} onClick={onToggleArm} title="解锁后一直可以下单，直到你锁定、切换环境或关掉下单开关">
         <i className={`status-dot ${armed ? 'off' : ''}`} />
         {armed ? <><span className="wide-only">交易已解锁 · 点击</span>锁定</> : '解锁交易'}
       </button>

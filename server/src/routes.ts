@@ -188,15 +188,26 @@ function keysByEnv(): Record<GateEnv, { configured: boolean; hint: string }> {
 }
 
 // ---------- 下单前的二次确认令牌 ----------
-const armTokens = new Map<string, number>();
-const ARM_TTL_MS = 10 * 60 * 1000;
+/**
+ * 已解锁的令牌。解锁没有有效期：一直有效到主动锁定、切换环境、或者关掉下单开关。
+ *
+ * 以前是 10 分钟到期。盯盘的人看到信号那一刻正好过期，就得先解锁再下单，
+ * 中间价格已经走了 —— 解锁要挡的是「误触」，不是「用久了」。
+ */
+const armTokens = new Set<string>();
+
+/**
+ * 这个请求带的令牌还有效吗。
+ *
+ * 页面靠它校对自己那句「交易已解锁」：令牌在服务端内存里，服务重启、
+ * 或者在另一台设备上锁定过之后就没了，页面自己看不出来。
+ */
+function armValid(req: Request): boolean {
+  return armTokens.has(String(req.header('x-arm-token') ?? ''));
+}
 
 function requireArm(req: Request): void {
-  const t = String(req.header('x-arm-token') ?? '');
-  const exp = armTokens.get(t);
-  if (!exp || exp < Date.now()) {
-    // 过期的令牌顺手删掉，否则每解锁一次就在内存里留一条永不回收的记录
-    if (t) armTokens.delete(t);
+  if (!armValid(req)) {
     throw new GateError(403, 'NOT_ARMED', '未解锁交易，请先在页面右上角点「解锁交易」');
   }
 }
@@ -1332,7 +1343,7 @@ router.get('/diag', wrap(async (_req, res) => {
 // ---------- 账户与持仓 ----------
 
 interface GatePosition {
-  contract: string; size: number; leverage: string; entry_price: string; mark_price: string;
+  contract: string; size: string; leverage: string; entry_price: string; mark_price: string;
   liq_price: string; unrealised_pnl: string; realised_pnl: string; mode: string; value: string;
 }
 
@@ -1408,7 +1419,14 @@ async function readSides(contract: string): Promise<Side[]> {
  */
 async function readPositions() {
   const list = await gatePrivate<GatePosition[]>('GET', '/futures/usdt/positions');
-  return list.filter((p) => p.size !== 0).map((p) => {
+  /**
+   * 按张数过滤，必须转成数字再比。
+   *
+   * 交易所把 size 写成字符串（"0"），拿它和数字 0 比永远不相等 —— 于是全仓平掉之后
+   * 交易所仍保留的那条零张记录会被当成持仓返回，界面上是「0 张 / 开仓 0.0000 /
+   * 盈亏 0.00 / 强平价 —」，还会让图上以为这一边有仓。
+   */
+  return list.filter((p) => Number.isFinite(Number(p.size)) && Number(p.size) !== 0).map((p) => {
     const size = Math.abs(Number(p.size) || 0);
     const mark = Number(p.mark_price) || 0;
     const value = Math.abs(Number(p.value) || 0);
@@ -1418,7 +1436,7 @@ async function readPositions() {
     return {
       contract: p.contract,
       size,
-      direction: sideOf(String(p.mode ?? ''), p.size),
+      direction: sideOf(String(p.mode ?? ''), Number(p.size)),
       leverage: Number(p.leverage),
       entryPrice: Number(p.entry_price),
       markPrice: mark,
@@ -1548,14 +1566,15 @@ router.get('/price-orders', wrap(async (_req, res) => {
  * 持仓和它的止损单可能一个新一个旧，看上去就像「止损没挂上」。
  * 合成一个接口顺带把一次刷新的延迟压到一个往返里。
  */
-router.get('/private-state', wrap(async (_req, res) => {
+router.get('/private-state', wrap(async (req, res) => {
   const [account, positions, orders, priceOrders] = await Promise.all([
     readAccount(),
     readPositions(),
     readOpenOrders(),
     readTriggers(),
   ]);
-  res.json({ account, positions, orders, priceOrders });
+  // armed 让页面每 3 秒对一次账：令牌没了就把「已解锁」收掉，而不是等下一次下单被拒
+  res.json({ account, positions, orders, priceOrders, armed: armValid(req) });
 }));
 
 // ---------- 平仓、反手之前要清掉的东西 ----------
@@ -1666,8 +1685,8 @@ router.post('/trade/arm', wrap(async (req, res) => {
   if (!config.liveTrading) throw new GateError(403, 'LIVE_DISABLED', `服务端 LIVE_TRADING=false，先在设置里打开${envLabel()}下单开关`);
   requireKeys();
   const token = randomUUID();
-  armTokens.set(token, Date.now() + ARM_TTL_MS);
-  res.json({ armed: true, token, expiresAt: Date.now() + ARM_TTL_MS });
+  armTokens.add(token);
+  res.json({ armed: true, token });
 }));
 
 /**
