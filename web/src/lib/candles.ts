@@ -76,6 +76,24 @@ export const INTERVAL_SEC: Record<string, number> = {
 };
 
 /**
+ * 本地数据目录里的周期代号（D1 / H1 / M15…）。
+ *
+ * 那是文件名里带的那一套写法，和交易所的 1d / 1h / 15m 是两套词。
+ * 只查 INTERVAL_SEC 的话，日线会退到默认的 60 秒 —— 尾部看门狗于是永远认为
+ * 「最后一根落后了三个周期」，每 15 秒去要一次行情；换根判断也跟着错。
+ */
+const LOCAL_SEC: Record<string, number> = {
+  M1: 60, M3: 180, M5: 300, M15: 900, M30: 1800,
+  H1: 3600, H2: 7200, H4: 14400, H6: 21600, H8: 28800, H12: 43200,
+  D1: 86400, W1: 604800,
+};
+
+/** 一根 K 线多少秒。两套写法都认，认不出来才退回 60 */
+export function intervalSeconds(tf: string): number {
+  return INTERVAL_SEC[tf] ?? INTERVAL_SEC[tf.toLowerCase()] ?? LOCAL_SEC[tf.toUpperCase()] ?? 60;
+}
+
+/**
  * 平价 K 线：最高就等于最低。
  *
  * 没有任何成交的那段时间，交易所补的是一根 open=high=low=close、量为 0 的占位 K 线。

@@ -26,6 +26,23 @@ const STEP_SEC: Record<string, number> = {
 };
 
 /**
+ * 本地数据目录里那套周期代号（D1 / H1 / M15…）。
+ *
+ * 本地模式下前端把文件名里的代号原样带过来，只查 STEP_SEC 会退到 60 秒 ——
+ * 日线的「连续一段」判定、尾部缓存有效期全按一分钟算，补历史和缓存都不对。
+ */
+const LOCAL_STEP_SEC: Record<string, number> = {
+  M1: 60, M3: 180, M5: 300, M15: 900, M30: 1800,
+  H1: 3600, H2: 7200, H4: 14400, H6: 21600, H8: 28800, H12: 43200,
+  D1: 86400, W1: 604800,
+};
+
+/** 一根 K 线占多少秒。交易所那套和本地那套写法都认 */
+function stepSeconds(interval: string): number {
+  return STEP_SEC[interval] ?? STEP_SEC[interval.toLowerCase()] ?? LOCAL_STEP_SEC[interval.toUpperCase()] ?? 60;
+}
+
+/**
  * K 线时间轴。
  *
  * 以前是按「合约:周期:根数:before」缓存整页，4 秒就过期 —— 往回拖每拖一屏
@@ -483,7 +500,7 @@ async function loadCandles(
   tailTtl = NEWEST_TTL,
 ): Promise<CandlePage> {
   const series = seriesFor(`${contract}:${interval}`);
-  const step = STEP_SEC[interval] ?? 60;
+  const step = stepSeconds(interval);
 
   /** 时间轴里「早于 before 的连续一段」。裁头之后这一段可能是空的 */
   const slice = () => contiguousRun(series.bars, lowerBoundTime(series.bars, before!), limit, step);
@@ -693,7 +710,7 @@ router.get('/levels', wrap(async (req, res) => {
   const contract = String(req.query.contract ?? 'BTC_USDT');
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
-  const { bars } = await loadCandles(contract, interval, limit, false, undefined, (STEP_SEC[interval] ?? 60) * 1000);
+  const { bars } = await loadCandles(contract, interval, limit, false, undefined, stepSeconds(interval) * 1000);
   // 丢掉最后一根未走完的 K 线：半根 K 线的影线不该参与判位
   const closed = bars.slice(0, -1);
   const live = bars[bars.length - 1]?.close ?? 0;

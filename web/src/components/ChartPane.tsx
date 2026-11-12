@@ -1100,7 +1100,8 @@ export default function ChartPane({
           onClick={() => {
             const dm = dmRef.current;
             if (!dm) return;
-            for (const id of dm.selection()) dm.remove(id);
+            // 先拷一份再删：selection() 给的是内部集合时，边遍历边删除会跳元素
+            for (const id of [...dm.selection()]) dm.remove(id);
           }}
         >
           ⌫

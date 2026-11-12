@@ -6,7 +6,7 @@ import {
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
   type LocalInstrument, type LocalDirInfo, type LocalBars,
 } from './lib/api.ts';
-import { INTERVAL_SEC, mergeNewer, mergeOlder } from './lib/candles.ts';
+import { intervalSeconds, mergeNewer, mergeOlder } from './lib/candles.ts';
 import { fmtPrice } from './lib/format.ts';
 import { backfill } from './lib/backfill.ts';
 import { wsUrl } from './lib/endpoint.ts';
@@ -389,7 +389,8 @@ export default function App() {
    * 比如 Gate 断过、这枚币很久没成交、或者订阅没接上。
    */
   useEffect(() => {
-    const step = INTERVAL_SEC[interval] ?? 60;
+    // 本地数据模式下 interval 是 D1/H1 这一套，不能只查交易所那套键名
+    const step = intervalSeconds(interval);
     const t = window.setInterval(() => {
       const list = marketRef.current.bars;
       if (list.length === 0) return;
@@ -855,7 +856,7 @@ export default function App() {
             if (last.time === b.time) next[next.length - 1] = bar;
             else if (b.time > last.time) {
               // 跳了一根以上：中间那段没收到（断线、丢帧）。先把这一根接上，缺口交给补课
-              if (b.time - last.time > (INTERVAL_SEC[interval] ?? 60)) void resyncTail();
+              if (b.time - last.time > intervalSeconds(interval)) void resyncTail();
               next.push(bar);
             } else return prev;
             return { ...prev, bars: next };

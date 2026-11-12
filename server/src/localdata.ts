@@ -170,7 +170,15 @@ function clean(rows: Record<string, unknown>[]): DataBar[] {
     const c = num(pick(r, ['close']));
     const v = num(pick(r, ['volume', 'tick_volume', 'vol']));
     if (!(t > 0) || ![o, h, l, c, v].every(Number.isFinite)) continue;
-    if (v <= 0) continue;                                  // 停牌
+    /**
+     * 只丢价格无效的坏行，量 0 的留着。
+     *
+     * 量 0 而价格有效，是交易所补的「这段时间没人成交」的占位 K 线 ——
+     * 图上的灰色平价线、以及「该合约成交稀疏」那条提示都靠它们判断。
+     * 以前这里按「停牌」整行丢掉，本地数据模式下那套机制永远不触发，
+     * 真实的时间断档还被静默压成连续行情。
+     */
+    if (v < 0) continue;
     if (h < l || h < o || h < c || l > o || l > c || l <= 0) continue; // 结构性坏行
     out.push({ time: t, open: o, high: h, low: l, close: c, volume: v });
   }

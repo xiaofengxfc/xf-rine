@@ -28,6 +28,8 @@ export interface LogicalRange {
 
 /** 少于一屏的两根说明那一段已经不在手上了，放回去只会把画面扔到别处 */
 const MIN_BARS = 2;
+/** 右侧空位最多留这么多根。超过就是记录坏了，不是用户要的 */
+const MAX_MARGIN = 1000;
 
 /**
  * 按时间把一段视口换算成新的逻辑区间。
@@ -45,6 +47,8 @@ export function viewportRange(bars: Bar[], span: ViewSpan, minBars = MIN_BARS): 
   if (to - from < Math.max(MIN_BARS, minBars)) return null;
   // 右边那一根就是最后一根（或者落在它之后）时，把右侧空位原样留着
   const atEdge = to >= bars.length - 1;
-  const margin = Math.max(0, Math.round(span.margin));
+  // 上限挡的是写坏的记录：margin 可能是几个月前的旧版本写进去的怪数，
+  // 原样用会把画面甩到最后一根之后很远的一片空白里
+  const margin = Math.min(MAX_MARGIN, Math.max(0, Math.round(span.margin)));
   return { from, to: atEdge ? bars.length - 1 + margin : to };
 }

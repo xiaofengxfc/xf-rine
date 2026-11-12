@@ -573,6 +573,18 @@ function touchStats(
     l.push(b.low);
     c.push(b.close);
   }
+  /**
+   * 「进来之前那根」的收盘。
+   *
+   * 判断「这一根是自上而下进入区间」要拿上一根的收盘比，第一根同样得往前看一格 ——
+   * 退到 c[0] 等于拿它自己跟区间比，真正的进入会被判成没进入，
+   * 而区间内的横盘反而可能被算成一次有效触及。
+   */
+  const prevClose = (j: number): number | null => {
+    if (j > 0) return c[j - 1]!;
+    const at = histLo - 1;
+    return at >= 0 ? bars[at]!.close : null;
+  };
 
   const inz: number[] = [];
   let lastTouch = -1;
@@ -580,8 +592,8 @@ function touchStats(
     const hit = l[j]! <= zhi && h[j]! >= zlo;
     if (hit) lastTouch = j;
     if (!hit) continue;
-    const prev = j === 0 ? c[0]! : c[j - 1]!;
-    if (role === 'support' ? prev > zhi : prev < zlo) inz.push(j);
+    const prev = prevClose(j);
+    if (prev !== null && (role === 'support' ? prev > zhi : prev < zlo)) inz.push(j);
   }
   if (inz.length === 0) return { ...none, sinceTouch: lastTouch < 0 ? -1 : n - 1 - lastTouch };
 
@@ -761,7 +773,8 @@ export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
   }
 
   const atrArr = atrSeries(input, p.atrPeriod);
-  const atrValue = Math.max(atrArr[n - 1] ?? 0, 1e-12);
+  const atrRaw = atrArr[n - 1] ?? 0;
+  const atrValue = Math.max(atrRaw, 1e-12);
 
   const w = Math.min(p.lookback, n);
   const win = input.slice(n - w);
@@ -778,6 +791,17 @@ export function detectLevels(input: Bar[], opts: LevelOptions = {}): LevelSet {
   const bins = makeBins(winLo - binW, winHi + binW, binW);
   if (bins.nb < 8) {
     return { ...base, atr: atrValue, rangeHigh: winHi, rangeLow: winLo };
+  }
+  /**
+   * 整段没有真实波动（全是平价 K 线，或者刚过 30 根门槛）。
+   *
+   * atrValue 兜到 1e-12 只是为了让后面的除法不炸，但量的东西全都跟着退化：
+   * binW 从 0.25 ATR 塌到 tick、区宽被夹成一个点、widthAtr 恒等于夹逼上界、
+   * last 为 0 时 distancePct 直接是 NaN —— 这些数会原样出现在档位带上。
+   * 这种数据本来也算不出关键位，直接早退，和上面 bins 不够时一个口径。
+   */
+  if (!(atrRaw > 0)) {
+    return { ...base, atr: atrRaw, rangeHigh: winHi, rangeLow: winLo };
   }
 
   const px = binCenters(bins);
