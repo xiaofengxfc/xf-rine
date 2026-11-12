@@ -864,16 +864,28 @@ function storeDataDir(rawInput: string): string {
  * 解析交给引擎（Python 那边的 local_data_loader），和真正读文件用的是同一套命名规则 ——
  * 两边各写一份迟早会漂：列表里有、点进去读不到，是最难解释的一类故障。
  */
-router.get('/data/dir', wrap(async (req, res) => {
-  requireLocal(req, '本地数据目录');
+router.get('/data/dir', wrap(async (_req, res) => {
+  // 读目录不加 requireLocal：它只列「目录里有什么」，不动文件。
+  // 研究台和日内台现在共用这一份状态 —— 手机端只读不改，两边看到的必须是同一个目录，
+  // 否则手机上研究台有数据、切回日内台却是空的。
   const dir = readDataDir();
-  if (!dir) { res.json({ dir: '', instruments: [], files: 0, exists: false }); return; }
+  if (!dir) { res.json({ dir: '', instruments: [], files: 0, count: 0, exists: false }); return; }
   try {
     const out = await sr.instruments(dir);
-    res.json({ dir: out.data_dir, instruments: out.instruments, files: (out as { files?: number }).files ?? 0, exists: true });
+    res.json({
+      dir: out.data_dir,
+      instruments: out.instruments,
+      files: (out as { files?: number }).files ?? 0,
+      count: out.count,
+      tfLabels: out.tf_labels,
+      exists: true,
+    });
   } catch (e) {
     // 目录在，但引擎没起来 / 读不了：如实说，别让整页崩
-    res.json({ dir, instruments: [], files: 0, exists: true, error: (e as Error).message });
+    res.json({
+      dir, instruments: [], files: 0, count: 0, exists: true,
+      warning: (e as Error).message,
+    });
   }
 }));
 
@@ -884,9 +896,17 @@ router.post('/data/dir', wrap(async (req, res) => {
   const dir = storeDataDir(String((req.body as { dir?: string })?.dir ?? ''));
   try {
     const out = await sr.instruments(dir);
-    res.json({ ok: true, dir: out.data_dir, instruments: out.instruments, files: (out as { files?: number }).files ?? 0 });
+    res.json({
+      ok: true,
+      dir: out.data_dir,
+      instruments: out.instruments,
+      files: (out as { files?: number }).files ?? 0,
+      count: out.count,
+      tfLabels: out.tf_labels,
+    });
   } catch (e) {
-    res.json({ ok: true, dir, instruments: [], files: 0, error: (e as Error).message });
+    // 目录已经记住了，但引擎读不出来：照实说，别让用户以为选错了地方
+    res.json({ ok: true, dir, instruments: [], files: 0, count: 0, warning: (e as Error).message });
   }
 }));
 
@@ -2395,9 +2415,7 @@ export type { Direction };
  * 提前调用会踩到 const 的暂时性死区（启动即 ReferenceError）。
  */
 mountResearch(router, {
-  requireLocal,
   getDataDir: readDataDir,
-  setDataDir: storeDataDir,
   fail,
   wrap: (fn) => wrap(fn),
 });

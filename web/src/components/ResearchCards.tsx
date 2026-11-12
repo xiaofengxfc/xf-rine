@@ -21,50 +21,50 @@ export default function ResearchCards({ a, priceRound }: Props) {
   const tfLabel = a.tf_label || a.tf;
 
   return (
-    <div className="rsh-cards">
-      <div className="rsh-card">
-        <div className="k">标的</div>
-        <div className="name">{a.symbol_label || a.symbol}</div>
-        <div className="code">{tfLabel} · {a.data_bars} 根 K 线</div>
-        <div className="price">
+    <div className="stat-cards">
+      <div className="stat-card">
+        <div className="stat-k">标的</div>
+        <div className="stat-name">{a.symbol_label || a.symbol}</div>
+        <div className="stat-code">{tfLabel} · {a.data_bars} 根 K 线</div>
+        <div className="stat-price">
           <span>{fmtPrice(a.current_price, priceRound)}</span>
           <span className={`chg-badge ${a.change_pct >= 0 ? 'up' : 'down'}`}>{fmtPct(a.change_pct, 2)}</span>
         </div>
-        <div className="meta-line">
+        <div className="stat-code">
           ATR {fmtPrice(eng.atr, priceRound)}
           {eng.atr_pct !== null ? ` · ${eng.atr_pct.toFixed(2)}% 波动` : ''}
           {' · '}{a.zones.length} 个位
         </div>
       </div>
 
-      <div className="rsh-card">
-        <div className="k">最近关键位 · {s.direction_label}</div>
+      <div className="stat-card">
+        <div className="stat-k">最近关键位 · {s.direction_label}</div>
         {nearest ? (
           <>
-            <div className="rsh-headline">{s.headline}</div>
-            <div className="rsh-score-grid">
-              <div className="cell"><div className="v">{pct(nearest.p_touch)}</div><div className="l">触及概率</div></div>
-              <div className="cell"><div className="v">{pct(nearest.p_hold)}</div><div className="l">守住概率</div></div>
-              <div className="cell"><div className="v">{nearest.n_events}</div><div className="l">历史被测试</div></div>
-              <div className="cell"><div className="v">{s.trend_label}</div><div className="l">趋势</div></div>
+            <div className="stat-headline">{s.headline}</div>
+            <div className="stat-grid">
+              <div className="stat-cell"><div className="v">{pct(nearest.p_touch)}</div><div className="l">触及概率</div></div>
+              <div className="stat-cell"><div className="v">{pct(nearest.p_hold)}</div><div className="l">守住概率</div></div>
+              <div className="stat-cell"><div className="v">{nearest.n_events}</div><div className="l">历史被测试</div></div>
+              <div className="stat-cell"><div className="v">{s.trend_label}</div><div className="l">趋势</div></div>
             </div>
-            <div className="rsh-trend-detail">{s.trend_detail}</div>
+            <div className="stat-detail">{s.trend_detail}</div>
           </>
         ) : (
           <>
-            <div className="rsh-headline">{s.headline}</div>
-            <div className="rsh-trend-detail">趋势{s.trend_label} · {s.trend_detail}</div>
+            <div className="stat-headline">{s.headline}</div>
+            <div className="stat-detail">趋势{s.trend_label} · {s.trend_detail}</div>
           </>
         )}
       </div>
 
-      <div className="rsh-card">
-        <div className="k">关键位</div>
-        <div className="rsh-stat"><span>最近支撑</span><span className="s">{fmtPx(nearestSide(a, 'support'), priceRound)}</span></div>
-        <div className="rsh-stat"><span>最近压力</span><span className="r">{fmtPx(nearestSide(a, 'resistance'), priceRound)}</span></div>
-        <div className="rsh-stat"><span>关键位数</span><span>{a.zones.length}</span></div>
-        <div className="rsh-stat"><span>共振周期</span><span>{a.mtf_zones.length ? a.mtf_zones.map((m) => m.tf_label).join(' / ') : '无'}</span></div>
-        <div className="rsh-stat"><span>引擎</span><span>{(eng.prob_ready ? 'V3 融合 + 概率' : 'V3 融合（无概率）')}</span></div>
+      <div className="stat-card">
+        <div className="stat-k">关键位</div>
+        <div className="stat-row"><span>最近支撑</span><span className="s">{fmtPx(nearestSide(a, 'support'), priceRound)}</span></div>
+        <div className="stat-row"><span>最近压力</span><span className="r">{fmtPx(nearestSide(a, 'resistance'), priceRound)}</span></div>
+        <div className="stat-row"><span>关键位数</span><span>{a.zones.length}</span></div>
+        <div className="stat-row"><span>共振周期</span><span>{a.mtf_zones.length ? a.mtf_zones.map((m) => m.tf_label).join(' / ') : '无'}</span></div>
+        <div className="stat-row"><span>引擎</span><span>{(eng.prob_ready ? 'V3 融合 + 概率' : 'V3 融合（无概率）')}</span></div>
       </div>
     </div>
   );

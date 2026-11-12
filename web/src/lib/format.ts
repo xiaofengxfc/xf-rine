@@ -41,6 +41,23 @@ export const fmtDate = (unix: number): string =>
 
 export const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
+/**
+ * 没有合约元数据时，按价格量级猜一个最小变动位。
+ *
+ * 本地文件里没有「这个品种一跳多少钱」，交易所那条路有。以前本地模式直接退回 0.1，
+ * 拿 BTC 的精度去画 0.074 的 AGT：图上给平价 K 线撑高的门槛变成 0.1，
+ * 价格轴被撑到 ±1，整张图压成一条直线。
+ *
+ * 研究台和日内台的本地图都用这一份，同一个品种两边的小数位数才是同一个。
+ */
+export const guessPriceRound = (px: number): number => {
+  if (!Number.isFinite(px) || px <= 0) return 0.01;
+  if (px >= 1000) return 0.1;
+  if (px >= 1) return 0.01;
+  if (px >= 0.01) return 0.0001;
+  return 0.000001;
+};
+
 /** 相对时间，新闻列表里用。超过一天直接给日期。 */
 export const fmtAgo = (epochMs: number): string => {
   if (!Number.isFinite(epochMs)) return '—';

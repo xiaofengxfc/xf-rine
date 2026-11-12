@@ -108,8 +108,10 @@ interface Props {
   loading: boolean;
   /** 视口左边快没 K 线了，要补。带上当前左边界（逻辑序号），App 据此决定补几页 */
   onNeedOlder?: (from: number) => void;
-  /** 交易所能给的历史到头了。图上要说一声，不然拖到头看着像卡死 */
+  /** 历史到头了。图上要说一声，不然拖到头看着像卡死 */
   historyEnd?: boolean;
+  /** 「到头」那句话怎么写：交易所和本地文件不是同一回事 */
+  historyEndHint?: string;
   /** 后台正在往左补历史 */
   backfilling?: boolean;
   onIntervalChange: (i: string) => void;
@@ -146,7 +148,7 @@ export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
   contract, interval, bars, zones, positions, orders, multiplier, markPrice, priceRound,
-  stale, resetKey, loading, onNeedOlder, historyEnd, backfilling, onIntervalChange, onManualLevels,
+  stale, resetKey, loading, onNeedOlder, historyEnd, historyEndHint, backfilling, onIntervalChange, onManualLevels,
   intervals = INTERVALS as unknown as string[],
   canClose, onClosePosition, onPickPrice, hasPosition, research = false,
 }: Props) {
@@ -251,9 +253,15 @@ export default function ChartPane({
     setSparse(s.count >= SPARSE_MIN_BARS ? { count: s.count, flat: s.flat } : null);
   }, []);
 
-  /** 画线和视口按币种 + 周期各存一份，也是「图表实例」的身份 */
-  const storageKey = `xf-rine:drawings:${contract}:${interval}`;
-  const viewKey = `xf-rine:view:${contract}:${interval}`;
+  /**
+   * 画线和视口按币种 + 周期各存一份，也是「图表实例」的身份。
+   *
+   * 研究台单独一个命名空间：两个页面都挂着各自的图，同一个品种+周期时共用一个 key 会互相覆盖 ——
+   * 研究台里拖一下，日内台下次打开就停在那一段；反过来也一样。
+   */
+  const scope = research ? 'research:' : '';
+  const storageKey = `xf-rine:drawings:${scope}${contract}:${interval}`;
+  const viewKey = `xf-rine:view:${scope}${contract}:${interval}`;
 
   /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
   const [mode, setMode] = useState<ChartMode>(readMode);
@@ -541,6 +549,14 @@ export default function ChartPane({
 
       levelLinesRef.current = [];
       lastTimeRef.current = null;
+      /**
+       * 「这张图已经画过哪份数据」也跟着作废。
+       *
+       * 不清的话，图重建之后（React 严格模式会挂载 → 卸载 → 再挂载一次）数据那条 effect
+       * 会以为还是同一份数据，只走增量分支写最后一根 —— 图上就只剩一根 K 线。
+       * 生产构建不双挂时看不出来，开发时研究台一进来就是空图。
+       */
+      lastKeyRef.current = '';
     };
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -832,10 +848,10 @@ export default function ChartPane({
     // theme 也在依赖里：换主题要按新配色重画一遍（见上面那段）
   }, [bars, resetKey, storageKey, theme]);
 
-  // ---- 往回拖到底时，向上要一页更早的 K 线 ----
+  // ---- 视口记忆；往回拖到底时向上要一页更早的 K 线 ----
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || !onNeedOlder) return;
+    if (!chart) return;
     const ts = chart.timeScale();
     let saveTimer = 0;
     const handler = () => {
@@ -884,8 +900,9 @@ export default function ChartPane({
       // 贴到最左边了：到头说明这时候才有意义
       setAtEdge(r.from < 1.5);
 
-      // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多
-      if (r.from < PREFETCH_BARS) onNeedOlder(r.from);
+      // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多。
+      // 研究台的数据是一次给全的，没有「更早一页」，那边不接这个回调。
+      if (onNeedOlder && r.from < PREFETCH_BARS) onNeedOlder(r.from);
     };
     ts.subscribeVisibleLogicalRangeChange(handler);
     /**
@@ -893,7 +910,7 @@ export default function ChartPane({
      * 这里主动问一次。
      */
     const head = ts.getVisibleLogicalRange();
-    if (head && countRef.current > 0 && lastKeyRef.current === resetKey && head.from < PREFETCH_BARS) {
+    if (onNeedOlder && head && countRef.current > 0 && lastKeyRef.current === resetKey && head.from < PREFETCH_BARS) {
       onNeedOlder(head.from);
     }
     return () => {
@@ -1080,7 +1097,13 @@ export default function ChartPane({
     <>
       <div className="chart-tools">
         {research ? (
-          <span className="dim" style={{ fontSize: 11 }}>研究台 · {interval} · 纯本地历史数据</span>
+          <>
+            <span className="chart-scope">
+              <span className="lb-tag">本地历史</span>
+              {interval} · 纯本地文件
+            </span>
+            <div className="tool-divider" />
+          </>
         ) : (
           <>
           <div className="seg">
@@ -1166,7 +1189,9 @@ export default function ChartPane({
           </div>
         )}
         {historyEnd && atEdge && (
-          <div className="chart-edge">已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早</div>
+          <div className="chart-edge">
+            {historyEndHint ?? '已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早'}
+          </div>
         )}
         {sparse && flatShare >= SPARSE_SHARE && (
           <div className="chart-sparse">

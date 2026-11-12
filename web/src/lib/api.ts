@@ -168,14 +168,23 @@ export interface LocalInstrument {
   timeframes: string[];
 }
 
+/**
+ * 本地数据目录的状态。研究台和日内台共用这一份（/api/data/dir），
+ * 目录里有哪些品种、哪些周期都来自引擎的同一张表 —— 两边各问一次必然漂。
+ */
 export interface LocalDirInfo {
   dir: string;
   instruments: LocalInstrument[];
   /** 这个目录里认得的数据文件数 */
   files: number;
+  /** 认得的品种数（引擎报的，和 instruments.length 同源） */
+  count: number;
+  /** 周期代号 -> 显示名（D1 -> 日线），来自引擎的同一张表 */
+  tfLabels?: Record<string, string>;
   /** 记住的目录还在不在。被挪走、被删掉时是 false，界面要直说而不是空着 */
   exists: boolean;
-  error?: string;
+  /** 目录在、但引擎读不了时的说明 */
+  warning?: string;
 }
 
 export interface LocalBars {
@@ -382,18 +391,6 @@ export interface ResearchHealth {
   calibrated?: boolean;
   probMeta?: Record<string, unknown>;
   calibMeta?: Record<string, unknown>;
-}
-
-/** 数据目录 + 品种列表 */
-export interface ResearchDir {
-  dir: string;
-  exists: boolean;
-  count: number;
-  instruments: LocalInstrument[];
-  files: number;
-  tfLabels?: Record<string, string>;
-  /** 目录在、但引擎读不了时的说明 */
-  warning?: string;
 }
 
 /** 单品种分析结果。字段与引擎输出一致，图表用 kline（列式，unix 秒） */

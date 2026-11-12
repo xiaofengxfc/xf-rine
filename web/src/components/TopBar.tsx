@@ -6,6 +6,13 @@ export type View = 'desk' | 'research';
 
 interface Props {
   ticker: Ticker | undefined;
+  /**
+   * 本地数据模式下顶栏显示的东西。
+   *
+   * 本地那张图画的不是交易所这个合约：顶栏还挂着 BTC 的现价、标记价、资金费，
+   * 图上是 AGT 的 0.074，两边对不上，人会以为是图错了。
+   */
+  local?: { symbol: string; tf: string; price: number } | null;
   env: 'testnet' | 'live';
   /** 当前页面：日内台（交易）还是研究台（本地数据算关键位） */
   view: View;
@@ -23,7 +30,7 @@ interface Props {
 }
 
 export default function TopBar({
-  ticker, env, view, onView, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
+  ticker, local, env, view, onView, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
   onToggleArm, onOpenSettings, onOpenRail,
 }: Props) {
   const chg = ticker?.change24h ?? 0;
@@ -44,22 +51,35 @@ export default function TopBar({
         <button className={view === 'research' ? 'on' : ''} onClick={() => onView('research')}>研究台</button>
       </div>
 
-      <div className="ticker-head">
-        <span className="sym">{ticker?.contract.replace('_USDT', '') ?? '—'}</span>
-        <span className="dim wide-only" style={{ fontSize: 11 }}>USDT 永续</span>
-        {/* 还没有第一帧行情时写「—」：拿 0 去格式化会印出一个像模像样的 0.0 */}
-        <span className={`px num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
-          {ticker ? fmtPrice(ticker.last, priceRound) : '—'}
-        </span>
-        <span className={`chg num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
-          {ticker ? fmtPct(chg) : '—'}
-        </span>
-      </div>
+      {local ? (
+        <>
+          <div className="ticker-head">
+            <span className="sym">{local.symbol.replace('_USDT', '')}</span>
+            <span className="dim wide-only" style={{ fontSize: 11 }}>本地数据</span>
+            <span className="px num">{local.price > 0 ? fmtPrice(local.price, priceRound) : '—'}</span>
+          </div>
+          <span className="pill wide-only">周期 {local.tf}</span>
+        </>
+      ) : (
+        <>
+          <div className="ticker-head">
+            <span className="sym">{ticker?.contract.replace('_USDT', '') ?? '—'}</span>
+            <span className="dim wide-only" style={{ fontSize: 11 }}>USDT 永续</span>
+            {/* 还没有第一帧行情时写「—」：拿 0 去格式化会印出一个像模像样的 0.0 */}
+            <span className={`px num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
+              {ticker ? fmtPrice(ticker.last, priceRound) : '—'}
+            </span>
+            <span className={`chg num ${ticker ? (chg >= 0 ? 'up' : 'down') : ''}`}>
+              {ticker ? fmtPct(chg) : '—'}
+            </span>
+          </div>
 
-      <span className="pill wide-only">标记 {ticker ? fmtPrice(ticker.mark, priceRound) : '—'}</span>
-      <span className="pill wide-only">资金费 {ticker ? fmtPct(ticker.fundingRate * 100, 4) : '—'}</span>
-      <span className="pill wide-only">周期 {interval}</span>
-      <span className="pill wide-only">24h {ticker ? (ticker.volume24hUsd / 1e6).toFixed(1) + 'M' : '—'}</span>
+          <span className="pill wide-only">标记 {ticker ? fmtPrice(ticker.mark, priceRound) : '—'}</span>
+          <span className="pill wide-only">资金费 {ticker ? fmtPct(ticker.fundingRate * 100, 4) : '—'}</span>
+          <span className="pill wide-only">周期 {interval}</span>
+          <span className="pill wide-only">24h {ticker ? (ticker.volume24hUsd / 1e6).toFixed(1) + 'M' : '—'}</span>
+        </>
+      )}
 
       <div className="spacer" />
 

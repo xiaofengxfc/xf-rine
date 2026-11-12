@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { jget, jsend } from '../lib/api.ts';
-import type { Bar, ResearchAnalysis, ResearchDir, ResearchHealth, ResearchScan, Zone } from '../lib/api.ts';
-import { fmtPct, fmtPrice } from '../lib/format.ts';
+import { jget } from '../lib/api.ts';
+import type { Bar, LocalDirInfo, ResearchAnalysis, ResearchHealth, ResearchScan, Zone } from '../lib/api.ts';
+import { fmtPct, fmtPrice, guessPriceRound } from '../lib/format.ts';
 import ChartPane from './ChartPane.tsx';
 import ResearchCards from './ResearchCards.tsx';
 import ScanTable from './ScanTable.tsx';
@@ -9,6 +9,15 @@ import ScanTable from './ScanTable.tsx';
 interface Props {
   /** 只有本机能选数据目录（选目录等于让程序读硬盘） */
   canPick: boolean;
+  /** 两个台共用的数据目录（状态在 App 那一层） */
+  dir: LocalDirInfo | null;
+  /** 共用的品种 / 周期：研究台换一个，切回日内台的本地图也是它 */
+  symbol: string;
+  tf: string;
+  onSymbol: (s: string) => void;
+  onTf: (tf: string) => void;
+  /** 换目录。失败时 App 已经弹过提示，这里只负责转圈 */
+  onPickDir: (dir: string) => Promise<LocalDirInfo | null>;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
 }
 
@@ -21,15 +30,15 @@ type Busy = '' | 'dir' | 'analyze' | 'scan';
  * 选一个本地 parquet/csv 目录 → 单品种深度分析（双概率 + 多周期共振 + 分位档）
  * → 全市场批量扫描，按有效概率排序找出值得看的标的。
  *
- * 和交易台共用同一个引擎（Python sidecar 里的上游 V3Fusion），所以两边算出来的
- * 关键位一定一致；区别只在于交易台看的是交易所实时行情，这里看的是你本地的历史数据。
+ * 和交易台共用同一个引擎（Python sidecar 里的上游 V3Fusion），也共用同一份数据目录和
+ * 同一对品种/周期 —— 所以两边算出来的关键位一定一致，切来切去看到的也是同一个标的。
+ * 区别只在于交易台看的是交易所实时行情，这里看的是你本地的历史数据。
  */
-export default function ResearchDesk({ canPick, onToast }: Props) {
+export default function ResearchDesk({
+  canPick, dir, symbol, tf, onSymbol, onTf, onPickDir, onToast,
+}: Props) {
   const [health, setHealth] = useState<ResearchHealth | null>(null);
-  const [dir, setDir] = useState<ResearchDir | null>(null);
-  const [dirInput, setDirInput] = useState('');
-  const [symbol, setSymbol] = useState('');
-  const [tf, setTf] = useState('D1');
+  const [dirInput, setDirInput] = useState(dir?.dir ?? '');
   const [windowBars, setWindowBars] = useState(40);
   const [nZones, setNZones] = useState(3);
   const [direction, setDirection] = useState<'long' | 'short' | 'both'>('long');
@@ -44,64 +53,45 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
     () => instruments.find((i) => i.symbol === symbol)?.timeframes ?? [],
     [instruments, symbol],
   );
+  /**
+   * 目录、品种、周期三样都齐了才算「能算」。
+   *
+   * 少了这一条，页面一进来会先拿默认的 D1 去撞一个只有 H1 的品种，闪一条
+   * 「找不到数据文件 …D1.parquet」，然后才被兜底成 H1 —— 明明是正常加载，看着像坏了。
+   */
+  const ready = instruments.length > 0 && Boolean(symbol) && tfs.includes(tf);
+  const tfLabel = dir?.tfLabels?.[tf] ?? tf;
 
-  /** 引擎状态：决定「概率列」显不显示，以及页面顶上那句提示 */
+  // 目录换了（研究台或日内台任意一边），输入框跟着走
+  useEffect(() => { setDirInput(dir?.dir ?? ''); }, [dir?.dir]);
+
+  // 换目录 = 之前那批结果作废，别拿旧目录的数字对着新目录的品种
+  useEffect(() => { setAnalysis(null); setScan(null); setErr(''); }, [dir?.dir]);
+
+  /** 引擎状态：决定「概率列」显不显示，以及页面顶上那句话 */
   const loadHealth = useCallback(async () => {
     try {
-      const h = await jget<ResearchHealth>('/api/research/health');
-      setHealth(h);
+      setHealth(await jget<ResearchHealth>('/api/research/health'));
     } catch (e) {
       setHealth({ ok: false, detail: (e as Error).message });
     }
   }, []);
 
-  /** 读记住的数据目录（上次选过的，重启后还在） */
-  const loadDir = useCallback(async () => {
-    try {
-      const d = await jget<ResearchDir>('/api/research/dir');
-      setDir(d);
-      setDirInput(d.dir);
-      if (d.instruments.length > 0) {
-        setSymbol((cur) => (d.instruments.some((i) => i.symbol === cur) ? cur : d.instruments[0]!.symbol));
-      }
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  }, []);
-
-  useEffect(() => { void loadHealth(); void loadDir(); }, [loadHealth, loadDir]);
-
-  /** 品种变了、周期不在它名下，就退回它有的第一个周期 */
-  useEffect(() => {
-    if (tfs.length > 0 && !tfs.includes(tf)) setTf(tfs[0]!);
-  }, [tfs, tf]);
+  useEffect(() => { void loadHealth(); }, [loadHealth]);
 
   const pickDir = useCallback(async (raw: string) => {
-    if (!raw.trim()) return;
+    const v = raw.trim();
+    if (!v) return;
     setBusy('dir'); setErr('');
-    try {
-      const r = await jsend<ResearchDir & { ok: boolean }>('POST', '/api/research/dir', { dir: raw.trim() });
-      setDir({ dir: r.dir, exists: true, count: r.count, instruments: r.instruments, files: r.files, warning: r.warning });
-      setDirInput(r.dir);
-      setScan(null); setAnalysis(null);
-      if (r.instruments.length > 0) {
-        const first = r.instruments[0]!.symbol;
-        setSymbol(first);
-        setTf(r.instruments[0]!.timeframes[0] ?? 'D1');
-        onToast('ok', '数据目录已载入', r.count + ' 个品种 · ' + r.files + ' 个文件');
-      } else {
-        onToast('err', '这个目录里没有认得的 K 线文件', r.warning ?? '文件名要写成「品种_周期.parquet」，列要有 time/open/high/low/close/volume');
-      }
-    } catch (e) {
-      setErr((e as Error).message);
-      onToast('err', '选目录失败', (e as Error).message);
-    } finally { setBusy(''); }
-  }, [onToast]);
+    try { await onPickDir(v); } finally { setBusy(''); }
+  }, [onPickDir]);
 
   const analyze = useCallback(async (sym?: string, tfOverride?: string) => {
     const s = (sym ?? symbol).trim();
-    if (!s) { onToast('err', '先选一个品种'); return; }
     const useTf = tfOverride ?? tf;
+    if (!s) { onToast('err', '先选一个品种'); return; }
+    // 周期还没兜底成这个品种真有的那个：不动，等下一次渲染
+    if (instruments.find((i) => i.symbol === s)?.timeframes.includes(useTf) !== true) return;
     setBusy('analyze'); setErr('');
     try {
       const a = await jget<ResearchAnalysis>(
@@ -114,16 +104,17 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
         + '&n_bars=400',
         { signal: AbortSignal.timeout(120_000) },
       );
+      // 不拿 a.tf 回填共用的周期：引擎可能把 H1 写成 h1，回填进去反而不在下拉选项里，
+      // 「能不能算」会当场变成 false。图上用哪个周期由 analysis 自己决定。
       setAnalysis(a);
-      setSymbol(a.symbol);
-      setTf(a.tf);
     } catch (e) {
       setErr((e as Error).message);
       onToast('err', '分析失败', (e as Error).message);
     } finally { setBusy(''); }
-  }, [symbol, tf, windowBars, nZones, direction, mtf, onToast]);
+  }, [symbol, tf, instruments, windowBars, nZones, direction, mtf, onToast]);
 
   const runScan = useCallback(async () => {
+    if (!ready) return;
     setBusy('scan'); setErr('');
     try {
       const r = await jget<ResearchScan>(
@@ -139,7 +130,7 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
       setErr((e as Error).message);
       onToast('err', '扫描失败', (e as Error).message);
     } finally { setBusy(''); }
-  }, [tf, windowBars, nZones, direction, onToast]);
+  }, [ready, tf, windowBars, nZones, direction, onToast]);
 
   /**
    * 载入目录之后自动分析；换品种、换周期也跟着算一遍。
@@ -150,16 +141,16 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
    * 这几项重算更贵，也更容易让人以为结果自己变了。
    */
   useEffect(() => {
-    if (!dir?.count || !symbol) return;
+    if (!ready) return;
     if (analysis && analysis.symbol === symbol && analysis.tf === tf) return;
     void analyze(symbol, tf);
-  }, [dir, symbol, tf, analysis, analyze]);
+  }, [ready, symbol, tf, analysis, analyze]);
 
-  /** 表里点一行 → 单品种分析 */
+  /** 表里点一行 → 单品种分析，同时把共用的品种也切过去 */
   const pickRow = useCallback((sym: string) => {
-    setSymbol(sym);
+    onSymbol(sym);
     void analyze(sym, tf);
-  }, [analyze, tf]);
+  }, [analyze, onSymbol, tf]);
 
   // 图表要的是行式 K 线；引擎给的是列式（省流量、也省一次转换）
   const chartBars: Bar[] = useMemo(() => {
@@ -175,117 +166,143 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
     return out;
   }, [analysis]);
 
+  // 和日内台的本地图用同一个估算（见 lib/format.ts）：同一个品种，两边的小数位数得一样
   const priceRoundOf = useCallback((sym: string): number => {
     const px = sym === analysis?.symbol ? analysis.current_price : (scan?.rows.find((r) => r.symbol === sym)?.current_price ?? 0);
-    if (!(px > 0)) return 0.01;
-    return px >= 1000 ? 0.1 : px >= 1 ? 0.01 : 0.0001;
+    return guessPriceRound(px);
   }, [analysis, scan]);
 
   const engineDown = health !== null && !health.ok;
+  const engineText = health === null ? '引擎检查中…'
+    : health.ok
+      ? '引擎 ' + (health.engine ?? 'v3fusion') + ' · Python ' + (health.python ?? '')
+        + (health.probReady ? ' · 概率模型已加载' : ' · 概率模型缺失')
+        + (health.calibrated ? ' · 校准表已加载' : '')
+      : '引擎未就绪：' + (health.detail ?? '未知原因');
 
   return (
     <section className="research">
-      <div className="rsh-head">
+      <div className="page-head">
         <div>
           <h2>关键位研究台</h2>
           <p>读本地 K 线，算支撑阻力带和它的双概率。不看盘、不下单。</p>
         </div>
-        <div className={`rsh-engine ${health ? (health.ok ? 'on' : 'off') : ''}`}>
+        <span className={'pill engine ' + (health ? (health.ok ? 'on' : 'off') : '')}>
           <i className="status-dot" />
-          {health === null ? '引擎检查中…'
-            : health.ok
-              ? '引擎 ' + (health.engine ?? 'v3fusion') + ' · Python ' + (health.python ?? '') +
-                (health.probReady ? ' · 概率模型已加载' : ' · 概率模型缺失') +
-                (health.calibrated ? ' · 校准表已加载' : '')
-              : '引擎未就绪：' + (health.detail ?? '未知原因')}
-        </div>
+          {engineText}
+        </span>
       </div>
 
       {engineDown && (
-        <div className="rsh-warn">
+        <p className="note warn">
           关键位引擎（Python sidecar）没有启动，这一页算不出东西。常见原因：仓库里缺 <code>sidecar/.venv</code>
           （跑一次 <code>python -m venv sidecar/.venv &amp;&amp; sidecar/.venv/Scripts/pip install -r sidecar/requirements.txt</code>）、
-          或者安装版少了 sidecar 目录。交易台的实时行情不受影响，但档位也会跟着停 —— 那是同一个引擎。
-        </div>
+          或者安装版少了 sidecar 目录。日内台的实时行情不受影响，但档位也会跟着停 —— 那是同一个引擎。
+        </p>
       )}
 
-      <div className="rsh-dirbar">
-        <label>本地数据目录</label>
-        <input
-          value={dirInput}
-          onChange={(e) => setDirInput(e.target.value)}
-          placeholder="例如 D:\MT5_K线数据 或者 D:\A股_K线数据\parquet\stocks"
-          spellCheck={false}
-        />
-        <button
-          className="btn"
-          disabled={!canPick || busy === 'dir'}
-          title={canPick ? '记住这个目录（只在本机可改）' : '只有本机打开页面时才能选目录'}
-          onClick={() => void pickDir(dirInput)}
-        >
-          {busy === 'dir' ? '载入中…' : '载入这个目录'}
-        </button>
-        <span className="dim">
-          {dir?.exists && dir.count > 0 ? `${dir.count} 个品种 · ${dir.files} 个文件` : '还没载入'}
-        </span>
-      </div>
-      {dir?.warning && <div className="rsh-warn">{dir.warning}</div>}
+      {/* 数据源和参数：和日内台的「本地数据」条读的是同一份目录 */}
+      <div className="panel">
+        <div className="panel-head">
+          <h3>本地数据</h3>
+          <span className="dim">
+            {dir?.dir
+              ? (instruments.length > 0
+                ? `${dir.count || instruments.length} 个品种 · ${dir.files} 个文件`
+                : '目录里没有认得的 K 线文件')
+              : '还没选目录'}
+            {busy === 'dir' ? ' · 载入中…' : ''}
+          </span>
+        </div>
+        <div className="toolbar">
+          <label className="field-inline grow">
+            目录
+            <input
+              className="input sm"
+              value={dirInput}
+              // 手机上换不了目录（那个接口只认本机）：框锁住，别让人对着一个点了没反应的输入框打字
+              disabled={!canPick}
+              onChange={(e) => setDirInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') void pickDir(dirInput); }}
+              placeholder={canPick ? 'D:/MT5_K线数据 或 D:/A股_K线数据/parquet/stocks' : '只能在电脑上换目录'}
+              spellCheck={false}
+            />
+          </label>
+          <button
+            className="btn xs ghost"
+            disabled={!canPick || busy === 'dir' || !dirInput.trim()}
+            title={canPick ? '记住这个目录（只在本机可改）' : '只有本机打开页面时才能选目录'}
+            onClick={() => void pickDir(dirInput)}
+          >
+            {busy === 'dir' ? '载入中…' : '载入这个目录'}
+          </button>
+        </div>
 
-      <div className="rsh-controls">
-        <label>
-          品种
-          <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-            {instruments.length === 0 && <option value="">— 先载入目录 —</option>}
-            {instruments.map((i) => <option key={i.symbol} value={i.symbol}>{i.symbol}</option>)}
-          </select>
-        </label>
-        <label>
-          周期
-          <select value={tf} onChange={(e) => setTf(e.target.value)}>
-            {tfs.length === 0 && <option value={tf}>{tf}</option>}
-            {tfs.map((t) => <option key={t} value={t}>{dir?.tfLabels?.[t] ?? t}</option>)}
-          </select>
-        </label>
-        <label>
-          K 线
-          <select value={windowBars} onChange={(e) => setWindowBars(Number(e.target.value))}>
-            {[20, 40, 60, 90, 120, 250].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
-        <label>
-          每侧档位
-          <select value={nZones} onChange={(e) => setNZones(Number(e.target.value))}>
-            {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
-        <label>
-          方向
-          <select value={direction} onChange={(e) => setDirection(e.target.value as 'long' | 'short' | 'both')}>
-            <option value="long">只做多</option>
-            <option value="short">只做空</option>
-            <option value="both">多空都做</option>
-          </select>
-        </label>
-        <label className="rsh-check" title="拿同品种的其他周期各算一遍，标出共振">
-          <input type="checkbox" checked={mtf} onChange={(e) => setMtf(e.target.checked)} />
-          多周期共振
-        </label>
-        <button className="btn primary" disabled={!symbol || busy === 'analyze'} onClick={() => void analyze()}>
-          {busy === 'analyze' ? '分析中…' : '分析单品种'}
-        </button>
-        <button className="btn" disabled={!dir?.count || busy === 'scan'} onClick={() => void runScan()}>
-          {busy === 'scan' ? '扫描中…' : '分析全部'}
-        </button>
+        {!dir?.dir && (
+          <p className="note">
+            还没有数据目录。在电脑上选一个放着「品种_周期.parquet」的文件夹 ——
+            研究台和日内台的本地图用的是同一份。
+          </p>
+        )}
+        {dir?.warning && <p className="note warn">{dir.warning}</p>}
+
+        <div className="toolbar">
+          <label className="field-inline">
+            品种
+            <select className="select sm" value={symbol} onChange={(e) => onSymbol(e.target.value)}>
+              {instruments.length === 0 && <option value="">— 先载入目录 —</option>}
+              {instruments.map((i) => <option key={i.symbol} value={i.symbol}>{i.symbol}</option>)}
+            </select>
+          </label>
+          <label className="field-inline">
+            周期
+            <select className="select sm" value={tf} onChange={(e) => onTf(e.target.value)}>
+              {tfs.length === 0 && <option value={tf}>{tfLabel}</option>}
+              {tfs.map((t) => <option key={t} value={t}>{dir?.tfLabels?.[t] ?? t}</option>)}
+            </select>
+          </label>
+          <label className="field-inline">
+            K 线
+            <select className="select sm" value={windowBars} onChange={(e) => setWindowBars(Number(e.target.value))}>
+              {[20, 40, 60, 90, 120, 250].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="field-inline">
+            每侧档位
+            <select className="select sm" value={nZones} onChange={(e) => setNZones(Number(e.target.value))}>
+              {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="field-inline">
+            方向
+            <select className="select sm" value={direction} onChange={(e) => setDirection(e.target.value as 'long' | 'short' | 'both')}>
+              <option value="long">只做多</option>
+              <option value="short">只做空</option>
+              <option value="both">多空都做</option>
+            </select>
+          </label>
+          <label className="field-inline check" title="拿同品种的其他周期各算一遍，标出共振">
+            <input type="checkbox" checked={mtf} onChange={(e) => setMtf(e.target.checked)} />
+            多周期共振
+          </label>
+          <div className="toolbar-gap" />
+          <button className="btn xs accent" disabled={!ready || busy === 'analyze'} onClick={() => void analyze()}>
+            {busy === 'analyze' ? '分析中…' : '分析单品种'}
+          </button>
+          <button className="btn xs ghost" disabled={!ready || busy === 'scan'} onClick={() => void runScan()}>
+            {busy === 'scan' ? '扫描中…' : '分析全部'}
+          </button>
+        </div>
       </div>
 
-      {err && <div className="rsh-err">{err}</div>}
+      {err && <p className="note err">{err}</p>}
 
       {analysis && (
         <>
           <ResearchCards a={analysis} priceRound={priceRoundOf(analysis.symbol)} />
-          {analysis.engine.adjust_warning && <div className="rsh-warn">{analysis.engine.adjust_warning}</div>}
+          {analysis.engine.adjust_warning && <p className="note warn">{analysis.engine.adjust_warning}</p>}
 
-          <div className="rsh-chart">
+          <div className="panel chart-panel">
             <ChartPane
               research
               contract={analysis.symbol}
@@ -308,13 +325,16 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
             />
           </div>
 
-          <div className="rsh-table-card">
-            <div className="rsh-table-title">支撑 / 阻力带</div>
-            <div className="rsh-table-scroll">
-              <table className="rsh-table">
+          <div className="panel">
+            <div className="panel-head">
+              <h3>支撑 / 阻力带</h3>
+              <span className="dim">{tfLabel} · {analysis.data_bars} 根 K 线</span>
+            </div>
+            <div className="table-scroll">
+              <table className="data-table">
                 <thead>
                   <tr>
-                    <th>类型</th>
+                    <th className="txt">类型</th>
                     <th>中心价</th>
                     <th>价格带</th>
                     <th>带宽</th>
@@ -331,19 +351,21 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
                 <tbody>
                   {analysis.zones.map((z) => <ZoneRow key={z.zone_type + z.center} z={z} round={priceRoundOf(analysis.symbol)} />)}
                   {analysis.zones.length === 0 && (
-                    <tr><td colSpan={12} className="dim" style={{ textAlign: 'center', padding: 16 }}>
-                      距离带（0.5~5 ATR）内没有合格的位。换周期、换方向，或者把「每侧档位」调大一点
-                    </td></tr>
+                    <tr>
+                      <td colSpan={12} className="dim cell-center">
+                        距离带（0.5~5 ATR）内没有合格的位。换周期、换方向，或者把「每侧档位」调大一点
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
             </div>
             {analysis.engine.prob_ready === false && (
-              <div className="rsh-errors">概率模型没加载，所以「触及/守住/有效概率」是空的；位置和强度照常算。</div>
+              <p className="panel-foot">概率模型没加载，所以「触及/守住/有效概率」是空的；位置和强度照常算。</p>
             )}
           </div>
 
-          <div className="rsh-caveat">
+          <div className="note caveat">
             <b>这些数字该怎么用</b>
             <p>{analysis.summary.caveat}</p>
             <p>
@@ -354,12 +376,17 @@ export default function ResearchDesk({ canPick, onToast }: Props) {
         </>
       )}
 
-      <div className="rsh-table-title" style={{ marginTop: 18 }}>全市场扫描</div>
-      <ScanTable scan={scan} loading={busy === 'scan'} priceRoundOf={priceRoundOf} onPick={pickRow} />
-
-      <div className="rsh-foot">
-        以上内容由算法基于历史行情自动生成，仅供技术分析参考，不构成任何投资建议。
+      <div className="panel">
+        <div className="panel-head">
+          <h3>全市场扫描</h3>
+          <span className="dim">按有效概率（触及 × 守住）排序</span>
+        </div>
+        <ScanTable scan={scan} loading={busy === 'scan'} priceRoundOf={priceRoundOf} onPick={pickRow} />
       </div>
+
+      <p className="foot">
+        以上内容由算法基于历史行情自动生成，仅供技术分析参考，不构成任何投资建议。
+      </p>
     </section>
   );
 }
@@ -369,7 +396,7 @@ function ZoneRow({ z, round }: { z: Zone; round: number }) {
   const dist = z.distance_pct >= 0 ? '+' + z.distance_pct.toFixed(2) + '%' : z.distance_pct.toFixed(2) + '%';
   return (
     <tr>
-      <td className={z.zone_type === 'support' ? 's' : 'r'}>{z.zone_type === 'support' ? '支撑' : '阻力'}</td>
+      <td className={'txt ' + (z.zone_type === 'support' ? 's' : 'r')}>{z.zone_type === 'support' ? '支撑' : '阻力'}</td>
       <td className="num strong">{fmtPrice(z.center, round)}</td>
       <td className="num dim">{fmtPrice(z.low, round)} ~ {fmtPrice(z.high, round)}</td>
       <td className="num">{z.width_atr.toFixed(2)} ATR</td>
