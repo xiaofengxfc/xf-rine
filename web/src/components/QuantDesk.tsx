@@ -513,13 +513,19 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                     onChange={(e) => setStep(Number(e.target.value) || 20)} />
                 </label>
                 <label className="quant-field">
-                  <span>最多问几次</span>
-                  <input className="input" type="number" min={10} max={600} value={maxCalls}
-                    onChange={(e) => setMaxCalls(Number(e.target.value) || 150)} />
+                  <span>最多问几次（不设上限）</span>
+                  <input className="input" type="number" min={1} value={maxCalls}
+                    onChange={(e) => setMaxCalls(Math.max(1, Math.floor(Number(e.target.value)) || 1))} />
                 </label>
               </div>
-              <div className="quant-prompt-hint">
-                预计调用 {maxCalls} 次模型。每次都要花钱，也都要时间 —— 先从小的试。
+              {/*
+                不设上限，但要让人看见代价。cost 与时间成正比，藏在输入框后面是不负责任的。
+                超过 300 次就标黄：那不是「多花一点」，是会跑十几分钟、花掉一顿饭钱。
+              */}
+              <div className={'quant-prompt-hint' + (maxCalls > 300 ? ' warn' : '')}>
+                {maxCalls > 300
+                  ? '预计调用 ' + maxCalls + ' 次模型 —— 这个量级要跑十几分钟，花费也不低。确认再跑。'
+                  : '预计调用 ' + maxCalls + ' 次模型。每次都要花钱，也都要时间 —— 先从小的试。'}
               </div>
             </div>
             )}
