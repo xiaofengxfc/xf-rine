@@ -14,7 +14,7 @@ import { mountQuant } from './quant/routes.js';
 import { getStrategy as getSavedStrategy, listStrategies as listSavedStrategies } from './quant/library.js';
 import { checkRunnable, bindingOf } from './aiStrategy.js';
 import { newsDigest } from './news.js';
-import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
+import { analyze, testConnection, listModels, chatJson, AiError, type AiSnapshot } from './ai.js';
 import { AiRunner, type ExecRequest, type RunnerDeps } from './aiRunner.js';
 import { AI_STRATEGY_PATH, loadStrategy, saveStrategy, sanitizeStrategy, type StrategyConfig } from './aiStrategy.js';
 import { sendFeedback, feedbackTarget, FeedbackError } from './feedback.js';
@@ -2501,7 +2501,28 @@ const aiDeps: RunnerDeps = {
       passed: saved.lastRun ? saved.lastRun.passed : null,
       failed: saved.lastRun ? saved.lastRun.failed : [],
       enoughSample: saved.lastRun ? saved.lastRun.enoughSample : false,
+      // 策略类型决定实盘怎么出方向 —— 这两条以前缺失，导致执行器只会走那套旧协议
+      kind: saved.kind,
+      spec: saved.spec,
+      prompt: saved.prompt,
     };
+  },
+
+  /**
+   * 最近若干根已收盘 K 线，转成回测引擎用的形状。
+   *
+   * 去掉最后一根：它还没走完，最高最低还会变，拿它判断条件等于用未完成的数据做决定。
+   */
+  recentCandles: async (contract: string, interval: string, count: number) => {
+    const { bars } = await loadCandles(contract, interval, count);
+    return bars.slice(0, -1).map((b) => ({
+      t: b.time, o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume,
+    }));
+  },
+
+  askModel: async (system: string, user: string) => {
+    const r = await chatJson({ system, user, maxTokens: 300, timeoutMs: 60_000 });
+    return r.text;
   },
 
   openPositions: async () => {

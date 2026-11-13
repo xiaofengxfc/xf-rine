@@ -245,6 +245,23 @@ export function proxyState(): ProxyState {
  *   2. Gate 的白名单不认代理地址（403 + Request IP not in whitelist）：私有请求退回直连，
  *      5 分钟内不再拿代理去撞这堵墙。把代理 IP 加进白名单就能自己恢复。
  */
+/**
+ * 是不是本机地址。
+ *
+ * 回环地址一律直连：代理是给「出网」用的，本机上跑的服务（本地 Ollama、本地中转）
+ * 不该经过它。系统代理通常不转发到 127.0.0.1，结果就是「本地模型连不上」，
+ * 而报错只会说一句 fetch failed —— 看不出是代理干的。
+ * README 里写着支持本地 Ollama，这一条不修那个承诺就是空的。
+ */
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  } catch {
+    return false;
+  }
+}
+
 export async function netFetch(
   url: string,
   init: FetchInit = {},
@@ -255,7 +272,7 @@ export async function netFetch(
   // 在页面上长得一样：币种列表空着，也没人说一句为什么。
   const limit = opts.attemptMs && opts.attemptMs > 0 ? opts.attemptMs : ATTEMPT_MS;
   const blocked = opts.private === true && blockedAt > 0 && Date.now() - blockedAt < BLOCK_TTL_MS;
-  if (opts.direct === true || !state.on || blocked) return attempt('direct', url, init, limit);
+  if (opts.direct === true || !state.on || blocked || isLoopbackUrl(url)) return attempt('direct', url, init, limit);
 
   const method = (init.method ?? 'GET').toUpperCase();
   /** 下单、撤单这类不能重发：换个路重试一遍可能变成两单，所以只对查询类这么做 */

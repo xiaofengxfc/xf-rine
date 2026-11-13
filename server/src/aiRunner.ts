@@ -18,10 +18,12 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HOME_DIR, config, envLabel } from './config.js';
-import { decide, type AiDecision, type AiSnapshot, type RoleTurn, type TradePlan } from './ai.js';
+import type { AiSnapshot, RoleTurn, TradePlan } from './ai.js';
+import { conditionHolds, IndicatorCache, type Candle } from './quant/backtest.js';
+import { buildAnonContext, assertAnonymous, parseVerdict } from './quant/promptStrategy.js';
 import {
   dayLossPct, gatePlan, loadStrategy, noteEquity, saveStrategy,
-  type Depth, type GateOutcome, type StrategyConfig,
+  type GateOutcome, type StrategyConfig,
 } from './aiStrategy.js';
 
 /** 决策日志。一行一条，追加写；超过上限时裁到最近 N 条重写 */
@@ -77,7 +79,32 @@ export interface RunnerDeps {
    * 执行器自己不读策略库：它要知道的是"这一轮按哪条策略、在哪个币上跑"，
    * 而这件事由路由层统一裁决（策略没了、没达标，都在那里拦）。
    */
-  binding(strategyId: string): { contract: string; interval: string; passed: boolean | null; failed: string[]; enoughSample: boolean } | null;
+  binding(strategyId: string): {
+    contract: string;
+    interval: string;
+    passed: boolean | null;
+    failed: string[];
+    enoughSample: boolean;
+    kind: 'rule' | 'prompt';
+    spec: import('./quant/backtest.js').StrategySpec | null;
+    prompt: string | null;
+  } | null;
+
+  /**
+   * 最近若干根已收盘 K 线。
+   *
+   * 规则策略要在上面算条件、提示词策略要在上面截匿名上下文 —— 两者都需要原始 K 线，
+   * 而 snapshot（喂给旧七角色协议的那份）是加工过的摘要，不够用。
+   */
+  recentCandles(contract: string, interval: string, count: number): Promise<import('./quant/backtest.js').Candle[]>;
+
+  /**
+   * 问模型一句话，返回原话。
+   *
+   * 单独抽成依赖而不是在 runner 里直接 import：这样自检能塞一个假模型进来，
+   * 不用为了一次决策去连真接口、花真钱。
+   */
+  askModel(system: string, user: string): Promise<string>;
 }
 
 export interface DecisionRecord {
@@ -87,7 +114,8 @@ export interface DecisionRecord {
   envLabel: string;
   contract: string;
   interval: string;
-  depth: Depth;
+  /** 这一轮按哪类策略做的决定。quick/standard/deep 那套已经不参与实盘了 */
+  strategyKind: 'rule' | 'prompt';
   model: string;
   plan: TradePlan;
   gate: GateOutcome;
@@ -337,7 +365,7 @@ export class AiRunner {
       this.lastDecideAt.set(contract, now);
 
       // 周期也跟着策略走：策略是在某个周期上训练的，拿别的周期跑等于换了策略
-      const rec = await this.runOne(withDay, contract, bound.interval, account, positions, t0);
+      const rec = await this.runOne(withDay, contract, bound.interval, bound, account, positions, t0);
       // 这一轮跑通了，把上一次的错清掉 —— 否则那一行会一直挂着，像是「现在还在出错」
       this.lastError = '';
       return rec;
@@ -353,21 +381,36 @@ export class AiRunner {
     }
   }
 
+  /**
+   * 一轮决策。
+   *
+   * **方向由策略决定，不由模型自由发挥。**
+   *
+   * 这是相对早期版本最大的改动：以前这里固定调 decide() 那套七角色协议，
+   * 用户选的策略只决定「能不能开」，开了之后按什么判断根本没人管。
+   * 现在按 kind 分流：
+   *   · rule   —— 在最近一根已收盘 K 线上算条件，命中就按 spec.side 做，全程不问模型
+   *   · prompt —— 把最近几十根匿名化后交给模型，它只回 long/short/flat，一次调用
+   *
+   * 两种情况下，入场价、止损、止盈都由策略算（规则策略用它的 spec，提示词策略用固定的
+   * ATR 2 倍止损 + 盈亏比 2），模型不碰价格 —— 和回测完全一致，回测得出的结论才代表实盘。
+   */
   private async runOne(
     cfg: StrategyConfig,
     contract: string,
     interval: string,
+    bound: NonNullable<ReturnType<RunnerDeps['binding']>>,
     account: { total: number; available: number },
     positions: { contract: string }[],
     t0: number,
   ): Promise<DecisionRecord> {
     const snapshot = await this.deps.snapshot(contract, interval);
-    const decision: AiDecision = await decide(snapshot, { depth: cfg.depth });
+    const call = await this.directionOf(bound, contract, interval, snapshot);
 
     const meta = await this.deps.contractMeta(contract).catch(() => null);
     const gate: GateOutcome = meta
       ? gatePlan(cfg, {
-          plan: decision.plan,
+          plan: call.plan,
           market: { last: snapshot.last, atr: snapshot.atr },
           info: meta,
           account,
@@ -376,7 +419,7 @@ export class AiRunner {
           dayLossPct: this.dayLoss,
         })
       : {
-          ok: false, action: decision.plan.action, size: 0, notional: 0, margin: 0,
+          ok: false, action: call.plan.action, size: 0, notional: 0, margin: 0,
           riskUsd: 0, stopDistance: 0, rr: 0, binding: '',
           checks: [{ label: '合约参数', ok: false, detail: '拿不到这个合约的乘数和最小下单量' }],
           refusals: ['合约参数：拿不到这个合约的乘数和最小下单量'], warnings: [],
@@ -389,13 +432,13 @@ export class AiRunner {
       envLabel: envLabel(),
       contract,
       interval,
-      depth: cfg.depth,
-      model: decision.model,
-      plan: decision.plan,
+      strategyKind: bound.kind,
+      model: call.model,
+      plan: call.plan,
       gate,
       exec: { ok: false },
-      turns: decision.turns,
-      usage: decision.usage,
+      turns: call.turns,
+      usage: call.usage,
       ms: Date.now() - t0,
     };
 
@@ -414,10 +457,10 @@ export class AiRunner {
             size: gate.size,
             leverage: Math.max(1, Math.min(cfg.leverage, meta?.leverageMax || cfg.leverage)),
             marginMode: cfg.marginMode,
-            stop: decision.plan.stop ?? 0,
-            target: decision.plan.target ?? 0,
-            entryType: decision.plan.entryType,
-            entry: decision.plan.entry,
+            stop: call.plan.stop ?? 0,
+            target: call.plan.target ?? 0,
+            entryType: call.plan.entryType,
+            entry: call.plan.entry,
           });
           rec.exec = { ok: true, order };
           this.counts.orders += 1;
@@ -436,5 +479,178 @@ export class AiRunner {
     if (this.recent.length > LOG_KEEP) this.recent = this.recent.slice(-LOG_KEEP);
     appendRecord(rec);
     return rec;
+  }
+
+  /**
+   * 按策略算方向。
+   *
+   * 规则策略完全不问模型 —— 条件是代码算的，问模型只是多花一笔钱、多一个不确定源。
+   * 提示词策略问一次，且问之前先确认上下文里没有身份信息。
+   */
+  private async directionOf(
+    bound: NonNullable<ReturnType<RunnerDeps['binding']>>,
+    contract: string,
+    interval: string,
+    snapshot: AiSnapshot,
+  ): Promise<{
+    plan: TradePlan;
+    turns: RoleTurn[];
+    usage: { promptTokens: number; completionTokens: number; calls: number };
+    model: string;
+  }> {
+    const now = Date.now();
+    const turn = (label: string, text: string): RoleTurn => ({ role: 'strategy', label, text, at: now, ok: true });
+    const zero = { promptTokens: 0, completionTokens: 0, calls: 0 };
+
+    /** 不做。reasoning 会原样显示在决策流里，得说人话 */
+    const hold = (why: string, turns: RoleTurn[], usage = zero, model = '策略'): {
+      plan: TradePlan; turns: RoleTurn[]; usage: typeof zero; model: string;
+    } => ({
+      plan: {
+        action: 'hold', confidence: 0, entry: null, entryType: 'market',
+        stop: null, target: null, horizonHours: 0,
+        reasoning: why, reasons: [], conflicts: [why], vetoes: [], riskNote: '',
+      },
+      turns, usage, model,
+    });
+
+    // ---------- 规则策略：条件算 ----------
+    if (bound.kind === 'rule') {
+      const spec = bound.spec;
+      if (!spec || !Array.isArray(spec.entry) || spec.entry.length === 0) {
+        return hold('策略没有入场条件', [turn('策略', '这条策略没有条件，什么都不做')]);
+      }
+
+      const candles = await this.deps.recentCandles(contract, interval, 400).catch(() => [] as Candle[]);
+      if (candles.length < 30) {
+        return hold('K 线太少，算不出条件', [turn('策略', '只拿到 ' + candles.length + ' 根 K 线')]);
+      }
+
+      // 用最后一根**已收盘**的 K 线判断，和回测里「第 i 根收盘做决定」是同一条规则
+      const i = candles.length - 1;
+      const cache = new IndicatorCache(candles);
+      const holds = spec.entry.every((c) => conditionHolds(c, i, cache, spec.params));
+      const condText = spec.entry
+        .map((c) => c.left.name + (c.shift ? '[t-' + c.shift + ']' : '') + ' ' + c.op + ' ' + (c.rightParam ?? c.right.name))
+        .join(' 且 ');
+
+      if (!holds) {
+        return hold('条件没有全部满足：' + condText, [turn('规则条件', '未命中：' + condText)]);
+      }
+
+      const levels = this.levelsFor(spec.stop, spec.target, spec.side, snapshot);
+      if (!levels) {
+        return hold('ATR 不可用，算不出止损距离', [turn('规则条件', '命中，但 ATR 拿不到')]);
+      }
+      return {
+        plan: {
+          action: spec.side,
+          confidence: 1,
+          entry: null,
+          entryType: 'market',
+          stop: levels.stop,
+          target: levels.target,
+          horizonHours: 0,
+          reasoning: '规则命中：' + condText,
+          reasons: ['条件全部满足：' + condText],
+          conflicts: [],
+          vetoes: [],
+          riskNote: '',
+        },
+        turns: [turn('规则条件', '命中：' + condText + ' → ' + (spec.side === 'long' ? '做多' : '做空'))],
+        usage: zero,
+        model: '规则策略（未调用模型）',
+      };
+    }
+
+    // ---------- 提示词策略：问一次模型 ----------
+    const prompt = bound.prompt;
+    if (!prompt) {
+      return hold('策略没有提示词', [turn('策略', '这条提示词策略是空的')]);
+    }
+    const candles = await this.deps.recentCandles(contract, interval, 160).catch(() => [] as Candle[]);
+    if (candles.length < 50) {
+      return hold('K 线太少，截不出上下文', [turn('提示词', '只拿到 ' + candles.length + ' 根 K 线')]);
+    }
+
+    const ctx = buildAnonContext(candles, candles.length - 1, 40);
+    // 发出去之前先确认没夹带身份信息。回测里这样做，实盘也必须这样做 ——
+    // 两边看到的输入不一致的话，回测那套结论就不代表实盘
+    const forbidden = ['USDT', 'GATE', contract.split('_')[0] ?? ''];
+    try {
+      assertAnonymous(ctx.text + String.fromCharCode(10) + prompt, forbidden);
+    } catch (e) {
+      return hold('匿名化没做干净，拒绝执行：' + (e as Error).message, [turn('提示词', '上下文检查未通过')]);
+    }
+
+    let raw = '';
+    let calls = 1;
+    try {
+      raw = await this.deps.askModel(prompt, ctx.text);
+    } catch (e) {
+      return hold('问模型失败：' + (e as Error).message, [turn('提示词', '调用失败')], { promptTokens: 0, completionTokens: 0, calls }, '提示词策略');
+    }
+
+    const v = parseVerdict(raw);
+    const modelTurn = turn('提示词策略', '模型回：' + (raw.trim().slice(0, 200) || '（空）'));
+    if (v.side === 'flat') {
+      return hold('模型判不做', [modelTurn], { promptTokens: 0, completionTokens: 0, calls }, '提示词策略');
+    }
+
+    const levels = this.levelsFor({ kind: 'atr', value: 2 }, { kind: 'rr', value: 2 }, v.side, snapshot);
+    if (!levels) {
+      return hold('ATR 不可用，算不出止损距离', [modelTurn], { promptTokens: 0, completionTokens: 0, calls }, '提示词策略');
+    }
+    return {
+      plan: {
+        action: v.side,
+        confidence: v.confidence ?? 0.6,
+        entry: null,
+        entryType: 'market',
+        stop: levels.stop,
+        target: levels.target,
+        horizonHours: 0,
+        reasoning: '提示词策略判 ' + (v.side === 'long' ? '做多' : '做空'),
+        reasons: [],
+        conflicts: [],
+        vetoes: [],
+        riskNote: '',
+      },
+      turns: [modelTurn],
+      usage: { promptTokens: 0, completionTokens: 0, calls },
+      model: '提示词策略',
+    };
+  }
+
+  /**
+   * 按策略的离场规则算止损止盈价。
+   *
+   * 和回测 engine 里 stopDistance/targetDistance 是同一套算法 ——
+   * 两边算出来不一样的话，回测统计的那些盈亏比就代表不了实盘。
+   */
+  private levelsFor(
+    stopRule: { kind: 'atr' | 'pct'; value: number },
+    targetRule: { kind: 'atr' | 'pct' | 'rr'; value: number },
+    side: 'long' | 'short',
+    snapshot: AiSnapshot,
+  ): { stop: number; target: number } | null {
+    const last = snapshot.last;
+    const atr = snapshot.atr;
+    if (!(last > 0)) return null;
+    if ((stopRule.kind === 'atr' || targetRule.kind === 'atr') && !(atr > 0)) return null;
+
+    const stopDist = stopRule.kind === 'pct' ? last * stopRule.value : atr * stopRule.value;
+    const targetDist = targetRule.kind === 'pct'
+      ? last * targetRule.value
+      : targetRule.kind === 'rr'
+        ? stopDist * targetRule.value
+        : atr * targetRule.value;
+    if (!(stopDist > 0) || !(targetDist > 0)) return null;
+
+    const round = (v: number) => Number(v.toPrecision(8));
+    return {
+      stop: round(side === 'long' ? last - stopDist : last + stopDist),
+      target: round(side === 'long' ? last + targetDist : last - targetDist),
+    };
   }
 }

@@ -492,7 +492,6 @@ export interface AiStrategy {
   /** 由策略推导，页面只读 */
   contracts: string[];
   interval: string;
-  depth: 'quick' | 'standard' | 'deep';
   leverage: number;
   marginMode: 'isolated' | 'cross';
   riskPct: number;
@@ -566,7 +565,8 @@ export interface AiDecisionRecord {
   envLabel: string;
   contract: string;
   interval: string;
-  depth: 'quick' | 'standard' | 'deep';
+  /** 这一轮按哪类策略做的决定 */
+  strategyKind: 'rule' | 'prompt';
   model: string;
   plan: AiPlan;
   gate: AiGate;
@@ -776,6 +776,8 @@ export interface StrategyBinding {
   name: string;
   contract: string;
   interval: string;
+  /** 规则策略由条件算方向；提示词策略问一次模型 */
+  kind?: StrategyKind;
   passed: boolean | null;
   failed: string[];
   enoughSample: boolean;

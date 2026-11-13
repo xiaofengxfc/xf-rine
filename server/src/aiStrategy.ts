@@ -49,7 +49,6 @@ export interface StrategyConfig {
    */
   contracts: string[];
   interval: string;
-  depth: Depth;
   leverage: number;
   marginMode: 'isolated' | 'cross';
   /** 单笔最多亏掉权益的百分之几。张数由它反推 */
@@ -88,7 +87,6 @@ export const STRATEGY_DEFAULTS: StrategyConfig = {
   strategyId: '',
   contracts: [],
   interval: '15m',
-  depth: 'standard',
   leverage: 10,
   marginMode: 'isolated',
   riskPct: 0.5,
@@ -135,8 +133,8 @@ function cleanContracts(v: unknown, fallback: string[]): string[] {
  */
 export function sanitizeStrategy(input: unknown, base: StrategyConfig = STRATEGY_DEFAULTS): StrategyConfig {
   const o = (input ?? {}) as Record<string, unknown>;
-  const depthRaw = String(o.depth ?? base.depth);
-  const depth: Depth = depthRaw === 'quick' || depthRaw === 'deep' ? depthRaw : 'standard';
+  // depth 已废弃：方向现在完全由策略决定，那套七角色协议不再参与实盘决策。
+  // 留着解析只会让人以为这个设置还在起作用
   const intervalRaw = String(o.interval ?? base.interval);
   return {
     enabled: typeof o.enabled === 'boolean' ? o.enabled : base.enabled,
@@ -145,7 +143,6 @@ export function sanitizeStrategy(input: unknown, base: StrategyConfig = STRATEGY
     // 换币意味着"这条结论换了个参照"，页面上会把上次回测的币和现在要跑的币并排显示。
     contracts: o.contracts === undefined ? base.contracts : cleanContracts(o.contracts, base.contracts),
     interval: ALLOWED_INTERVALS.has(intervalRaw) ? intervalRaw : base.interval,
-    depth,
     leverage: Math.round(clamp(o.leverage ?? base.leverage, 1, 50, base.leverage)),
     marginMode: o.marginMode === 'cross' ? 'cross' : 'isolated',
     riskPct: Number(clamp(o.riskPct ?? base.riskPct, 0.05, 5, base.riskPct).toFixed(2)),
@@ -207,9 +204,11 @@ export interface StrategyBinding {
   id: string;
   /** 策略名，页面显示用 */
   name: string;
-  /** 它训练时的合约，就是唯一能跑的合约 */
+  /** 默认合约。可以改 —— 换了之后回测结论要重跑才对应得上 */
   contract: string;
   interval: string;
+  /** 规则策略 / 提示词策略。决定实盘要不要调模型 */
+  kind?: 'rule' | 'prompt';
   /** 最近一次回测是否达标；null 表示没跑过 */
   passed: boolean | null;
   /** 没达标时的原因，页面要显示 */
@@ -229,6 +228,7 @@ export function bindingOf(saved: {
   name: string;
   contract: string;
   interval: string;
+  kind?: 'rule' | 'prompt';
   lastRun: { passed: boolean; failed: string[]; enoughSample: boolean } | null;
 } | null): StrategyBinding | null {
   if (!saved) return null;
@@ -237,6 +237,7 @@ export function bindingOf(saved: {
     name: saved.name,
     contract: saved.contract,
     interval: saved.interval,
+    kind: saved.kind,
     passed: saved.lastRun ? saved.lastRun.passed : null,
     failed: saved.lastRun ? saved.lastRun.failed : [],
     enoughSample: saved.lastRun ? saved.lastRun.enoughSample : false,

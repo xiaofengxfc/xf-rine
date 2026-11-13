@@ -377,20 +377,17 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
               </div>
             </div>
 
+            {/*
+              这里原来是「决策深度」（快速 / 标准 / 深度），控制那套七角色协议调几次模型。
+              现在方向由策略决定，那条协议不参与实盘了 —— 留着会让人以为它还在起作用。
+              调用成本改由策略类型决定：规则策略 0 次，提示词策略 1 次。
+            */}
             <div className="field">
-              <label>决策深度</label>
-              <div className="seg">
-                {([['quick', '快速'], ['standard', '标准'], ['deep', '深度']] as const).map(([v, label]) => (
-                  <button key={v} className={form?.depth === v ? 'on' : ''} disabled={!canEdit}
-                    onClick={() => patch({ depth: v })}>{label}</button>
-                ))}
-              </div>
+              <label>每轮模型调用</label>
               <div className="hint">
-                {form?.depth === 'quick'
-                  ? '1 次调用：只有交易员，没有风控对撞。最便宜，也最单薄。'
-                  : form?.depth === 'deep'
-                    ? '十几次调用：多空两轮辩论 + 研究主管 + 风控三人组 + 组合经理。最贵。'
-                    : '7 次调用：两个分析师 + 交易员 + 风控三人组 + 组合经理。'}
+                {payload?.binding?.kind === 'prompt'
+                  ? '1 次：把你的提示词和匿名化行情交给模型，它回方向。'
+                  : '0 次：规则策略由条件算方向，不调用模型。'}
               </div>
             </div>
 
@@ -530,7 +527,7 @@ function DecisionCard({ rec, priceRound, open, onToggle }: {
         <span className="ai-rec-time num">{timeStr(rec.at)}</span>
         <b>{rec.contract}</b>
         <span className="dim">
-          {rec.interval} · {rec.depth === 'quick' ? '快速' : rec.depth === 'deep' ? '深度' : '标准'}
+          {rec.interval} · {rec.strategyKind === 'prompt' ? '提示词策略' : '规则策略'}
           {' · '}{rec.usage.calls} 次调用 · {(rec.ms / 1000).toFixed(1)}s
         </span>
         <span className={'ai-verdict ' + p.action}>{actionLabel}</span>

@@ -226,15 +226,16 @@ async function main(): Promise<void> {
   {
     strat.saveStrategy({ ...base, dayKey: '', dayStartEquity: 0 });
     const calls: string[] = [];
+    let modelCalls = 0;
     const runner = new AiRunner({
       snapshot: async () => fakeSnapshot(),
       contractMeta: async () => info,
       account: async () => account,
       openPositions: async () => [],
-      // 自检里用一条"已达标"的假策略：contract/interval 固定，passed=true
-      binding: (id: string) => (id === 'st_test'
-        ? { contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true }
-        : null),
+      recentCandles: async () => risingCandles(),
+      // 规则策略不该问模型。这里故意让它抛错：一旦被调用，测试立刻失败
+      askModel: async () => { modelCalls += 1; throw new Error('规则策略不该调用模型'); },
+      binding: (id: string) => (id === 'st_test' ? ruleBinding() : null),
       execute: async (req) => {
         calls.push(req.contract + ':' + req.side + ':' + req.size + ':' + req.stop + ':' + req.target);
         return { id: 'ord-1', status: 'finished', fillPrice: 62010, size: req.size };
@@ -244,7 +245,10 @@ async function main(): Promise<void> {
     ok('产出了记录', Boolean(rec));
     ok('闸门放行', Boolean(rec?.gate.ok), rec?.gate.refusals.join(' / ') ?? '');
     ok('真的发了一单', Boolean(rec?.exec.ok), rec?.exec.error ?? '');
-    eq('发单参数', calls, ['BTC_USDT:long:1:61650:63400']);
+    // 价位由策略算：ATR 210 × 1.5 = 315 的止损、盈亏比 2 的止盈
+    // 62000 - 315 = 61685，62000 + 630 = 62630
+    eq('发单参数（止损止盈来自策略，不是模型）', calls, ['BTC_USDT:long:1:61685:62630']);
+    eq('规则策略一次模型都没调', modelCalls, 0);
     ok('日志落盘了', existsSync(join(home, 'ai-decisions.jsonl')) &&
       readFileSync(join(home, 'ai-decisions.jsonl'), 'utf8').trim().split('\n').length === 1);
     eq('计数：决策 1 单 1', runner.status().counts, { decisions: 1, orders: 1, refusals: 0, errors: 0 });
@@ -270,10 +274,9 @@ async function main(): Promise<void> {
       contractMeta: async () => info,
       account: async () => ({ total: 980, available: 980 }),
       openPositions: async () => [],
-      // 自检里用一条"已达标"的假策略：contract/interval 固定，passed=true
-      binding: (id: string) => (id === 'st_test'
-        ? { contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true }
-        : null),
+      recentCandles: async () => risingCandles(),
+      askModel: async () => '{"side":"flat"}',
+      binding: (id: string) => (id === 'st_test' ? ruleBinding() : null),
       execute: async () => { throw new Error('不该走到这一步'); },
     });
     const rec = await runner.tick(true);
@@ -333,6 +336,8 @@ async function main(): Promise<void> {
       contractMeta: async () => info,
       account: async () => account,
       openPositions: async () => [],
+      recentCandles: async () => risingCandles(),
+      askModel: async () => '{"side":"flat"}',
       binding: () => null,
       execute: async () => { executed += 1; throw new Error('不该下单'); },
     });
@@ -379,12 +384,101 @@ async function main(): Promise<void> {
 
     lib.deleteStrategy(s1.id);
   }
+  console.log('\\n[12] 提示词策略：实盘也匿名化，且只问一次模型');
+  {
+    strat.saveStrategy({ ...base, enabled: true, strategyId: 'st_prompt', contracts: [] });
+    const seen: string[] = [];
+    const calls: string[] = [];
+    const runner = new AiRunner({
+      snapshot: async () => fakeSnapshot(),
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => [],
+      recentCandles: async () => risingCandles(80),
+      askModel: async (_system, user) => {
+        seen.push(user);
+        return '{"side":"long","confidence":0.7}';
+      },
+      binding: (id: string) => (id === 'st_prompt' ? promptBinding() : null),
+      execute: async (req) => {
+        calls.push(req.side + ':' + req.size);
+        return { id: 'ord-9', status: 'finished', fillPrice: 62010, size: req.size };
+      },
+    });
+    const rec = await runner.tick(true);
+    ok('产出了记录', Boolean(rec));
+    eq('方向来自模型', rec?.plan.action, 'long');
+    eq('只问了一次模型', seen.length, 1);
+    // 实盘和回测必须看到同一种输入，否则回测结论代表不了实盘
+    const ctx = seen[0] ?? '';
+    ok('发给模型的上下文里没有币种名', !/BTC|USDT/i.test(ctx), ctx.slice(0, 80));
+    ok('上下文里没有真实年份', !/(19|20)[0-9]{2}/.test(ctx));
+    ok('上下文里没有 6 万量级的绝对价格', !/6[0-9]{4}/.test(ctx));
+    ok('上下文用的是归一化价格', /C=100\.000/.test(ctx), '没找到基准行');
+    ok('真的按模型的方向下了单', rec?.exec.ok === true, rec?.exec.error ?? '');
+    if (rec?.exec.ok) ok('下单方向是 long', calls[0]?.startsWith('long') === true, String(calls[0]));
+
+    // 模型说 flat 就不做
+    const flatRunner = new AiRunner({
+      snapshot: async () => fakeSnapshot(),
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => [],
+      recentCandles: async () => risingCandles(80),
+      askModel: async () => '{"side":"flat"}',
+      binding: (id: string) => (id === 'st_prompt' ? promptBinding() : null),
+      execute: async () => { throw new Error('flat 不该下单'); },
+    });
+    const rec2 = await flatRunner.tick(true);
+    ok('模型判 flat 时不做', rec2?.plan.action === 'hold', String(rec2?.plan.action));
+    ok('也没发单', rec2?.exec.ok === false);
+  }
   stub.close();
   console.log('\n通过 ' + passes + ' 项，失败 ' + fails + ' 项');
   if (fails > 0) process.exitCode = 1;
 }
 
 /** 一份够用的材料。数字和上面的 stub 说法对得上 */
+
+/** 一段单调上升的 K 线：最后一根收盘价一定高于前 20 根的最高，能稳定触发"突破前高" */
+function risingCandles(n = 60) {
+  const out = [];
+  let px = 60000;
+  for (let i = 0; i < n; i++) {
+    px += 10;
+    out.push({ t: 1700000000 + i * 900, o: px, h: px + 5, l: px - 5, c: px, v: 100 });
+  }
+  return out;
+}
+
+/** 一条能在上面那段 K 线上命中的规则策略 */
+function ruleBinding(over: Record<string, unknown> = {}) {
+  return {
+    contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
+    kind: 'rule' as const,
+    prompt: null,
+    spec: {
+      name: 'breakout', side: 'long' as const, params: { n: 20, atrPeriod: 14 }, ranges: {},
+      entry: [{ left: { name: 'close' }, op: '>' as const, right: { name: 'highest', periodKey: 'n' } }],
+      stop: { kind: 'atr' as const, value: 1.5 },
+      target: { kind: 'rr' as const, value: 2 },
+      maxPositions: 1,
+    },
+    ...over,
+  };
+}
+
+/** 一条提示词策略 */
+function promptBinding(over: Record<string, unknown> = {}) {
+  return {
+    contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
+    kind: 'prompt' as const,
+    spec: null,
+    prompt: '看最近的价格结构，判断下一根更可能往哪边走。',
+    ...over,
+  };
+}
+
 function fakeSnapshot() {
   return {
     contract: 'BTC_USDT',
