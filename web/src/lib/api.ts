@@ -718,7 +718,7 @@ export interface QuantTradeRow {
 }
 
 export interface QuantBacktestResult {
-  mode: 'single' | 'search';
+  mode: 'single' | 'search' | 'prompt';
   bars: number;
   days: number;
   gaps: number;
@@ -734,17 +734,32 @@ export interface QuantBacktestResult {
   enoughSample?: number;
   best?: QuantBest | null;
   verdict: QuantVerdict | null;
+  /** 提示词策略这一轮的可信度指标 */
+  promptRun?: { calls: number; flatFallbacks: number; leaks: number; step: number };
+  /** 随机基线：模型没超过它就不算数 */
+  baseline?: { returnPct: number; trades: number };
 }
+
+export type StrategyKind = 'rule' | 'prompt';
 
 export interface SavedStrategySummary {
   id: string;
   name: string;
+  /** rule = 指标条件；prompt = 一段给模型的指令 */
+  kind: StrategyKind;
   contract: string;
   interval: string;
+  /** 规则策略才有 */
+  spec: QuantSpec | null;
+  /** 提示词策略才有 */
+  prompt: string | null;
   createdAt: number;
   updatedAt: number;
   lastRun: {
     at: number;
+    /** 这次回测是在哪个合约上跑的 —— 和现在要跑的合约不一致时要提示重跑 */
+    contract: string;
+    interval: string;
     passed: boolean;
     failed: string[];
     expectancyPct: number;

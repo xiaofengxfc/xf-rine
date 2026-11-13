@@ -315,6 +315,22 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
               )}
             </div>
 
+            {/*
+              合约池。策略不再绑死币种，所以这一格重新开放。
+              但换币意味着"回测是在另一个品种上做的"——下面那块会把两个币并排显示。
+            */}
+            <div className="field">
+              <label>合约池（这只策略要跑在哪个币上）</label>
+              <input
+                className="input"
+                value={(form?.contracts ?? []).join(', ')}
+                disabled={!canEdit || on}
+                placeholder="BTC_USDT"
+                onChange={(e) => patch({ contracts: e.target.value.split(/[,，\s]+/).filter(Boolean).map((s) => s.toUpperCase()) })}
+              />
+              <div className="hint">改完合约要回「策略」页重跑一次回测，结论才对应得上</div>
+            </div>
+
             {/* 选中的策略长什么样，摆在开关旁边 —— 开之前就该看见上次回测是过还是没过 */}
             {payload?.binding && (
               <div className={'quant-binding ' + (payload.binding.passed ? 'ok' : 'bad')}>
@@ -331,9 +347,23 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
                         ? '上次回测达标'
                         : '上次回测没过：' + (payload.binding.failed.join('、') || '原因不明')}
                 </div>
-                <div className="quant-binding-note dim">
-                  合约池锁定为 {payload.binding.contract} —— 策略只在它训练过的币上有依据
-                </div>
+                {/*
+                  上次回测的币和现在要跑的币不一致时，明说。
+                  这条提示是本轮改动里最要紧的一句：策略可以换币跑，但换币之后
+                  "样本外期望 +0.3%" 这条结论就不再直接适用于新币了。
+                */}
+                {(() => {
+                  const running = (form?.contracts ?? []).join(',');
+                  const tested = payload.binding.contract;
+                  const diff = running && running !== tested;
+                  return (
+                    <div className={'quant-binding-note ' + (diff ? 'warn' : 'dim')}>
+                      {diff
+                        ? '注意：回测是在 ' + tested + ' 上做的，现在要跑 ' + running + ' —— 换币之后那条结论不直接适用，建议先在新币上重跑一次'
+                        : '回测合约 ' + tested + ' · 周期 ' + payload.binding.interval}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

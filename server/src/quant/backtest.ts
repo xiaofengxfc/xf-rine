@@ -82,6 +82,16 @@ export interface StrategySpec {
 }
 
 export interface BacktestOpts {
+  /**
+   * 外部信号：第 i 根收盘后该做多 / 做空 / 不做。
+   *
+   * 给了这个，引擎就不再算 spec.entry 的条件，方向完全由它决定 ——
+   * 提示词策略就是这么接进来的：模型给方向，张数、止损、成交价仍然由引擎算。
+   *
+   * 方向变化时：和当前持仓反向 → 先平；同向继续持；flat → 平掉。
+   * 从"没仓"到"有方向" → 按下一根开盘开仓。
+   */
+  signalAt?: (i: number) => 'long' | 'short' | 'flat';
   /** 每个合约的乘数：1 张 = multiplier 个币 */
   multiplier: number;
   /** taker 费率，比如 0.0005 */
@@ -144,6 +154,8 @@ export interface BacktestResult {
 
 /** 一张开着的仓。引擎内部用，不对外 */
 export interface OpenPosition {
+  /** 这一笔是多还是空。规则策略恒等于 spec.side；外部信号模式下会变 */
+  side: 'long' | 'short';
   entryIndex: number;
   entryPrice: number;
   size: number;
@@ -291,6 +303,7 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
    */
   let holding = false;
   let pos: OpenPosition = {
+    side: spec.side,
     entryIndex: 0, entryPrice: 0, size: 0, stop: 0, target: 0, margin: 0, fundingPaid: 0,
   };
 
@@ -306,8 +319,13 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
     return diff * size * opts.multiplier;
   };
 
-  /** 以某个价格开仓。返回有没有开成 */
-  const open = (i: number, price: number): boolean => {
+  /**
+   * 以某个价格开仓。返回有没有开成。
+   *
+   * dir 不传就按 spec.side —— 规则策略永远只有一个方向；
+   * 提示词策略每一轮可能换边，由 signalAt 决定。
+   */
+  const open = (i: number, price: number, dir: 'long' | 'short' = spec.side): boolean => {
     if (holding) return false;
     const marginPerUnit = (price * opts.multiplier) / Math.max(1, opts.leverage);
     if (!(marginPerUnit > 0)) return false;
@@ -316,18 +334,19 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
     // 至少要能开 1 张，开不了就这轮不做 —— 不是"向下取整到 0 张然后假装开了"
     if (size < 1) return false;
 
-    const entryPrice = spec.side === 'long' ? price * (1 + slip) : price * (1 - slip);
+    const entryPrice = dir === 'long' ? price * (1 + slip) : price * (1 - slip);
     const atr = cache.get({ name: 'atr', periodKey: 'atrPeriod' }, spec.params).at(i);
     const stopDist = stopDistance(spec, entryPrice, atr);
     const targetDist = targetDistance(spec, entryPrice, atr, stopDist);
     if (!(stopDist > 0) || !(targetDist > 0)) return false;
 
     pos = {
+      side: dir,
       entryIndex: i,
       entryPrice,
       size,
-      stop: spec.side === 'long' ? entryPrice - stopDist : entryPrice + stopDist,
-      target: spec.side === 'long' ? entryPrice + targetDist : entryPrice - targetDist,
+      stop: dir === 'long' ? entryPrice - stopDist : entryPrice + stopDist,
+      target: dir === 'long' ? entryPrice + targetDist : entryPrice - targetDist,
       margin: size * marginPerUnit,
       fundingPaid: 0,
     };
@@ -339,8 +358,9 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
   const close = (i: number, price: number, reason: Trade['reason']): void => {
     if (!holding) return;
     const p: OpenPosition = { ...pos };
-    const exitPrice = spec.side === 'long' ? price * (1 - slip) : price * (1 + slip);
-    const gross = pnl(spec.side, p.entryPrice, exitPrice, p.size);
+    // 用持仓自己的方向，不用 spec.side：提示词策略可能这轮做空
+    const exitPrice = p.side === 'long' ? price * (1 - slip) : price * (1 + slip);
+    const gross = pnl(p.side, p.entryPrice, exitPrice, p.size);
     const notionalIn = p.entryPrice * p.size * opts.multiplier;
     const notionalOut = exitPrice * p.size * opts.multiplier;
     const fee = (notionalIn + notionalOut) * opts.feeRate;
@@ -350,7 +370,7 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
     const rr = risk > 0 ? gross / risk : 0;
 
     trades.push({
-      side: spec.side,
+      side: p.side,
       entryTime: candles[p.entryIndex]!.t,
       entryPrice: p.entryPrice,
       exitTime: candles[i]!.t,
@@ -376,25 +396,25 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
 
       // 资金费先扣：这根 K 线跨过了几个 8 小时结算点就扣几次
       if (fundingPerBar !== 0) {
-        const cost = bar.c * held.size * opts.multiplier * fundingPerBar * (spec.side === 'long' ? 1 : -1);
+        const cost = bar.c * held.size * opts.multiplier * fundingPerBar * (held.side === 'long' ? 1 : -1);
         // 正费率时多头付钱（净收支为负），空头收钱。cost 带符号直接进账
         held.fundingPaid += -cost;
       }
 
       // 同一根里止损和止盈都够得着时，按"先扫止损"算 —— 只有这一根的 OHLC，
       // 分不出谁先到；往坏处假设，免得回测比实盘好看
-      const hitStop = spec.side === 'long' ? bar.l <= held.stop : bar.h >= held.stop;
-      const hitTarget = spec.side === 'long' ? bar.h >= held.target : bar.l <= held.target;
+      const hitStop = held.side === 'long' ? bar.l <= held.stop : bar.h >= held.stop;
+      const hitTarget = held.side === 'long' ? bar.h >= held.target : bar.l <= held.target;
       if (hitStop) {
         // 跳空：开盘就已经越过止损时，按开盘价成交，按触发价成交是作弊
         const stopPrice = held.stop;
-        const trigger = spec.side === 'long'
+        const trigger = held.side === 'long'
           ? (bar.o <= stopPrice ? bar.o : stopPrice)
           : (bar.o >= stopPrice ? bar.o : stopPrice);
         close(i, trigger, 'stop');
       } else if (hitTarget) {
         const targetPrice = held.target;
-        const trigger = spec.side === 'long'
+        const trigger = held.side === 'long'
           ? (bar.o >= targetPrice ? bar.o : targetPrice)
           : (bar.o <= targetPrice ? bar.o : targetPrice);
         close(i, trigger, 'target');
@@ -404,23 +424,38 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
     // ---- 收盘后判断信号，成交放到下一根开盘 ----
     if (i < candles.length - 1) {
       const next = candles[i + 1]!;
-      if (holding) {
-        // 反向信号平仓：只在明确的穿越信号上平，不在每个不满足的根上平 ——
-        // 后者会因为条件短暂失效把仓平在噪音里
-        const crossed = spec.side === 'long'
-          ? spec.entry.some((c) => c.op === 'crossDown' && conditionHolds(c, i, cache, spec.params))
-          : spec.entry.some((c) => c.op === 'crossUp' && conditionHolds(c, i, cache, spec.params));
-        if (crossed) close(i + 1, next.o, 'signal');
-      }
-      if (!holding && i >= warmup) {
-        const ok = spec.entry.every((c) => conditionHolds(c, i, cache, spec.params));
-        if (ok) open(i + 1, next.o);
+
+      if (opts.signalAt) {
+        /**
+         * 外部信号模式：方向由回调给，规则条件不参与。
+         *
+         * 这里必须重新算一个"这一根该拿哪边"，而不是复用 spec.side ——
+         * 提示词策略可以这一轮做多、下一轮做空，spec.side 只是它初始声明。
+         */
+        const want = opts.signalAt(i);
+        if (holding) {
+          if (want === 'flat' || want !== pos.side) close(i + 1, next.o, 'signal');
+        }
+        if (!holding && want !== 'flat') open(i + 1, next.o, want);
+      } else {
+        if (holding) {
+          // 反向信号平仓：只在明确的穿越信号上平，不在每个不满足的根上平 ——
+          // 后者会因为条件短暂失效把仓平在噪音里
+          const crossed = spec.side === 'long'
+            ? spec.entry.some((c) => c.op === 'crossDown' && conditionHolds(c, i, cache, spec.params))
+            : spec.entry.some((c) => c.op === 'crossUp' && conditionHolds(c, i, cache, spec.params));
+          if (crossed) close(i + 1, next.o, 'signal');
+        }
+        if (!holding && i >= warmup) {
+          const ok = spec.entry.every((c) => conditionHolds(c, i, cache, spec.params));
+          if (ok) open(i + 1, next.o);
+        }
       }
     }
 
     // ---- 记账 ----
     const unrealised = holding
-      ? pnl(spec.side, pos.entryPrice, bar.c, pos.size) - pos.fundingPaid
+      ? pnl(pos.side, pos.entryPrice, bar.c, pos.size) - pos.fundingPaid
       : 0;
 
     equity.push({ t: bar.t, v: balance + unrealised });

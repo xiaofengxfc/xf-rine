@@ -17,12 +17,17 @@ import type { Candle, StrategySpec, Condition } from '../src/quant/backtest.js';
 import { backtest, conditionHolds, IndicatorCache, warmupOf } from '../src/quant/backtest.js';
 import { buildIndicator } from '../src/quant/indicators.js';
 import { sanitizeHypothesis, FALLBACK_HYPOTHESIS, validateSemantics } from '../src/quant/ai.js';
+import { buildAnonContext, assertAnonymous, parseVerdict } from '../src/quant/promptStrategy.js';
+import { randomBaselineSignals } from '../src/quant/promptBacktest.js';
 
 let fails = 0;
 let passes = 0;
 function ok(name: string, cond: boolean, detail = ''): void {
   if (cond) { passes += 1; console.log('  ✓ ' + name); }
   else { fails += 1; console.log('  ✗ ' + name + (detail ? '  —— ' + detail : '')); }
+}
+function eq(name: string, got: unknown, want: unknown): void {
+  ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want));
 }
 function near(name: string, got: number, want: number, eps = 1e-6): void {
   ok(name, Math.abs(got - want) <= eps, 'got ' + got + ' want ' + want);
@@ -410,6 +415,66 @@ console.log('\\n[11] 语义校验：条件能跑不等于它表达了那个意�
   ok('收回条件至少触发过几次', fired > 0, '触发 ' + fired + ' 次');
 }
 
+console.log('\\n[12] 提示词策略：匿名化、解析、外部信号');
+{
+  const candles: Candle[] = [];
+  let px = 62000;
+  for (let i = 0; i < 200; i++) {
+    px += Math.sin(i / 7) * 300;
+    candles.push(bar(1700000000 + i * 3600, px, px + 200, px - 200, px));
+  }
+
+  // --- 匿名化真的抹掉了币种、时间和绝对价格 ---
+  const ctx = buildAnonContext(candles, 120, 40);
+  ok('上下文里没有币种名', !/BTC|USDT|GATE/i.test(ctx.text), ctx.text.slice(0, 60));
+  ok('上下文里没有真实年份', !/(19|20)[0-9]{2}/.test(ctx.text), '漏了年份');
+  ok('价格归一化到 100 附近', /C=100\.000/.test(ctx.text), '没找到基准行');
+  ok('用的是相对序号而不是时间戳', ctx.text.includes('Bar 0') && ctx.text.includes('Bar -1'));
+
+  // --- 护栏：故意塞币种名进去，必须拒绝 ---
+  let refused = false;
+  try { assertAnonymous(ctx.text + ' BTC_USDT', ['BTC', 'USDT']); } catch { refused = true; }
+  ok('夹带币种名会被拒绝执行', refused);
+
+  let refusedYear = false;
+  try { assertAnonymous(ctx.text + ' taken at 2022-06-13', ['BTC']); } catch { refusedYear = true; }
+  ok('夹带真实年份也会被拒绝', refusedYear);
+
+  // --- 解析：各种脏格式都要落到正确方向 ---
+  eq('标准 JSON', parseVerdict('{"side":"long"}').side, 'long');
+  eq('带围栏的 JSON', parseVerdict('```json' + String.fromCharCode(10) + '{"side":"short"}' + String.fromCharCode(10) + '```').side, 'short');
+  eq('夹杂解释文字', parseVerdict('我觉得 {"side":"long","confidence":0.7} 大概这样').side, 'long');
+  eq('只回大写 LONG', parseVerdict('LONG').side, 'long');
+  eq('看不出来就 flat', parseVerdict('maybe up, not sure').side, 'flat');
+  eq('空回包是 flat', parseVerdict('').side, 'flat');
+  ok('置信度被解出来', parseVerdict('{"side":"short","confidence":0.6}').confidence === 0.6);
+
+  // --- 外部信号驱动引擎：做空也能正确计盈亏 ---
+  // 造一段单边上涨：如果在每根都做空，应该持续亏钱
+  const rise: Candle[] = [];
+  for (let i = 0; i < 60; i++) rise.push(bar(i * 3600, 100 + i * 2, 101 + i * 2, 99 + i * 2, 100 + i * 2));
+  const shortSpec: StrategySpec = {
+    name: 'ps', side: 'long', params: { atrPeriod: 14 }, ranges: {},
+    entry: [], stop: { kind: 'pct', value: 0.5 }, target: { kind: 'pct', value: 0.5 }, maxPositions: 1,
+  };
+  const rShort = backtest(shortSpec, rise, { ...OPTS, signalAt: () => 'short' });
+  ok('外部信号做空：有成交', rShort.trades.length > 0, String(rShort.trades.length));
+  ok('单边上涨里一直做空是亏的', rShort.stats.totalReturnPct < 0, String(rShort.stats.totalReturnPct));
+  ok('成交方向记成 short', rShort.trades.every((t) => t.side === 'short'));
+
+  const rLong = backtest(shortSpec, rise, { ...OPTS, signalAt: () => 'long' });
+  ok('同一段单边上涨里一直做多是赚的', rLong.stats.totalReturnPct > 0, String(rLong.stats.totalReturnPct));
+  ok('成交方向记成 long', rLong.trades.every((t) => t.side === 'long'));
+
+  const rFlat = backtest(shortSpec, rise, { ...OPTS, signalAt: () => 'flat' });
+  ok('一直 flat 就一笔不做', rFlat.trades.length === 0, String(rFlat.trades.length));
+
+  // --- 随机基线：给了种子就确定 ---
+  const a = randomBaselineSignals(rise, 5, 20, 7);
+  const b = randomBaselineSignals(rise, 5, 20, 7);
+  ok('随机基线和种子绑定，两次一致', JSON.stringify(a) === JSON.stringify(b));
+  ok('随机基线不是全 flat', a.some((x) => x !== 'flat'));
+}
 const total = passes + fails;
 console.log('\n通过 ' + passes + ' 项，失败 ' + fails + ' 项（共 ' + total + '）');
 if (fails > 0) process.exitCode = 1;

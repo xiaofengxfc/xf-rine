@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend } from '../lib/api.ts';
 import type {
   QuantCatalog, QuantCondition, QuantSpec, QuantVerdict,
-  QuantBacktestResult, QuantEvent, SavedStrategySummary,
+  QuantBacktestResult, QuantEvent, SavedStrategySummary, StrategyKind,
 } from '../lib/api.ts';
 
 interface Props {
@@ -89,6 +89,13 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   // 默认展开：页面上有策略时，"从这里打开来编辑"应该是第一眼就看见的东西，
   // 藏在一个按钮后面会让人以为这一页只能新建
   const [pickerOpen, setPickerOpen] = useState(true);
+  /** 策略类型：规则 / 提示词 */
+  const [kind, setKind] = useState<StrategyKind>('rule');
+  /** 提示词策略的指令正文 */
+  const [prompt, setPrompt] = useState('');
+  /** 提示词回测的抽样：每几根问一次、最多问几次 */
+  const [step, setStep] = useState(20);
+  const [maxCalls, setMaxCalls] = useState(150);
 
   const [rounds, setRounds] = useState(3);
   const [researching, setResearching] = useState(false);
@@ -122,8 +129,10 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     const s = library.find((x) => x.id === id);
     if (!s) return;
     try {
-      const full = await jget<{ strategy: SavedStrategySummary & { spec: QuantSpec } }>('/api/quant/strategies/' + id);
-      setSpec(full.strategy.spec);
+      const full = await jget<{ strategy: SavedStrategySummary }>('/api/quant/strategies/' + id);
+      if (full.strategy.spec) setSpec(full.strategy.spec);
+      setKind(full.strategy.kind);
+      setPrompt(full.strategy.prompt ?? '');
       setSavedId(id);
       setContract(s.contract);
       setTf(s.interval);
@@ -187,19 +196,25 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   }, [setParam]);
 
   const runBacktest = useCallback(async () => {
-    if (spec.entry.length === 0) { onToast('err', '先加一条入场条件'); return; }
+    if (kind === 'rule' && spec.entry.length === 0) { onToast('err', '先加一条入场条件'); return; }
+    if (kind === 'prompt' && !prompt.trim()) { onToast('err', '提示词是空的', '写一段要模型照着判断的指令'); return; }
     setBusy('backtest');
     try {
+      // 提示词策略要问很多次模型，超时给足；规则策略几百毫秒就完
+      const timeout = kind === 'prompt' ? 900_000 : 300_000;
       const r = await jsend<QuantBacktestResult>('POST', '/api/quant/backtest', {
-        contract, interval: tf, capital, spec,
-      }, undefined, AbortSignal.timeout(300_000));
+        contract, interval: tf, capital, spec, kind, prompt, step, maxCalls,
+      }, undefined, AbortSignal.timeout(timeout));
       setResult(r);
-      onToast('ok', r.mode === 'search' ? '搜索完成' : '回测完成',
-        r.mode === 'search' ? r.candidates + ' 组候选' : (r.stats?.trades ?? 0) + ' 笔交易');
+      onToast('ok',
+        r.mode === 'search' ? '搜索完成' : r.mode === 'prompt' ? '提示词回测完成' : '回测完成',
+        r.mode === 'search'
+          ? r.candidates + ' 组候选'
+          : (r.stats?.trades ?? 0) + ' 笔交易');
     } catch (e) {
       onToast('err', '回测失败', (e as Error).message);
     } finally { setBusy(''); }
-  }, [contract, tf, capital, spec, onToast]);
+  }, [contract, tf, capital, spec, kind, prompt, step, maxCalls, onToast]);
 
   const startResearch = useCallback(async () => {
     if (!canRun) { onToast('err', '只有本机能跑研究'); return; }
@@ -234,6 +249,21 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     setResearching(false);
   }, []);
 
+  /** 改名。只改名字，不碰规则，所以不清回测结论 */
+  const renameCurrent = useCallback(async () => {
+    if (!savedId) { onToast('err', '还没存进策略库', '先存一次再改名'); return; }
+    const cur = library.find((s) => s.id === savedId);
+    const name = window.prompt('新的名字：', cur?.name ?? '');
+    if (!name || name.trim() === cur?.name) return;
+    try {
+      await jsend('POST', '/api/quant/strategies/' + savedId + '/rename', { name: name.trim() });
+      await refreshLibrary();
+      onToast('ok', '已改名', '回测结论不受影响 —— 只改了名字，没改规则');
+    } catch (e) {
+      onToast('err', '改名失败', (e as Error).message);
+    }
+  }, [savedId, library, refreshLibrary, onToast]);
+
   /**
    * 保存到策略库，AI 交易那边就能选到它。
    *
@@ -241,26 +271,27 @@ export default function QuantDesk({ canRun, onToast }: Props) {
    * 没跑过就存进去，AI 交易那边也只能看到"没跑过回测、不能开"，没有意义。
    */
   const saveToLibrary = useCallback(async () => {
-    if (!result) { onToast('err', '先跑一次回测', '保存的是这条规则的结论，没结论存了也没用'); return; }
-    if (spec.entry.length === 0) { onToast('err', '策略还没有入场条件'); return; }
+    if (!result) { onToast('err', '先跑一次回测', '保存的是这条策略的结论，没结论存了也没用'); return; }
+    if (kind === 'rule' && spec.entry.length === 0) { onToast('err', '策略还没有入场条件'); return; }
+    if (kind === 'prompt' && !prompt.trim()) { onToast('err', '提示词是空的'); return; }
     const name = window.prompt('给这条策略起个名字：', spec.name || '我的策略');
     if (!name) return;
     try {
       const saved = await jsend<{ ok: boolean; strategy: { id: string; name: string } }>(
         'POST', '/api/quant/strategies',
-        { id: savedId || undefined, name, contract, interval: tf, spec },
+        { id: savedId || undefined, name, kind, contract, interval: tf, spec, prompt },
       );
       setSavedId(saved.strategy.id);
       // 把这次回测的结论记上去，AI 交易那边才知道它过没过
       await jsend('POST', '/api/quant/strategies/' + saved.strategy.id + '/run', {
-        contract, interval: tf, spec,
-      }, undefined, AbortSignal.timeout(300_000));
+        contract, interval: tf, spec, kind, prompt, step, maxCalls,
+      }, undefined, AbortSignal.timeout(900_000));
       await refreshLibrary();
       onToast('ok', '已存进策略库', '回 AI 交易页就能选到「' + saved.strategy.name + '」');
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     }
-  }, [result, spec, contract, tf, savedId, onToast, refreshLibrary]);
+  }, [result, spec, kind, prompt, step, maxCalls, contract, tf, savedId, onToast, refreshLibrary]);
 
   const hypotheses = events.filter((e) => e.type === 'hypothesis');
   const roundResults = events.filter((e) => e.type === 'round');
@@ -337,13 +368,15 @@ export default function QuantDesk({ canRun, onToast }: Props) {
         <div className="panel quant-editor">
           <div className="panel-head">
             <span className="panel-title">策略</span>
-            <div className="seg">
-              <button className={spec.side === 'long' ? 'on' : ''} onClick={() => patch({ side: 'long' })}>做多</button>
-              <button className={spec.side === 'short' ? 'on' : ''} onClick={() => patch({ side: 'short' })}>做空</button>
+            <div className="seg" title="规则策略用指标条件；提示词策略让模型读行情自己判断">
+              <button className={kind === 'rule' ? 'on' : ''} onClick={() => setKind('rule')}>规则</button>
+              <button className={kind === 'prompt' ? 'on' : ''} onClick={() => setKind('prompt')}>提示词</button>
             </div>
           </div>
 
           <div className="panel-foot">
+            {kind === 'rule' ? (
+            <>
             <div className="quant-section">
               <div className="quant-section-head">
                 <b>入场条件</b>
@@ -440,6 +473,49 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                 </label>
               </div>
             </div>
+            </>
+            ) : (
+            <div className="quant-section">
+              <div className="quant-section-head">
+                <b>提示词</b>
+                <span className="dim">你写的指令会原样交给模型，它读行情后回 long / short / flat</span>
+              </div>
+              <textarea
+                className="textarea quant-prompt"
+                rows={10}
+                value={prompt}
+                placeholder={
+                  '例如：\n' +
+                  '你是一个顺势交易者。看最近 40 根的价格结构：\n' +
+                  '- 如果价格在最近 20 根的高点附近且成交量放大，做多；\n' +
+                  '- 如果连续三根收在区间下沿之下，做空；\n' +
+                  '- 其他情况不做。\n' +
+                  '不要看具体数字是多少，只看形态。'
+                }
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+              <div className="quant-prompt-hint">
+                回测时行情会被匿名化（币种、日期全部抹掉，价格归一化到 100）。
+                不这么做，模型会在记忆里「认出」某段行情，测出来的就不是策略，是它的记性。
+              </div>
+
+              <div className="row2" style={{ marginTop: 8 }}>
+                <label className="quant-field">
+                  <span>每几根问一次</span>
+                  <input className="input" type="number" min={1} max={200} value={step}
+                    onChange={(e) => setStep(Number(e.target.value) || 20)} />
+                </label>
+                <label className="quant-field">
+                  <span>最多问几次</span>
+                  <input className="input" type="number" min={10} max={600} value={maxCalls}
+                    onChange={(e) => setMaxCalls(Number(e.target.value) || 150)} />
+                </label>
+              </div>
+              <div className="quant-prompt-hint">
+                预计调用 {maxCalls} 次模型。每次都要花钱，也都要时间 —— 先从小的试。
+              </div>
+            </div>
+            )}
 
             <div className="quant-actions">
               <button className="btn quant-btn-primary" disabled={busy !== '' || researching} onClick={() => void runBacktest()}>
@@ -451,6 +527,9 @@ export default function QuantDesk({ canRun, onToast }: Props) {
               <button className="btn quant-btn-ghost" disabled={!result || researching} onClick={() => void saveToLibrary()}>
                 {savedId ? '更新到策略库' : '存进策略库'}
               </button>
+              {savedId && (
+                <button className="btn quant-btn-ghost" onClick={() => void renameCurrent()}>改名</button>
+              )}
               {researching && <button className="btn quant-btn-ghost" onClick={stopResearch}>停下</button>}
             </div>
           </div>

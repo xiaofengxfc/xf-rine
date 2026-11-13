@@ -141,18 +141,9 @@ export function sanitizeStrategy(input: unknown, base: StrategyConfig = STRATEGY
   return {
     enabled: typeof o.enabled === 'boolean' ? o.enabled : base.enabled,
     strategyId: typeof o.strategyId === 'string' ? o.strategyId.trim() : base.strategyId,
-    /**
-     * 合约池由调用方传入，但只接受"服务端算出来的那一份"。
-     *
-     * 路由层按 strategyId 查出策略、算出 [contract] 之后传进来（见 /ai/strategy）。
-     * 这里不能无条件保留 base.contracts —— 之前那么写，导致切策略时新合约被吞掉，
-     * 库里永远是空数组，AI 一轮什么都跑不了。
-     *
-     * 页面传什么不生效：上面那句 contracts 根本没读 o.contracts。
-     */
-    contracts: o.contracts === undefined
-      ? base.contracts
-      : cleanContracts(o.contracts, base.contracts),
+    // 合约池现在可以自由改：策略不再绑死训练币种。
+    // 换币意味着"这条结论换了个参照"，页面上会把上次回测的币和现在要跑的币并排显示。
+    contracts: o.contracts === undefined ? base.contracts : cleanContracts(o.contracts, base.contracts),
     interval: ALLOWED_INTERVALS.has(intervalRaw) ? intervalRaw : base.interval,
     depth,
     leverage: Math.round(clamp(o.leverage ?? base.leverage, 1, 50, base.leverage)),

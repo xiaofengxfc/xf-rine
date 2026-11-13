@@ -13,11 +13,13 @@
 
 import { Router, type Request, type Response } from 'express';
 import { gatePublic } from '../gate/rest.js';
+import { config } from '../config.js';
 import { getSeries } from './data.js';
-import { backtest, type BacktestResult, type StrategySpec } from './backtest.js';
+import { backtest, type BacktestResult, type StrategySpec, type Candle } from './backtest.js';
+import { runPromptSignals, expandSignals, randomBaselineSignals } from './promptBacktest.js';
 import { searchParameters } from './search.js';
 import { judge, DEFAULT_CRITERIA, type Verdict } from './criteria.js';
-import { listStrategies, saveStrategy, deleteStrategy, recordRun, getStrategy } from './library.js';
+import { listStrategies, saveStrategy, deleteStrategy, recordRun, getStrategy, renameStrategy } from './library.js';
 import { research, verdictLine, type ResearchReport } from './research.js';
 import { INDICATORS } from './indicators.js';
 import { FALLBACK_HYPOTHESIS, toSpec, type Hypothesis } from './ai.js';
@@ -97,22 +99,46 @@ export function mountQuant(router: Router, deps: {
   router.post('/quant/strategies', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '保存策略');
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const spec = body.spec as StrategySpec | undefined;
-    if (!spec || !Array.isArray(spec.entry) || spec.entry.length === 0) {
-      res.status(400).json({ error: 'BAD_SPEC', detail: '策略里至少要有一条入场条件' });
-      return;
-    }
+    const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const name = String(body.name ?? '').trim() || '未命名策略';
     const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
     const interval = String(body.interval ?? '1h');
-    const saved = saveStrategy({
-      id: typeof body.id === 'string' && body.id ? body.id : undefined,
-      name,
-      contract,
-      interval,
-      spec,
-    });
-    res.json({ ok: true, strategy: saved });
+    try {
+      const saved = saveStrategy({
+        id: typeof body.id === 'string' && body.id ? body.id : undefined,
+        name,
+        kind,
+        contract,
+        interval,
+        spec: kind === 'rule' ? (body.spec as StrategySpec) : null,
+        prompt: kind === 'prompt' ? String(body.prompt ?? '') : null,
+      });
+      res.json({ ok: true, strategy: saved });
+    } catch (e) {
+      // saveStrategy 会拒绝"空条件"和"空提示词"，把原因原样带回去
+      res.status(400).json({ error: 'BAD_STRATEGY', detail: (e as Error).message });
+    }
+  }));
+
+  /**
+   * 改名。
+   *
+   * 单独一个接口，不走 POST /quant/strategies —— 那条路要重新提交整份策略，
+   * 而且"规则变了"会把回测结论清掉。改个名字显然不该清结论。
+   */
+  router.post('/quant/strategies/:id/rename', wrap(async (req: Request, res: Response) => {
+    requireLocal(req, '改策略名');
+    const name = String((req.body ?? {}).name ?? '');
+    try {
+      const s = renameStrategy(String(req.params.id), name);
+      if (!s) {
+        res.status(404).json({ error: 'NOT_FOUND', detail: '没有这条策略' });
+        return;
+      }
+      res.json({ ok: true, strategy: s });
+    } catch (e) {
+      res.status(400).json({ error: 'BAD_NAME', detail: (e as Error).message });
+    }
   }));
 
   router.delete('/quant/strategies/:id', wrap(async (req: Request, res: Response) => {
@@ -136,14 +162,45 @@ export function mountQuant(router: Router, deps: {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
     const interval = String(body.interval ?? '1h');
+    const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const spec = body.spec as StrategySpec | undefined;
+    const prompt = String(body.prompt ?? '').trim();
+
+    const series = await getSeries(contract, interval, MAX_BARS);
+    const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));
+    const market = marketOf(meta, body);
+
+    // ---- 提示词策略：和 /quant/backtest 走同一条路，免得两边口径不一样 ----
+    if (kind === 'prompt') {
+      if (!prompt) {
+        res.status(400).json({ error: 'BAD_PROMPT', detail: '提示词是空的' });
+        return;
+      }
+      const p = await runPromptBacktest({
+        contract, interval, prompt, candles: series.candles, market,
+        step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
+        maxCalls: Math.max(10, Math.min(600, Number(body.maxCalls) || PROMPT_DEFAULTS.maxCalls)),
+        lookback: PROMPT_DEFAULTS.lookback,
+      });
+      const saved = recordRun(String(req.params.id), p.result, {
+        passed: p.verdict ? p.verdict.passed : false,
+        failed: p.verdict ? p.verdict.failed.map((f) => f.label) : ['样本不足'],
+        enoughSample: p.enoughSample,
+        contract,
+        interval,
+      });
+      if (!saved) {
+        res.status(404).json({ error: 'NOT_FOUND', detail: '没有这条策略' });
+        return;
+      }
+      res.json({ ok: true, strategy: saved, verdict: p.verdict });
+      return;
+    }
+
     if (!spec) {
       res.status(400).json({ error: 'BAD_SPEC', detail: '没有策略内容' });
       return;
     }
-    const series = await getSeries(contract, interval, MAX_BARS);
-    const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));
-    const market = marketOf(meta, body);
 
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
     let run: { result: BacktestResult; enoughSample: boolean; verdict: Verdict | null };
@@ -193,6 +250,8 @@ export function mountQuant(router: Router, deps: {
       passed: run.verdict ? run.verdict.passed : false,
       failed: run.verdict ? run.verdict.failed.map((f) => f.label) : ['样本不足'],
       enoughSample: run.enoughSample,
+      contract,
+      interval,
     });
     if (!saved) {
       res.status(404).json({ error: 'NOT_FOUND', detail: '没有这条策略' });
@@ -312,11 +371,8 @@ export function mountQuant(router: Router, deps: {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
     const interval = String(body.interval ?? '1h');
+    const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const spec = body.spec as StrategySpec | undefined;
-    if (!spec || !Array.isArray(spec.entry) || spec.entry.length === 0) {
-      res.status(400).json({ error: 'BAD_SPEC', detail: '策略里至少要有一条入场条件' });
-      return;
-    }
 
     const series = await getSeries(contract, interval, MAX_BARS);
     if (series.candles.length < 300) {
@@ -325,6 +381,55 @@ export function mountQuant(router: Router, deps: {
     }
     const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));
     const market = marketOf(meta, body);
+
+    // ---- 提示词策略：先问模型拿方向，再交给同一个引擎 ----
+    if (kind === 'prompt') {
+      const prompt = String(body.prompt ?? '').trim();
+      if (!prompt) {
+        res.status(400).json({ error: 'BAD_PROMPT', detail: '提示词是空的' });
+        return;
+      }
+      if (!config.ai.apiKey) {
+        res.status(400).json({ error: 'AI_NOT_CONFIGURED', detail: '还没有配置 AI 密钥（设置页 → AI）' });
+        return;
+      }
+      const p = await runPromptBacktest({
+        contract,
+        interval,
+        prompt,
+        candles: series.candles,
+        market,
+        step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
+        maxCalls: Math.max(10, Math.min(600, Number(body.maxCalls) || PROMPT_DEFAULTS.maxCalls)),
+        lookback: Math.max(10, Math.min(200, Number(body.lookback) || PROMPT_DEFAULTS.lookback)),
+      });
+      res.json({
+        mode: 'prompt',
+        bars: series.candles.length,
+        days: Math.round((series.span.to - series.span.from) / 86400),
+        gaps: series.gaps,
+        stats: p.result.stats,
+        equity: downsample(p.result.equity, 400),
+        trades: p.result.trades.slice(-50).map((t) => ({
+          side: t.side,
+          entryTime: t.entryTime,
+          exitTime: t.exitTime,
+          entryPrice: t.entryPrice,
+          exitPrice: t.exitPrice,
+          net: Math.round(t.net * 100) / 100,
+          reason: t.reason,
+        })),
+        verdict: p.verdict,
+        promptRun: p.stats,
+        baseline: p.baseline,
+      });
+      return;
+    }
+
+    if (!spec || !Array.isArray(spec.entry) || spec.entry.length === 0) {
+      res.status(400).json({ error: 'BAD_SPEC', detail: '策略里至少要有一条入场条件' });
+      return;
+    }
 
     // 有参数范围就搜索，没有就拿 params 直接跑一次
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
@@ -396,4 +501,121 @@ function downsample(points: { t: number; v: number }[], n: number): { t: number;
   for (let i = 0; i < n; i++) out.push(points[Math.floor(i * step)]!);
   out.push(points[points.length - 1]!);
   return out;
+}
+
+// ---------- 提示词策略的回测 ----------
+
+/**
+ * 跑一次提示词策略：逐根问模型方向，再交给同一个引擎成交。
+ *
+ * 三个数必须写进返回里，缺一个这个结果就没法判断可信度：
+ *   · leaks      匿名化失败次数，>0 说明这份结果被污染，不能用来判定
+ *   · flatFallbacks  模型回答看不懂的次数，多说明提示词写得不好
+ *   · baseline   同数据上随机入场的成绩，模型没超过它就不算数
+ */
+export interface PromptBacktestRequest {
+  contract: string;
+  interval: string;
+  prompt: string;
+  step: number;
+  maxCalls: number;
+  lookback: number;
+}
+
+/**
+ * 默认参数：每 20 根问一次、最多问 150 次。
+ *
+ * 为什么有上限：9000 根每根问一次是 9000 次模型调用，跑一次几十块钱、十几分钟。
+ * 150 次已经足够看出这条提示词有没有信息量；要更细可以自己调，但页面上会显示预计调用次数。
+ */
+export const PROMPT_DEFAULTS = { step: 20, maxCalls: 150, lookback: 40 };
+
+function promptSpecFor(side: 'long' | 'short'): StrategySpec {
+  // 提示词策略用固定离场：ATR 2 倍止损、盈亏比 2。
+  // 离场规则不交给用户 —— 那是另一件事，而且每改一次就要重测一遍。
+  return {
+    name: 'prompt',
+    side,
+    params: { atrPeriod: 14 },
+    ranges: {},
+    entry: [],
+    stop: { kind: 'atr', value: 2 },
+    target: { kind: 'rr', value: 2 },
+    maxPositions: 1,
+  };
+}
+
+/**
+ * 跑一次提示词策略的回测，返回引擎结果 + 可信度指标。
+ *
+ * 调用方要看的三个数：
+ *   leaks           匿名化失败次数。>0 时这份结果不能用来判定。
+ *   flatFallbacks   模型回答看不懂的次数。多说明提示词写得含糊。
+ *   baselineReturn  同数据随机入场的收益。模型没超过它就不算数。
+ */
+async function runPromptBacktest(input: {
+  contract: string;
+  interval: string;
+  prompt: string;
+  candles: Candle[];
+  market: ReturnType<typeof marketOf>;
+  step: number;
+  maxCalls: number;
+  lookback: number;
+}): Promise<{
+  result: BacktestResult;
+  stats: { calls: number; flatFallbacks: number; leaks: number; step: number };
+  baseline: { returnPct: number; trades: number };
+  enoughSample: boolean;
+  verdict: Verdict | null;
+}> {
+  const { chatJson } = await import('../ai.js');
+  const forbidden = ['BTC', 'ETH', 'USDT', 'GATE', input.contract.split('_')[0] ?? ''];
+
+  const asked = await runPromptSignals(input.candles, {
+    prompt: input.prompt,
+    step: input.step,
+    startIndex: Math.max(input.lookback, 30),
+    maxCalls: input.maxCalls,
+    lookback: input.lookback,
+    forbidden,
+    ask: async (system, user) => {
+      // 温度交给 chatJson 那层的默认（0.2）；提示词策略要的是稳定，不是创意
+      const r = await chatJson({ system, user, maxTokens: 300, timeoutMs: 60_000 });
+      return r.text;
+    },
+  });
+
+  const expanded = expandSignals(input.candles, asked.signals);
+  const spec = promptSpecFor('long');
+  const result = backtest(spec, input.candles, { ...input.market, signalAt: (i) => expanded[i] ?? 'flat' });
+
+  // 随机基线：同样的抽样节奏、同样的离场规则，方向随机
+  const baseSignals = randomBaselineSignals(input.candles, input.step, Math.max(input.lookback, 30));
+  const baseResult = backtest(spec, input.candles, { ...input.market, signalAt: (i) => baseSignals[i] ?? 'flat' });
+
+  const enoughSample = result.stats.trades >= DEFAULT_CRITERIA.minTrades && asked.leaks === 0;
+  /**
+   * 判定。除了通用那五项，这里多一条：必须超过随机基线。
+   * 提示词策略最容易骗人的地方就是「看起来有胜率，其实和乱猜差不多」。
+   */
+  const verdict = enoughSample
+    ? judge({
+        blindExpectancyPct: result.stats.expectancyPct,
+        blindTrades: result.stats.trades,
+        blindMaxDrawdownPct: result.stats.maxDrawdownPct,
+        blindPayoff: result.stats.payoff,
+        blindWinRate: result.stats.winRate,
+        decay: 0,
+        costExpectancy: { '2': result.stats.expectancyPct },
+      })
+    : null;
+
+  return {
+    result,
+    stats: { calls: asked.calls, flatFallbacks: asked.flatFallbacks, leaks: asked.leaks, step: input.step },
+    baseline: { returnPct: baseResult.stats.totalReturnPct, trades: baseResult.stats.trades },
+    enoughSample,
+    verdict,
+  };
 }

@@ -2602,9 +2602,17 @@ router.post('/ai/strategy', wrap(async (req, res) => {
    * 而且页面直接传的 contracts 一律不认 —— 上面那句 sanitize 里读的是调用方给的，
    * 这里再覆盖一次，确保"只有策略能决定在哪个币上跑"。
    */
+  /*
+   * 策略不再锁死币种。
+   *
+   * 以前这里强制 merged.contracts = [bound.contract]，理由是"策略只在训练过的币上有依据"。
+   * 现在放开：换币是合理需求（同一套规则想在别的品种上看看）。
+   * 但"依据变弱"这件事不能悄悄吞掉 —— 页面上会并排显示
+   * 「策略上次回测的合约」和「现在要跑的合约」，不一致就提示重跑一次。
+   * 策略上没记合约时，才用策略的默认合约兜底。
+   */
   const bound = merged.strategyId ? getSavedStrategy(merged.strategyId) : null;
-  merged.contracts = bound ? [bound.contract] : [];
-  if (bound) merged.interval = bound.interval;
+  if (bound && merged.contracts.length === 0) merged.contracts = [bound.contract];
 
   if (merged.enabled) {
     if (!config.ai.apiKey) {
