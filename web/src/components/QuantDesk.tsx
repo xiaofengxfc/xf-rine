@@ -93,9 +93,8 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   const [kind, setKind] = useState<StrategyKind>('rule');
   /** 提示词策略的指令正文 */
   const [prompt, setPrompt] = useState('');
-  /** 提示词回测的抽样：每几根问一次、最多问几次 */
+  /** 提示词回测的采样间隔：每几根 K 线问一次模型。问多少次由它决定，不另设上限 */
   const [step, setStep] = useState(20);
-  const [maxCalls, setMaxCalls] = useState(150);
 
   const [rounds, setRounds] = useState(3);
   const [researching, setResearching] = useState(false);
@@ -203,7 +202,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
       // 提示词策略要问很多次模型，超时给足；规则策略几百毫秒就完
       const timeout = kind === 'prompt' ? 900_000 : 300_000;
       const r = await jsend<QuantBacktestResult>('POST', '/api/quant/backtest', {
-        contract, interval: tf, capital, spec, kind, prompt, step, maxCalls,
+        contract, interval: tf, capital, spec, kind, prompt, step,
       }, undefined, AbortSignal.timeout(timeout));
       setResult(r);
       onToast('ok',
@@ -214,7 +213,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } catch (e) {
       onToast('err', '回测失败', (e as Error).message);
     } finally { setBusy(''); }
-  }, [contract, tf, capital, spec, kind, prompt, step, maxCalls, onToast]);
+  }, [contract, tf, capital, spec, kind, prompt, step, onToast]);
 
   const startResearch = useCallback(async () => {
     if (!canRun) { onToast('err', '只有本机能跑研究'); return; }
@@ -287,7 +286,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
       // 有回测结果才记结论。没有就只存规则 —— 库里会显示「没跑过回测」
       if (result) {
         await jsend('POST', '/api/quant/strategies/' + saved.strategy.id + '/run', {
-          contract, interval: tf, spec, kind, prompt, step, maxCalls,
+          contract, interval: tf, spec, kind, prompt, step,
         }, undefined, AbortSignal.timeout(900_000));
       }
       await refreshLibrary();
@@ -298,7 +297,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     }
-  }, [result, spec, kind, prompt, step, maxCalls, contract, tf, savedId, onToast, refreshLibrary]);
+  }, [result, spec, kind, prompt, step, contract, tf, savedId, onToast, refreshLibrary]);
 
   const hypotheses = events.filter((e) => e.type === 'hypothesis');
   const roundResults = events.filter((e) => e.type === 'round');
@@ -512,20 +511,16 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                   <input className="input" type="number" min={1} max={200} value={step}
                     onChange={(e) => setStep(Number(e.target.value) || 20)} />
                 </label>
-                <label className="quant-field">
-                  <span>最多问几次（不设上限）</span>
-                  <input className="input" type="number" min={1} value={maxCalls}
-                    onChange={(e) => setMaxCalls(Math.max(1, Math.floor(Number(e.target.value)) || 1))} />
-                </label>
               </div>
               {/*
-                不设上限，但要让人看见代价。cost 与时间成正比，藏在输入框后面是不负责任的。
-                超过 300 次就标黄：那不是「多花一点」，是会跑十几分钟、花掉一顿饭钱。
+                只有一个旋钮：间隔。问多少次完全由它和数据长度决定（9000 根 ÷ 20 = 约 450 次）。
+                以前还有个「最多问几次」的上限，它砍掉的是后段 —— 回测看着覆盖全期，
+                实际后面一多半沿用最后一次判断。那个选项去掉了，代价改成在这里说清楚。
               */}
-              <div className={'quant-prompt-hint' + (maxCalls > 300 ? ' warn' : '')}>
-                {maxCalls > 300
-                  ? '预计调用 ' + maxCalls + ' 次模型 —— 这个量级要跑十几分钟，花费也不低。确认再跑。'
-                  : '预计调用 ' + maxCalls + ' 次模型。每次都要花钱，也都要时间 —— 先从小的试。'}
+              <div className={'quant-prompt-hint' + (step <= 5 ? ' warn' : '')}>
+                {step <= 5
+                  ? '每 ' + step + ' 根问一次。按 9000 根算要问约 ' + Math.round(9000 / step) + ' 次 —— 这很贵，也很慢。'
+                  : '每 ' + step + ' 根问一次。按 9000 根算约 ' + Math.round(9000 / step) + ' 次模型调用；调大间隔可以少花。'}
               </div>
             </div>
             )}

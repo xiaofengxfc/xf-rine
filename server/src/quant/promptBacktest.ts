@@ -21,8 +21,7 @@ export interface PromptRunOpts {
   step: number;
   /** 从第几根开始问（前面留给窗口预热） */
   startIndex: number;
-  /** 最多问多少次。到上限就停，剩下的沿用最后一次判断 */
-  maxCalls: number;
+
   /** 上下文窗口多少根 */
   lookback: number;
   /** 匿名化时要检查的禁用词（币种名、交易所名） */
@@ -50,14 +49,22 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
   let leaks = 0;
   let cancelled = false;
 
-  // 要问的根号：从 startIndex 开始，每 step 根一次
-  const targets: number[] = [];
-  for (let i = opts.startIndex; i < candles.length; i += Math.max(1, opts.step)) targets.push(i);
-  const total = Math.min(targets.length, opts.maxCalls);
+  /**
+   * 采样点：从 startIndex 开始，每 step 根一个，问遍整段历史。
+   *
+   * 这里没有"最多问几次"的上限 —— 问多少次完全由 step 决定：
+   * 9000 根、每 20 根问一次就是约 450 次。想要少花就把间隔调大，
+   * 而不是设一个上限让后半段没人管。以前那个上限砍掉的是后段，
+   * 回测看着覆盖全期，实际后面一多半沿用最后一次判断。
+   */
+  const every = Math.max(1, opts.step);
+  const picked: number[] = [];
+  for (let i = opts.startIndex; i < candles.length; i += every) picked.push(i);
+  const total = picked.length;
 
   for (let k = 0; k < total; k++) {
     if (opts.isCancelled?.()) { cancelled = true; break; }
-    const idx = targets[k]!;
+    const idx = picked[k]!;
     const ctx = buildAnonContext(candles, idx, opts.lookback);
 
     // 先确认没夹带身份信息，再发。发出去再发现就晚了 —— 那段上下文已经进了模型的上下文

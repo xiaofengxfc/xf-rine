@@ -179,7 +179,6 @@ export function mountQuant(router: Router, deps: {
       const p = await runPromptBacktest({
         contract, interval, prompt, candles: series.candles, market,
         step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
-        maxCalls: promptMaxCalls(body.maxCalls),
         lookback: PROMPT_DEFAULTS.lookback,
       });
       const saved = recordRun(String(req.params.id), p.result, {
@@ -400,7 +399,6 @@ export function mountQuant(router: Router, deps: {
         candles: series.candles,
         market,
         step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
-        maxCalls: promptMaxCalls(body.maxCalls),
         lookback: Math.max(10, Math.min(200, Number(body.lookback) || PROMPT_DEFAULTS.lookback)),
       });
       res.json({
@@ -518,7 +516,6 @@ export interface PromptBacktestRequest {
   interval: string;
   prompt: string;
   step: number;
-  maxCalls: number;
   lookback: number;
 }
 
@@ -528,20 +525,8 @@ export interface PromptBacktestRequest {
  * 为什么有上限：9000 根每根问一次是 9000 次模型调用，跑一次几十块钱、十几分钟。
  * 150 次已经足够看出这条提示词有没有信息量；要更细可以自己调，但页面上会显示预计调用次数。
  */
-export const PROMPT_DEFAULTS = { step: 20, maxCalls: 150, lookback: 40 };
+export const PROMPT_DEFAULTS = { step: 20, lookback: 40 };
 
-/**
- * 解析「最多问几次」。
- *
- * 这里不封顶：问多少次是使用者的决定，不该由程序替他拦。
- * 但负数、0、NaN 要拦住 —— 传了 0 却按默认值 150 跑，账单和预期就对不上了，
- * 所以这些当作"没填"处理，其余照单全收。
- */
-function promptMaxCalls(raw: unknown): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return PROMPT_DEFAULTS.maxCalls;
-  return Math.max(1, Math.floor(n));
-}
 
 function promptSpecFor(side: 'long' | 'short'): StrategySpec {
   // 提示词策略用固定离场：ATR 2 倍止损、盈亏比 2。
@@ -573,7 +558,6 @@ async function runPromptBacktest(input: {
   candles: Candle[];
   market: ReturnType<typeof marketOf>;
   step: number;
-  maxCalls: number;
   lookback: number;
 }): Promise<{
   result: BacktestResult;
@@ -589,7 +573,6 @@ async function runPromptBacktest(input: {
     prompt: input.prompt,
     step: input.step,
     startIndex: Math.max(input.lookback, 30),
-    maxCalls: input.maxCalls,
     lookback: input.lookback,
     forbidden,
     ask: async (system, user) => {
