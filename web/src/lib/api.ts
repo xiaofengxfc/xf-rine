@@ -481,3 +481,123 @@ export interface ResearchScan {
   rows: ScanRow[];
   errors: { symbol: string; reason: string }[];
 }
+
+// ---------- AI 交易（/api/ai/*） ----------
+
+/** 策略配置。字段和 server/src/aiStrategy.ts 里那份一一对应，改一边要改另一边 */
+export interface AiStrategy {
+  enabled: boolean;
+  contracts: string[];
+  interval: string;
+  depth: 'quick' | 'standard' | 'deep';
+  leverage: number;
+  marginMode: 'isolated' | 'cross';
+  riskPct: number;
+  maxPositions: number;
+  maxDailyLossPct: number;
+  minConfidence: number;
+  minRR: number;
+  maxMarginPct: number;
+  cooldownMin: number;
+  stopAtrMult: number;
+  liveConfirmed: boolean;
+  dayKey: string;
+  dayStartEquity: number;
+  haltReason: string;
+  haltUntil: number;
+}
+
+export interface AiGateCheck { label: string; ok: boolean; detail: string }
+
+/** 风控闸门的结论。张数、名义价值、保证金、这一笔亏多少都在这里 */
+export interface AiGate {
+  ok: boolean;
+  action: 'long' | 'short' | 'hold';
+  size: number;
+  notional: number;
+  margin: number;
+  riskUsd: number;
+  stopDistance: number;
+  rr: number;
+  binding: string;
+  checks: AiGateCheck[];
+  refusals: string[];
+  warnings: string[];
+}
+
+export interface AiTurn {
+  role: string;
+  label: string;
+  text: string;
+  at: number;
+  ok: boolean;
+  error?: string;
+}
+
+/** 模型给的方案。注意没有张数：张数由闸门算 */
+export interface AiPlan {
+  action: 'long' | 'short' | 'hold';
+  confidence: number;
+  entry: number | null;
+  entryType: 'market' | 'limit';
+  stop: number | null;
+  target: number | null;
+  horizonHours: number;
+  reasoning: string;
+  reasons: string[];
+  conflicts: string[];
+  vetoes: string[];
+  riskNote: string;
+}
+
+export interface AiExecution {
+  ok: boolean;
+  order?: { id: string; status: string; fillPrice: number; size: number };
+  error?: string;
+}
+
+export interface AiDecisionRecord {
+  id: string;
+  at: number;
+  env: 'testnet' | 'live';
+  envLabel: string;
+  contract: string;
+  interval: string;
+  depth: 'quick' | 'standard' | 'deep';
+  model: string;
+  plan: AiPlan;
+  gate: AiGate;
+  exec: AiExecution;
+  turns: AiTurn[];
+  usage: { promptTokens: number; completionTokens: number; calls: number };
+  ms: number;
+  error?: string;
+}
+
+export interface AiRunnerStatus {
+  enabled: boolean;
+  running: boolean;
+  busy: boolean;
+  env: 'testnet' | 'live';
+  envLabel: string;
+  strategy: AiStrategy;
+  nextTickAt: number;
+  lastTickAt: number;
+  lastDecisionAt: number;
+  skip: string;
+  dayLossPct: number;
+  haltReason: string;
+  haltUntil: number;
+  counts: { decisions: number; orders: number; refusals: number; errors: number };
+  positions: number;
+  lastError: string;
+}
+
+export interface AiStrategyPayload {
+  strategy: AiStrategy;
+  status: AiRunnerStatus;
+  path: string;
+  ai: { configured: boolean; baseUrl: string; model: string };
+  liveTrading: boolean;
+}
+

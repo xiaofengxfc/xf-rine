@@ -14,6 +14,7 @@ import ChartPane, { type PricePick } from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
 import TopBar, { type View } from './components/TopBar.tsx';
 import ResearchDesk from './components/ResearchDesk.tsx';
+import AiTradingDesk from './components/AiTradingDesk.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
 import LocalBar from './components/LocalBar.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
@@ -143,7 +144,9 @@ export default function App() {
    * 研究台不依赖交易所，也不碰仓位；交易台那边的一切状态在切换时都留着，
    * 切回来还是原来那个币种、那个周期。
    */
-  const [view, setViewState] = useState<View>(() => (window.location.hash === '#research' ? 'research' : 'desk'));
+  const [view, setViewState] = useState<View>(() => (
+    window.location.hash === '#research' ? 'research' : window.location.hash === '#ai' ? 'ai' : 'desk'
+  ));
   /**
    * 研究台第一次打开之后就一直挂着，切回日内台只是藏起来。
    *
@@ -151,6 +154,8 @@ export default function App() {
    * 回来发现表空了、又得等一遍，正是「两个台不兼容」的那种感觉。
    */
   const [researchMounted, setResearchMounted] = useState(view === 'research');
+  /** AI 交易台也一样：切走再切回来，决策流和表单不该重新拉一遍 */
+  const [aiMounted, setAiMounted] = useState(view === 'ai');
 
   /**
    * 切页面时把 hash 一起改掉。
@@ -161,8 +166,11 @@ export default function App() {
   const setView = useCallback((v: View) => {
     setViewState(v);
     if (v === 'research') setResearchMounted(true);
+    if (v === 'ai') setAiMounted(true);
     try {
-      const url = v === 'research' ? '#research' : window.location.pathname + window.location.search;
+      const url = v === 'research' ? '#research'
+        : v === 'ai' ? '#ai'
+          : window.location.pathname + window.location.search;
       window.history.replaceState(null, '', url);
     } catch { /* 某些 WebView 不让改，忽略 */ }
   }, []);
@@ -256,7 +264,7 @@ export default function App() {
       if (settingsOpen) { e.preventDefault(); setSettingsOpen(false); return; }
       if (railOpen) { e.preventDefault(); setRailOpen(false); return; }
       // 研究台不是浮层，但在手机上按返回直接退出程序太粗：先退回日内台，再按一次才退出
-      if (view === 'research') { e.preventDefault(); setView('desk'); }
+      if (view === 'research' || view === 'ai') { e.preventDefault(); setView('desk'); }
     };
     window.addEventListener('xf-back', onBack);
     return () => window.removeEventListener('xf-back', onBack);
@@ -507,6 +515,27 @@ export default function App() {
    * 真不能用时服务端会回 403，理由照原样显示出来。
    */
   const canPickLocal = config ? config.local !== false : true;
+
+  /**
+   * 顶栏那个绿点要知道 AI 开着没有。
+   *
+   * 这一份只管「有没有开」；真正的策略和决策流由 AI 交易页自己拉。
+   * 在这里再存一份完整策略，两边就变成两份可能不同的真相。
+   */
+  const [aiOn, setAiOn] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      try {
+        const s = await jget<{ status: { enabled: boolean } }>('/api/ai/strategy');
+        if (alive) setAiOn(Boolean(s.status?.enabled));
+      } catch { /* 老服务端没有这个接口：当作没开 */ }
+    };
+    void pull();
+    const t = window.setInterval(() => void pull(), 20_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
+
 
   /**
    * 选 / 换一个本地数据目录。
@@ -1147,7 +1176,7 @@ export default function App() {
 
   return (
     <>
-      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}`}>
+      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}`}>
         <TopBar
           env={config?.env ?? 'live'}
           ticker={ticker}
@@ -1155,6 +1184,7 @@ export default function App() {
           local={localOn && localPick ? { symbol: localPick.symbol, tf: localPick.tf, price: levels?.last ?? 0 } : null}
           view={view}
           onView={setView}
+          aiOn={aiOn}
           priceRound={priceRound}
           interval={interval}
           wsAlive={wsAlive}
@@ -1257,6 +1287,22 @@ export default function App() {
             />
           </main>
         )}
+
+        {aiMounted && (
+          /**
+           * 和上面研究台那块一样用 hidden 藏起来：决策流、表单里填了一半的数、
+           * 展开的角色发言都留在原地，切回来还是刚才那一屏。
+           */
+          <main className="ai-main" hidden={view !== 'ai'}>
+            <AiTradingDesk
+              env={config?.env ?? 'live'}
+              liveTrading={config?.liveTrading ?? false}
+              canEdit={canPickLocal}
+              onToast={push}
+            />
+          </main>
+        )}
+
 
         <aside className="side">
 

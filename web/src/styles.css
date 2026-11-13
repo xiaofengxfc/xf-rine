@@ -1807,6 +1807,156 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 
 .foot { margin: 0; padding: 4px 0 2px; font-size: 10.5px; color: var(--text-2); text-align: center; }
 
+/* ===========================================================================
+   AI 交易台
+   ===========================================================================
+   和日内台的关系和研究台一样：切过去的时候三栏一起让位，状态全留着。
+   颜色一律走变量，浅色模式自己跟着变。
+   ------------------------------------------------------------------------- */
+
+.app.ai-mode { grid-template-columns: minmax(0, 1fr); }
+.app.ai-mode .rail,
+.app.ai-mode .rail-scrim,
+.app.ai-mode .center,
+.app.ai-mode .side,
+.app.ai-mode .rail-btn { display: none; }
+/* AI 台不看盘：顶栏那串币价/标记价/资金费会把窄屏撑爆，解锁交易在这儿也没有去处 */
+.app.ai-mode .ticker-head,
+.app.ai-mode .arm-btn,
+.app.ai-mode .wide-only { display: none; }
+
+.ai-main {
+  grid-column: 1 / -1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 28px;
+}
+.ai-main[hidden] { display: none; }
+
+.ai-desk {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  min-width: 0;
+}
+/* 左边表单定宽、右边决策流吃掉剩下的：决策流里的角色原话是长文本，窄了没法读 */
+.ai-grid {
+  display: grid;
+  grid-template-columns: 336px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+/* 顶栏那块状态 */
+.ai-top { padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+.ai-top-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ai-state { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.ai-state b { font-weight: 650; }
+.ai-top-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ai-top-actions .btn { width: auto; padding: 7px 13px; font-size: 12px; }
+.ai-btn-start { background: var(--up); color: #04120a; }
+.ai-btn-stop { background: var(--down-dim); color: var(--down); border: 1px solid rgba(255, 95, 109, 0.35); }
+.ai-btn-ghost { background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line); }
+.ai-btn-ghost:hover:not(:disabled) { color: var(--text-0); }
+
+.ai-facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11.5px; color: var(--text-1); }
+.ai-facts b { color: var(--text-0); font-family: var(--mono); font-weight: 600; }
+.ai-halt { margin-top: 2px; }
+.ai-hint-line { font-size: 11.5px; color: var(--text-2); }
+
+/* 左栏：策略表单 */
+.ai-form .panel-foot { padding-bottom: 12px; }
+.ai-form-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.ai-form-foot .btn { width: auto; padding: 8px 14px; }
+.ai-live-confirm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--warn);
+  background: rgba(240, 180, 41, 0.08);
+  border: 1px solid rgba(240, 180, 41, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 4px 0 2px;
+}
+.ai-live-confirm input { margin-top: 2px; flex: none; }
+.ai-live-confirm b { color: var(--text-0); }
+
+/* 右栏：决策流 */
+.ai-feed { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ai-rec {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  /* 左侧那条竖线是这一单的结局：绿=发了单，黄=放行但没发出去，灰=闸门拦下 */
+  border-left: 2px solid var(--line);
+}
+.ai-rec.fired { border-left-color: var(--up); }
+.ai-rec.blocked { border-left-color: var(--warn); }
+.ai-rec.refused { border-left-color: var(--text-2); }
+.ai-rec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.ai-rec-head b { font-weight: 650; }
+.ai-rec-time { color: var(--text-2); font-size: 11px; }
+.ai-conf { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--text-1); }
+.ai-rec-prices,
+.ai-rec-size { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--text-1); }
+.ai-rec-size b { color: var(--text-0); font-family: var(--mono); }
+.ai-rec-refuse {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--down);
+  background: var(--down-dim);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+}
+.ai-rec-pass { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 11px; color: var(--text-2); }
+.ai-rec-warn { font-size: 11px; color: var(--warn); }
+.ai-rec-exec { font-size: 11.5px; font-family: var(--mono); }
+.ai-rec-exec.ok { color: var(--up); }
+.ai-rec-exec.no { color: var(--text-2); }
+.ai-rec-why { font-size: 12px; color: var(--text-1); line-height: 1.65; }
+.ai-rec-toggle { align-self: flex-start; font-size: 11.5px; }
+
+.ai-turns {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-top: 1px dashed var(--line);
+  padding-top: 9px;
+}
+.ai-turn-head { display: flex; gap: 6px; align-items: baseline; font-size: 11px; color: var(--text-2); }
+.ai-turn-head b { color: var(--text-1); font-weight: 600; }
+.ai-turn-body { font-size: 12px; line-height: 1.7; color: var(--text-1); white-space: pre-wrap; margin-top: 3px; }
+.ai-turn.bad .ai-turn-body { color: var(--down); }
+
+/* 顶栏页签上的「AI 开着」绿点 */
+.tab-dot.live { background: var(--up); }
+
+@media (max-width: 1100px) {
+  /* 表单和决策流挤成两列会让正文只剩 300 多像素，直接摞起来 */
+  .ai-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 760px) {
+  .ai-main { padding: 10px 10px 24px; }
+  .ai-desk { gap: 8px; }
+  .ai-top { padding: 10px 11px; }
+  .ai-top-actions { width: 100%; }
+  .ai-top-actions .btn { flex: 1 1 46%; }
+  .ai-rec { padding: 9px 10px 10px; }
+}
+
+
 @media (max-width: 1180px) {
   /* 三张卡等宽就够：1024 上每张 ~320，正文都能放下。原来那一版把第三张拉成整行，
      上半页会突然空出一大块 */
