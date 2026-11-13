@@ -55,6 +55,10 @@ server/ai-decisions.jsonl
 # 回测用的历史 K 线缓存（每个合约每种周期几十兆，重拉一次几秒钟）
 server/quant-kline/
 
+# 策略库：每台机器上编出来的策略，不进版本库
+server/quant-strategies.json
+server/quant-strategies.json.tmp
+
 # 引擎目录里的样例数据与评测产物：体积大、和机器上的行情无关，不进版本库
 # （模型、校准表、复权因子在上面已经显式放行）
 sidecar/data/klines/

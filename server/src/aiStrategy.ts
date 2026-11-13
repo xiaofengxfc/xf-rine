@@ -262,7 +262,7 @@ export function checkRunnable(cfg: StrategyConfig, binding: StrategyBinding | nu
   if (binding.passed === null) {
     return {
       ok: false,
-      reason: '这条策略还没跑过回测。先到回测研究台按一次回测，看过判定再说',
+      reason: '这条策略还没跑过回测。先到「策略」页按一次回测，看过判定再说',
     };
   }
   if (!binding.enoughSample) {

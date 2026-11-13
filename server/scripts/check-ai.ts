@@ -343,6 +343,42 @@ async function main(): Promise<void> {
     strat.saveStrategy({ ...base, enabled: true, strategyId: 'st_test' });
   }
 
+  console.log('\\n[11] 策略库：不跑回测也能存，但改规则会清掉旧结论');
+  {
+    const lib = await import('../src/quant/library.js');
+    const spec = {
+      name: 'x', side: 'long' as const, params: { n: 20, atrPeriod: 14 }, ranges: {},
+      entry: [{ left: { name: 'close' }, op: '>' as const, right: { name: 'highest', periodKey: 'n' } }],
+      stop: { kind: 'atr' as const, value: 1.5 }, target: { kind: 'rr' as const, value: 2 }, maxPositions: 1,
+    };
+
+    // 没跑过回测，直接存 —— 这是允许的
+    const s1 = lib.saveStrategy({ name: '草稿', kind: 'rule', contract: 'BTC_USDT', interval: '1h', spec });
+    ok('不跑回测也能存', Boolean(s1.id));
+    ok('存下来的策略没有任何回测结论', s1.lastRun === null, JSON.stringify(s1.lastRun));
+
+    // 改名不该清结论。先造一个结论，再改名
+    const fakeResult = { stats: { expectancyPct: 0.3, trades: 40, payoff: 1.7, maxDrawdownPct: 10 } };
+    const withRun = lib.recordRun(s1.id, fakeResult as never, {
+      passed: true, failed: [], enoughSample: true, contract: 'BTC_USDT', interval: '1h',
+    });
+    ok('结论记上了', withRun?.lastRun?.passed === true);
+    const renamed = lib.renameStrategy(s1.id, '改过名');
+    ok('改名成功', renamed?.name === '改过名', renamed?.name);
+    ok('改名不清回测结论', renamed?.lastRun?.passed === true, JSON.stringify(renamed?.lastRun));
+
+    // 改规则要清结论 —— 那条结论对应的是旧规则
+    const changed = { ...spec, stop: { kind: 'atr' as const, value: 3 } };
+    const s2 = lib.saveStrategy({ id: s1.id, name: '改过名', kind: 'rule', contract: 'BTC_USDT', interval: '1h', spec: changed });
+    ok('改了规则之后旧结论作废', s2.lastRun === null, JSON.stringify(s2.lastRun));
+
+    // 只有名字变了，规则没变，结论要留着
+    lib.recordRun(s1.id, fakeResult as never, { passed: true, failed: [], enoughSample: true, contract: 'BTC_USDT', interval: '1h' });
+    const s3 = lib.saveStrategy({ id: s1.id, name: '再改个名', kind: 'rule', contract: 'BTC_USDT', interval: '1h', spec: changed });
+    ok('只改名字不动规则，结论保留', s3.lastRun?.passed === true, JSON.stringify(s3.lastRun));
+
+    lib.deleteStrategy(s1.id);
+  }
   stub.close();
   console.log('\n通过 ' + passes + ' 项，失败 ' + fails + ' 项');
   if (fails > 0) process.exitCode = 1;

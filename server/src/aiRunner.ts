@@ -269,7 +269,7 @@ export class AiRunner {
         return null;
       }
       if (bound.passed === null) {
-        this.skip = '这条策略还没跑过回测，先到回测研究台跑一次';
+        this.skip = '这条策略还没跑过回测，先到「策略」页跑一次';
         return null;
       }
       if (!bound.enoughSample) {

@@ -174,7 +174,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
     : !binding
       ? '选中的策略不在了，重新选一条'
       : binding.passed === null
-        ? '这条策略还没跑过回测，到回测研究台按一次回测'
+        ? '这条策略还没跑过回测，到「策略」页按一次回测'
         : !binding.enoughSample
           ? '回测样本不够 30 笔，判定不可信，不能开'
           : !binding.passed
@@ -310,7 +310,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
               </select>
               {!payload?.strategies.length && (
                 <div className="hint" style={{ color: 'var(--warn)' }}>
-                  策略库里还是空的。到「回测研究台」编一条、跑回测到达标，再回来选
+                  策略库里还是空的。到「策略」页编一条、跑回测到达标，再回来选
                 </div>
               )}
             </div>

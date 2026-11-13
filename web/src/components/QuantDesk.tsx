@@ -121,7 +121,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     setSavedId('');
     setResult(null);
     setPickerOpen(false);
-    onToast('ok', '新建了一条空策略', '改完条件点「回测」，过了判定再存进策略库');
+    onToast('ok', '新建了一条空策略', '改完条件随时可以存；要拿去下单得先跑一次回测并且达标');
   }, [catalog, onToast]);
 
   /** 打开已有策略：把它整份载入编辑器，再回测一次看现在还成不成立 */
@@ -265,13 +265,15 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   }, [savedId, library, refreshLibrary, onToast]);
 
   /**
-   * 保存到策略库，AI 交易那边就能选到它。
+   * 保存到策略库。
    *
-   * 保存前要求先跑一次回测：库里记的是"这条策略上次回测过没过"，
-   * 没跑过就存进去，AI 交易那边也只能看到"没跑过回测、不能开"，没有意义。
+   * 不要求先跑回测：先把手上的规则存下来，再决定什么时候测，是正常的工作方式。
+   * 库里对没跑过的策略标「没跑过回测」，AI 交易那边会拦（passNull 不能开），
+   * 所以"存得进去"和"能用它下单"是两件事，前者不该设门槛。
+   *
+   * 跑过回测的话顺手把结论记上去；没跑过就只存规则。
    */
   const saveToLibrary = useCallback(async () => {
-    if (!result) { onToast('err', '先跑一次回测', '保存的是这条策略的结论，没结论存了也没用'); return; }
     if (kind === 'rule' && spec.entry.length === 0) { onToast('err', '策略还没有入场条件'); return; }
     if (kind === 'prompt' && !prompt.trim()) { onToast('err', '提示词是空的'); return; }
     const name = window.prompt('给这条策略起个名字：', spec.name || '我的策略');
@@ -282,12 +284,17 @@ export default function QuantDesk({ canRun, onToast }: Props) {
         { id: savedId || undefined, name, kind, contract, interval: tf, spec, prompt },
       );
       setSavedId(saved.strategy.id);
-      // 把这次回测的结论记上去，AI 交易那边才知道它过没过
-      await jsend('POST', '/api/quant/strategies/' + saved.strategy.id + '/run', {
-        contract, interval: tf, spec, kind, prompt, step, maxCalls,
-      }, undefined, AbortSignal.timeout(900_000));
+      // 有回测结果才记结论。没有就只存规则 —— 库里会显示「没跑过回测」
+      if (result) {
+        await jsend('POST', '/api/quant/strategies/' + saved.strategy.id + '/run', {
+          contract, interval: tf, spec, kind, prompt, step, maxCalls,
+        }, undefined, AbortSignal.timeout(900_000));
+      }
       await refreshLibrary();
-      onToast('ok', '已存进策略库', '回 AI 交易页就能选到「' + saved.strategy.name + '」');
+      onToast('ok', '已存进策略库',
+        result
+          ? '回 AI 交易页就能选到「' + saved.strategy.name + '」'
+          : '还没跑回测，AI 交易那边会显示「没跑过」并拦住 —— 想用就先回来跑一次');
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
     }
@@ -303,7 +310,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
           <div>
             <b className="quant-title">策略</b>
             <span className="quant-subtitle">
-              {savedId ? '已存进策略库：改动后记得再存一次' : '编一条规则、回测它、达标了再到 AI 交易页选它'}
+              {savedId ? '已存进策略库：改动后记得再存一次' : '编一条规则，随时可存；要拿去下单得先跑回测并达标'}
             </span>
           </div>
           <div className="quant-top-actions">
@@ -524,7 +531,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
               <button className="btn quant-btn-ghost" disabled={!canRun || busy !== '' || researching} onClick={() => void startResearch()}>
                 {researching ? '研究中…' : '让 AI 提假设'}
               </button>
-              <button className="btn quant-btn-ghost" disabled={!result || researching} onClick={() => void saveToLibrary()}>
+              <button className="btn quant-btn-ghost" disabled={researching} onClick={() => void saveToLibrary()}>
                 {savedId ? '更新到策略库' : '存进策略库'}
               </button>
               {savedId && (
@@ -556,7 +563,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                   </div>
                   <div className="quant-step">
                     <b>3 · 存</b>
-                    <span>判定过了点「存进策略库」，然后到 AI 交易页选它 —— 没达标的策略选不了。</span>
+                    <span>随时可点「存进策略库」。要用它下单，得先跑回测并达标 —— AI 交易那边会拦住没达标的。</span>
                   </div>
                 </div>
                 <div className="quant-note" style={{ marginTop: 10 }}>
