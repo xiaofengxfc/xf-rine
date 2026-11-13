@@ -33,8 +33,13 @@ const LOG_TRIM_AT = 600;
 
 /** 定时器多久看一次。真正决定「多久做一次」的是每个合约的冷却时间 */
 const TICK_MS = 30_000;
-/** 任意两次决策之间至少隔这么久。模型调用是花钱的，别让冷却设成 0 就变成每 30 秒一次 */
-const MIN_GAP_MS = 120_000;
+/**
+ * 判断节奏：策略周期的每一根已收盘 K 线判断一次。
+ *
+ * 以前这里是「任意两次决策至少隔两分钟」+ 一个「冷却（分钟）」的选项。
+ * 两个都去掉了：策略用什么周期，就按那个节奏判断 —— 1h 的策略每小时看一次，
+ * 15m 的每十五分钟看一次。用一个跟周期无关的分钟数去卡，只会让判断时点和 K 线错开。
+ */
 
 export interface ContractMeta {
   multiplier: number;
@@ -88,6 +93,8 @@ export interface RunnerDeps {
     kind: 'rule' | 'prompt';
     spec: import('./quant/backtest.js').StrategySpec | null;
     prompt: string | null;
+    /** 这条策略的风险参数。张数由它算 */
+    risk: import('./aiStrategy.js').RiskLimits;
   } | null;
 
   /**
@@ -196,6 +203,8 @@ export class AiRunner {
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
   private lastDecideAt = new Map<string, number>();
+  /** 每个合约最后一次判断是基于哪根已收盘 K 线。同一根不重复判断 */
+  private lastBarAt = new Map<string, number>();
   private lastDecisionAt = 0;
   private lastTickAt = 0;
   private nextTickAt = 0;
@@ -313,10 +322,6 @@ export class AiRunner {
         this.skip = '熔断中：' + (cfg.haltReason || '日内亏损到上限');
         return null;
       }
-      if (!force && Date.now() - this.lastDecisionAt < MIN_GAP_MS) {
-        this.skip = '距离上一次决策不到两分钟';
-        return null;
-      }
 
       const account = await this.deps.account();
       // 当天第一次拿到账户数据就记下基准；之后不再改，否则跌下去的那一段会被抹平
@@ -352,19 +357,27 @@ export class AiRunner {
        */
       const pool = withDay.contracts.length > 0 ? withDay.contracts : [bound.contract];
       const contract = pool.find((c) => !positions.some((p) => p.contract === c)) ?? pool[0]!;
-      const cooldown = Math.max(1, withDay.cooldownMin) * 60_000;
-      const now = Date.now();
       if (positions.some((p) => p.contract === contract)) {
         this.skip = contract + ' 上已经有仓了';
         return null;
       }
-      if (!force && now - (this.lastDecideAt.get(contract) ?? 0) < cooldown) {
-        const wait = Math.max(1, Math.round((cooldown - (now - (this.lastDecideAt.get(contract) ?? 0))) / 60_000));
-        this.skip = '还在冷却，' + wait + ' 分钟后可以再看';
+
+      /**
+       * 一根 K 线只判断一次。
+       *
+       * 拿「最后一根已收盘 K 线的时间」当刻度，而不是拿"距离上次多久"当刻度：
+       * 后者在服务重启、机器休眠之后会算错，前者永远和行情对齐。
+       * 「立即决策一次」跳过这个判断，方便刚开开关时先看一轮。
+       */
+      const recent = await this.deps.recentCandles(contract, bound.interval, 2).catch(() => [] as { t: number }[]);
+      const lastBar = recent[recent.length - 1]?.t ?? 0;
+      if (!force && lastBar > 0 && this.lastBarAt.get(contract) === lastBar) {
+        this.skip = '这一根 K 线已经判断过了，等下一根收盘';
         return null;
       }
       this.skip = '';
-      this.lastDecideAt.set(contract, now);
+      this.lastDecideAt.set(contract, Date.now());
+      if (lastBar > 0) this.lastBarAt.set(contract, lastBar);
 
       // 周期也跟着策略走：策略是在某个周期上训练的，拿别的周期跑等于换了策略
       const rec = await this.runOne(withDay, contract, bound.interval, bound, account, positions, t0);
@@ -419,6 +432,7 @@ export class AiRunner {
           openPositions: positions.length,
           contractHasPosition: false,
           dayLossPct: this.dayLoss,
+          risk: bound.risk,
         })
       : {
           ok: false, action: call.plan.action, size: 0, notional: 0, margin: 0,

@@ -470,8 +470,8 @@ console.log('\\n[12] 提示词策略：匿名化、解析、外部信号');
   ok('一直 flat 就一笔不做', rFlat.trades.length === 0, String(rFlat.trades.length));
 
   // --- 随机基线：给了种子就确定 ---
-  const a = randomBaselineSignals(rise, 5, 20, 7);
-  const b = randomBaselineSignals(rise, 5, 20, 7);
+  const a = randomBaselineSignals(rise, 20, 7);
+  const b = randomBaselineSignals(rise, 20, 7);
   ok('随机基线和种子绑定，两次一致', JSON.stringify(a) === JSON.stringify(b));
   ok('随机基线不是全 flat', a.some((x) => x !== 'flat'));
 }

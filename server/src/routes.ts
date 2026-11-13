@@ -2505,6 +2505,7 @@ const aiDeps: RunnerDeps = {
       kind: saved.kind,
       spec: saved.spec,
       prompt: saved.prompt,
+      risk: saved.risk,
     };
   },
 

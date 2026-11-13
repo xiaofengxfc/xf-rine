@@ -124,7 +124,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
       if (p) {
         applyPayload(p, false);
         onToast('ok', wantOn ? 'AI 交易已开始' : 'AI 交易已停止',
-          wantOn ? '每隔 ' + p.strategy.cooldownMin + ' 分钟看一个合约' : '定时器已停，不会再发任何请求');
+          wantOn ? '按策略的周期，每根 K 线判断一次' : '定时器已停，不会再发任何请求');
       }
     } catch (e) {
       onToast('err', wantOn ? '没能开始' : '没能停止', (e as Error).message);
@@ -283,7 +283,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
         )}
         {on && status && !status.skip && (
           <div className="ai-hint-line">
-            下一次检查在 {timeStr(status.nextTickAt)}；每个合约隔 {form?.cooldownMin ?? '—'} 分钟看一次，同一时刻只做一个合约。
+            下一次检查在 {timeStr(status.nextTickAt)}；按策略周期，每根收盘 K 线判断一次。
           </div>
         )}
         {on && status?.skip ? <div className="ai-hint-line">这一轮没做：{status.skip}</div> : null}
@@ -426,20 +426,6 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
 
             <div className="row2">
               <div className="field">
-                <label>单笔风险（权益的 %）</label>
-                <input className="input" type="number" step={0.1} min={0.05} max={5} value={form?.riskPct ?? 0.5}
-                  disabled={!canEdit} onChange={(e) => patch({ riskPct: Number(e.target.value) })} />
-                <div className="hint">张数由它反推：这一笔亏到止损，最多亏这么多</div>
-              </div>
-              <div className="field">
-                <label>单笔保证金上限（%）</label>
-                <input className="input" type="number" step={1} min={5} max={100} value={form?.maxMarginPct ?? 40}
-                  disabled={!canEdit} onChange={(e) => patch({ maxMarginPct: Number(e.target.value) })} />
-              </div>
-            </div>
-
-            <div className="row2">
-              <div className="field">
                 <label>最多同时持仓</label>
                 <input className="input" type="number" min={1} max={8} value={form?.maxPositions ?? 2}
                   disabled={!canEdit} onChange={(e) => patch({ maxPositions: Number(e.target.value) })} />
@@ -461,19 +447,6 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
                 <label>最小盈亏比</label>
                 <input className="input" type="number" step={0.1} min={0.5} max={10} value={form?.minRR ?? 1.5}
                   disabled={!canEdit} onChange={(e) => patch({ minRR: Number(e.target.value) })} />
-              </div>
-            </div>
-
-            <div className="row2">
-              <div className="field">
-                <label>冷却（分钟）</label>
-                <input className="input" type="number" min={0} max={720} value={form?.cooldownMin ?? 15}
-                  disabled={!canEdit} onChange={(e) => patch({ cooldownMin: Number(e.target.value) })} />
-              </div>
-              <div className="field">
-                <label>止损下限（ATR 倍数）</label>
-                <input className="input" type="number" step={0.1} min={0.2} max={6} value={form?.stopAtrMult ?? 0.8}
-                  disabled={!canEdit} onChange={(e) => patch({ stopAtrMult: Number(e.target.value) })} />
               </div>
             </div>
 
@@ -504,7 +477,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
               <div className="panel-foot">
                 <div className="empty">
                   还没有决策。<br />
-                  打开上面的开关之后，它每隔 {form?.cooldownMin ?? 15} 分钟挑一个合约跑一次；
+                  打开上面的开关之后，它按策略的周期、每根收盘 K 线判断一次；
                   也可以点「立即决策一次」先看一轮。
                 </div>
               </div>

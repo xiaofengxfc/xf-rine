@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { HOME_DIR } from '../config.js';
 import type { StrategySpec } from './backtest.js';
 import type { BacktestResult } from './backtest.js';
+import { sanitizeRisk } from '../aiStrategy.js';
 
 export const LIBRARY_PATH = join(HOME_DIR, 'quant-strategies.json');
 
@@ -39,6 +40,13 @@ export interface SavedStrategy {
   spec: StrategySpec | null;
   /** 提示词策略：给模型的分析指令。规则策略为 null */
   prompt: string | null;
+  /**
+   * 这一条策略的风险参数。
+   *
+   * 跟策略走，不跟全局开关走：不同策略的止损距离、信号密度不一样，
+   * 用同一套单笔风险去卡它们，要么把稳健的压得太小、要么把激进的放得太大。
+   */
+  risk: { riskPct: number; maxMarginPct: number; stopAtrMult: number };
   createdAt: number;
   updatedAt: number;
   lastRun: {
@@ -78,6 +86,8 @@ function readLibrary(): Library {
       if (s.prompt === undefined) s.prompt = null;
       s.contract = String(s.contract ?? '').trim().toUpperCase();
       s.interval = String(s.interval ?? '').trim();
+      // 老数据没有 risk 字段：补默认值，别让它读出来是 undefined
+      s.risk = sanitizeRisk(s.risk);
       if (s.lastRun) {
         s.lastRun.contract = String(s.lastRun.contract ?? '').trim().toUpperCase();
         s.lastRun.interval = String(s.lastRun.interval ?? '').trim();
@@ -117,6 +127,7 @@ export interface SaveInput {
   interval: string;
   spec?: StrategySpec | null;
   prompt?: string | null;
+  risk?: unknown;
 }
 
 /**
@@ -132,6 +143,7 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
   // 合约名和周期一律去空白：粘进来的字符串常带尾随空格，而它在界面上看不出来
   const contract = String(input.contract ?? '').trim().toUpperCase();
   const interval = String(input.interval ?? '').trim();
+  const risk = sanitizeRisk(input.risk);
   const prompt = kind === 'prompt' ? String(input.prompt ?? '').trim() : null;
   const spec = kind === 'rule' ? (input.spec ?? null) : null;
 
@@ -153,6 +165,7 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
     existing.interval = interval;
     existing.spec = spec;
     existing.prompt = prompt;
+    existing.risk = risk;
     existing.updatedAt = now;
     if (rulesChanged) existing.lastRun = null;
     writeLibrary(lib);
@@ -167,6 +180,7 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
     interval,
     spec,
     prompt,
+    risk,
     createdAt: now,
     updatedAt: now,
     lastRun: null,

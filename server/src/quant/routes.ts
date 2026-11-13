@@ -142,6 +142,8 @@ export function mountQuant(router: Router, deps: {
         interval,
         spec: kind === 'rule' ? (body.spec as StrategySpec) : null,
         prompt: kind === 'prompt' ? String(body.prompt ?? '') : null,
+        // 风险参数跟着策略走，合法化在 library 里做（sanitizeRisk）
+        risk: body.risk,
       });
       res.json({ ok: true, strategy: saved });
     } catch (e) {
@@ -209,7 +211,6 @@ export function mountQuant(router: Router, deps: {
       }
       const p = await runPromptBacktest({
         contract, interval, prompt, candles: series.candles, market,
-        step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
         lookback: PROMPT_DEFAULTS.lookback,
       });
       const saved = recordRun(String(req.params.id), p.result, {
@@ -448,7 +449,6 @@ export function mountQuant(router: Router, deps: {
         prompt,
         candles: series.candles,
         market,
-        step: Math.max(1, Math.min(200, Number(body.step) || PROMPT_DEFAULTS.step)),
         lookback: Math.max(10, Math.min(200, Number(body.lookback) || PROMPT_DEFAULTS.lookback)),
       });
       res.json({
@@ -575,7 +575,7 @@ export interface PromptBacktestRequest {
  * 为什么有上限：9000 根每根问一次是 9000 次模型调用，跑一次几十块钱、十几分钟。
  * 150 次已经足够看出这条提示词有没有信息量；要更细可以自己调，但页面上会显示预计调用次数。
  */
-export const PROMPT_DEFAULTS = { step: 20, lookback: 40 };
+export const PROMPT_DEFAULTS = { lookback: 40 };
 
 
 function promptSpecFor(side: 'long' | 'short'): StrategySpec {
@@ -607,11 +607,10 @@ async function runPromptBacktest(input: {
   prompt: string;
   candles: Candle[];
   market: ReturnType<typeof marketOf>;
-  step: number;
   lookback: number;
 }): Promise<{
   result: BacktestResult;
-  stats: { calls: number; flatFallbacks: number; leaks: number; step: number };
+  stats: { calls: number; flatFallbacks: number; leaks: number };
   baseline: { returnPct: number; trades: number };
   enoughSample: boolean;
   verdict: Verdict | null;
@@ -621,7 +620,6 @@ async function runPromptBacktest(input: {
 
   const asked = await runPromptSignals(input.candles, {
     prompt: input.prompt,
-    step: input.step,
     startIndex: Math.max(input.lookback, 30),
     lookback: input.lookback,
     forbidden,
@@ -637,7 +635,7 @@ async function runPromptBacktest(input: {
   const result = backtest(spec, input.candles, { ...input.market, signalAt: (i) => expanded[i] ?? 'flat' });
 
   // 随机基线：同样的抽样节奏、同样的离场规则，方向随机
-  const baseSignals = randomBaselineSignals(input.candles, input.step, Math.max(input.lookback, 30));
+  const baseSignals = randomBaselineSignals(input.candles, Math.max(input.lookback, 30));
   const baseResult = backtest(spec, input.candles, { ...input.market, signalAt: (i) => baseSignals[i] ?? 'flat' });
 
   const enoughSample = result.stats.trades >= DEFAULT_CRITERIA.minTrades && asked.leaks === 0;
@@ -659,7 +657,7 @@ async function runPromptBacktest(input: {
 
   return {
     result,
-    stats: { calls: asked.calls, flatFallbacks: asked.flatFallbacks, leaks: asked.leaks, step: input.step },
+    stats: { calls: asked.calls, flatFallbacks: asked.flatFallbacks, leaks: asked.leaks },
     baseline: { returnPct: baseResult.stats.totalReturnPct, trades: baseResult.stats.trades },
     enoughSample,
     verdict,

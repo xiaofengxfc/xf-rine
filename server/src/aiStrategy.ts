@@ -28,6 +28,52 @@ export type Depth = 'quick' | 'standard' | 'deep';
 /** 这个周期列表和路由层的 INTERVALS 保持一致：填了别的，K 线那一步就会去问一个不存在的周期 */
 const ALLOWED_INTERVALS = new Set(['5m', '15m', '30m', '1h', '4h']);
 
+/**
+ * 风控闸门用的三个常数。
+ *
+ * 它们以前是页面上的三个输入框（单笔风险 %、单笔保证金上限 %、止损下限 ATR 倍数）。
+ * 现在不做成选项了 —— 但**判定本身留着**，只是值不再由人调：
+ *
+ *   · 单笔风险 0.5%：一笔亏到止损，最多亏掉权益的 0.5%。张数由它反推。
+ *   · 保证金上限 40%：一笔最多占掉可用保证金的四成，和上面那条谁小听谁的。
+ *   · 止损下限 0.8×ATR：比这更近的止损会被一根正常波动扫掉，直接不做。
+ *
+ * 为什么留着判定：张数不是模型给的、也不是随手填的，它必须是「这一笔最多能亏多少」
+ * 反推出来的。把这三个值暴露成输入框，等于让人随手把它调成"能开多大就多大"，
+ * 那一层保护就名存实亡了。
+ */
+export interface RiskLimits {
+  /** 单笔最多亏掉权益的百分之几。张数由它反推 */
+  riskPct: number;
+  /** 单笔最多占用可用保证金的百分之几 —— 和单笔风险一起夹，谁小听谁的 */
+  maxMarginPct: number;
+  /** 止损距离下限（ATR 倍数）。比这更近的止损会被一根正常波动扫掉 */
+  stopAtrMult: number;
+}
+
+/** 没配过时的兜底。新策略从这三个数开始，之后在「策略」页按需改 */
+export const RISK_DEFAULTS: RiskLimits = {
+  riskPct: 0.5,
+  maxMarginPct: 40,
+  stopAtrMult: 0.8,
+};
+
+/**
+ * 收敛一条策略的风险参数。
+ *
+ * 上下限还是要有的：单笔风险填 50%（一次亏掉半个账户）、保证金上限填 100%（一把梭）、
+ * 止损下限填 0.01×ATR（等于没有止损）都不是"偏好"，是把保护关掉。
+ * 越界就夹到边界，页面拿回来的就是真正在用的那份。
+ */
+export function sanitizeRisk(input: unknown): RiskLimits {
+  const o = (input ?? {}) as Record<string, unknown>;
+  return {
+    riskPct: Number(clamp(o.riskPct ?? RISK_DEFAULTS.riskPct, 0.05, 5, RISK_DEFAULTS.riskPct).toFixed(2)),
+    maxMarginPct: Math.round(clamp(o.maxMarginPct ?? RISK_DEFAULTS.maxMarginPct, 5, 100, RISK_DEFAULTS.maxMarginPct)),
+    stopAtrMult: Number(clamp(o.stopAtrMult ?? RISK_DEFAULTS.stopAtrMult, 0.2, 6, RISK_DEFAULTS.stopAtrMult).toFixed(2)),
+  };
+}
+
 export interface StrategyConfig {
   /** 总开关。关掉之后一个决定都不做 —— 停不是「只给建议」，是彻底不做 */
   enabled: boolean;
@@ -51,8 +97,7 @@ export interface StrategyConfig {
   interval: string;
   leverage: number;
   marginMode: 'isolated' | 'cross';
-  /** 单笔最多亏掉权益的百分之几。张数由它反推 */
-  riskPct: number;
+
   /** 最多同时持有几个 AI 开的仓（不区分合约） */
   maxPositions: number;
   /** 当日亏损到权益的百分之几就熔断，停到第二天 */
@@ -61,12 +106,8 @@ export interface StrategyConfig {
   minConfidence: number;
   /** 盈亏比下限：|止盈 - 入场| / |入场 - 止损| */
   minRR: number;
-  /** 单笔最多占用可用保证金的百分之几 —— 和单笔风险一起夹，谁小听谁的 */
-  maxMarginPct: number;
-  /** 同一个合约两次决策之间至少隔多少分钟 */
-  cooldownMin: number;
-  /** 止损距离下限（ATR 倍数）。比这更近的止损会被一根正常波动扫掉 */
-  stopAtrMult: number;
+
+
   /**
    * 实盘确认。
    *
@@ -89,14 +130,10 @@ export const STRATEGY_DEFAULTS: StrategyConfig = {
   interval: '15m',
   leverage: 10,
   marginMode: 'isolated',
-  riskPct: 0.5,
   maxPositions: 2,
   maxDailyLossPct: 3,
   minConfidence: 0.55,
   minRR: 1.5,
-  maxMarginPct: 40,
-  cooldownMin: 15,
-  stopAtrMult: 0.8,
   liveConfirmed: false,
   dayKey: '',
   dayStartEquity: 0,
@@ -145,14 +182,10 @@ export function sanitizeStrategy(input: unknown, base: StrategyConfig = STRATEGY
     interval: ALLOWED_INTERVALS.has(intervalRaw) ? intervalRaw : base.interval,
     leverage: Math.round(clamp(o.leverage ?? base.leverage, 1, 50, base.leverage)),
     marginMode: o.marginMode === 'cross' ? 'cross' : 'isolated',
-    riskPct: Number(clamp(o.riskPct ?? base.riskPct, 0.05, 5, base.riskPct).toFixed(2)),
     maxPositions: Math.round(clamp(o.maxPositions ?? base.maxPositions, 1, 8, base.maxPositions)),
     maxDailyLossPct: Number(clamp(o.maxDailyLossPct ?? base.maxDailyLossPct, 0.5, 50, base.maxDailyLossPct).toFixed(2)),
     minConfidence: Number(clamp(o.minConfidence ?? base.minConfidence, 0.1, 0.99, base.minConfidence).toFixed(2)),
     minRR: Number(clamp(o.minRR ?? base.minRR, 0.5, 10, base.minRR).toFixed(2)),
-    maxMarginPct: Math.round(clamp(o.maxMarginPct ?? base.maxMarginPct, 5, 100, base.maxMarginPct)),
-    cooldownMin: Math.round(clamp(o.cooldownMin ?? base.cooldownMin, 0, 720, base.cooldownMin)),
-    stopAtrMult: Number(clamp(o.stopAtrMult ?? base.stopAtrMult, 0.2, 6, base.stopAtrMult).toFixed(2)),
     liveConfirmed: typeof o.liveConfirmed === 'boolean' ? o.liveConfirmed : base.liveConfirmed,
     dayKey: typeof o.dayKey === 'string' ? o.dayKey : base.dayKey,
     dayStartEquity: Number.isFinite(Number(o.dayStartEquity)) ? Number(o.dayStartEquity) : base.dayStartEquity,
@@ -343,6 +376,8 @@ export interface GateInput {
   contractHasPosition: boolean;
   /** 今天已经亏了百分之几 */
   dayLossPct: number;
+  /** 这条策略的风险参数。不在全局配置里 —— 每条策略各有一份 */
+  risk: RiskLimits;
 }
 
 export interface GateCheck {
@@ -436,8 +471,8 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
     const dist = Math.abs(entry - stop);
     const distAtr = atr > 0 ? dist / atr : 0;
     out.stopDistance = Number(dist.toPrecision(10));
-    if (atr > 0 && distAtr < cfg.stopAtrMult) {
-      add('止损距离', false, '只有 ' + distAtr.toFixed(2) + '×ATR，比设定的 ' + cfg.stopAtrMult + '×ATR 更近 —— 一根正常波动就会先把它扫掉');
+    if (atr > 0 && distAtr < input.risk.stopAtrMult) {
+      add('止损距离', false, '只有 ' + distAtr.toFixed(2) + '×ATR，比下限 ' + input.risk.stopAtrMult + '×ATR 更近 —— 一根正常波动就会先把它扫掉');
     } else {
       add('止损距离', true, distAtr.toFixed(2) + '×ATR');
       if (distAtr > 6) warnings.push('止损有 ' + distAtr.toFixed(1) + '×ATR 那么远，张数会被压得很小');
@@ -488,7 +523,7 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
     return out;
   }
 
-  const riskBudget = equity * (cfg.riskPct / 100);
+  const riskBudget = equity * (input.risk.riskPct / 100);
   const riskPerContract = out.stopDistance * mult;
   const sizeByRisk = riskPerContract > 0 ? Math.floor(riskBudget / riskPerContract) : 0;
 
@@ -498,7 +533,7 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
     warnings.push('这个合约最多 ' + input.info.leverageMax + '×，杠杆按 ' + lev + '× 算');
   }
   const marginPerContract = (last * mult) / lev;
-  const marginBudget = available * (cfg.maxMarginPct / 100);
+  const marginBudget = available * (input.risk.maxMarginPct / 100);
   const sizeByMargin = marginPerContract > 0 ? Math.floor(marginBudget / marginPerContract) : 0;
 
   let size = Math.min(sizeByRisk, sizeByMargin);
@@ -513,7 +548,7 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
       ? size + ' 张（被' + out.binding + '夹住：风险侧 ' + sizeByRisk + ' 张 / 保证金侧 ' + sizeByMargin + ' 张）'
       : '按单笔风险只能开 ' + Math.max(0, size) + ' 张，保证金侧 ' + sizeByMargin + ' 张，'
         + '都低于这个合约的最小下单 ' + minSize + ' 张。两条路都堵着：'
-        + '「单笔风险 × 权益 ÷（止损距离 × 每张币数）」不够一手，要么放宽 riskPct，'
+        + '「单笔风险 ' + input.risk.riskPct + '% × 权益 ÷（止损距离 × 每张币数）」不够一手，'
         + '要么这一笔换成止损更远的形态；保证金侧不够则是可用余额太少',
   );
 

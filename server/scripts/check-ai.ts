@@ -153,7 +153,7 @@ async function main(): Promise<void> {
     // 每张保证金 62000*0.01/10 = 62 → 预算 400 → sizeByMargin = 6
     const g = strat.gatePlan(base, {
       plan: { action: 'long', confidence: 0.72, entry: null, stop: 61650, target: 63400 },
-      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0,
+      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0, risk: strat.RISK_DEFAULTS,
     });
     ok('放行', g.ok, g.refusals.join(' / '));
     eq('张数', g.size, 1);
@@ -161,13 +161,24 @@ async function main(): Promise<void> {
     eq('这一笔的风险敞口', g.riskUsd, 3.5);
     // 止盈 63400、入场 62000（没给入场价就按现价）、止损 61650 → (1400 / 350) = 4
     ok('盈亏比算对了', Math.abs(g.rr - 4) < 0.01, String(g.rr));
+
+    // 同一套行情、同一个方案，只把策略的单笔风险从 0.5% 调到 2%，张数必须跟着变。
+    // 这两个数如果一样，说明风险参数根本没有接进闸门（以前就出过这种问题：
+    // 页面上改了、存了、显示也变了，实际算张数用的还是旧值）
+    const g2 = strat.gatePlan(base, {
+      plan: { action: 'long', confidence: 0.72, entry: null, stop: 61650, target: 63400 },
+      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0,
+      risk: { riskPct: 2, maxMarginPct: 40, stopAtrMult: 0.8 },
+    });
+    ok('单笔风险调到 2% 后张数变大', g2.ok && g2.size > g.size, g.size + ' -> ' + g2.size);
+    eq('2% 时按风险算出来是 5 张', g2.size, 5);
   }
 
   console.log('\n[2] 该拒的一个都不能放');
   const refuse = (name: string, patch: Partial<Parameters<typeof strat.gatePlan>[1]>, want: string) => {
     const input = {
       plan: { action: 'long' as const, confidence: 0.72, entry: null, stop: 61650, target: 63400 },
-      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0,
+      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0, risk: strat.RISK_DEFAULTS,
       ...patch,
     };
     const g = strat.gatePlan(base, input as Parameters<typeof strat.gatePlan>[1]);
@@ -189,7 +200,7 @@ async function main(): Promise<void> {
     const g = strat.gatePlan(base, {
       plan: { action: 'long', confidence: 0.72, entry: null, stop: 61650, target: 63400 },
       market, info: { ...info, sizeMin: 5 }, account: { total: 20, available: 20 },
-      openPositions: 0, contractHasPosition: false, dayLossPct: 0,
+      openPositions: 0, contractHasPosition: false, dayLossPct: 0, risk: strat.RISK_DEFAULTS,
     });
     ok('拒掉', !g.ok);
     ok('说明里带着两个数', g.refusals.join(' ').includes('保证金侧'), g.refusals.join(' / '));
@@ -256,7 +267,9 @@ async function main(): Promise<void> {
     // 关掉开关：必须什么都不做
     strat.saveStrategy({ ...base, enabled: true });
     const off = await runner.tick();
-    ok('两分钟内不会连做两次', off === null && runner.status().skip.includes('两分钟'), runner.status().skip);
+    // 判断节奏改成了「每根已收盘 K 线一次」，不再是「隔几分钟」：
+    // 同一根 K 线上再点一次，必须直接跳过
+    ok('同一根 K 线不重复判断', off === null && runner.status().skip.includes('已经判断过'), runner.status().skip);
     strat.saveStrategy({ ...base, enabled: false });
     const off2 = await runner.tick();
     ok('关掉之后什么都不做', off2 === null && runner.status().skip === '策略没开', runner.status().skip);
@@ -466,6 +479,7 @@ function ruleBinding(over: Record<string, unknown> = {}) {
     contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
     kind: 'rule' as const,
     prompt: null,
+    risk: { riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 },
     spec: {
       name: 'breakout', side: 'long' as const, params: { n: 20, atrPeriod: 14 }, ranges: {},
       entry: [{ left: { name: 'close' }, op: '>' as const, right: { name: 'highest', periodKey: 'n' } }],
@@ -483,6 +497,7 @@ function promptBinding(over: Record<string, unknown> = {}) {
     contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
     kind: 'prompt' as const,
     spec: null,
+    risk: { riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 },
     prompt: '看最近的价格结构，判断下一根更可能往哪边走。',
     ...over,
   };

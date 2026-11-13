@@ -94,8 +94,11 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   const [kind, setKind] = useState<StrategyKind>('rule');
   /** 提示词策略的指令正文 */
   const [prompt, setPrompt] = useState('');
-  /** 提示词回测的采样间隔：每几根 K 线问一次模型。问多少次由它决定，不另设上限 */
-  const [step, setStep] = useState(20);
+  /**
+   * 这条策略的风险参数。跟着策略存，不放在 AI 交易页的全局开关里 ——
+   * 不同策略的止损距离和信号密度不一样，用同一套数字去卡它们不合适。
+   */
+  const [risk, setRisk] = useState({ riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 });
 
   const [rounds, setRounds] = useState(3);
   const [researching, setResearching] = useState(false);
@@ -121,6 +124,11 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     setSavedId('');
     setResult(null);
     setPickerOpen(false);
+    // 类型和提示词也要清：不清的话，「新建」之后切到提示词模式会看到上一条策略的指令，
+    // 一存就变成拿别人的提示词当自己的新策略
+    setKind('rule');
+    setPrompt('');
+    setRisk({ riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 });
     onToast('ok', '新建了一条空策略', '改完条件随时可以存；要拿去下单得先跑一次回测并且达标');
   }, [catalog, onToast]);
 
@@ -130,9 +138,12 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     if (!s) return;
     try {
       const full = await jget<{ strategy: SavedStrategySummary }>('/api/quant/strategies/' + id);
-      if (full.strategy.spec) setSpec(full.strategy.spec);
+      // 规则策略载入它的条件；提示词策略没有条件，给一份空白起点，
+      // 免得切到「规则」时看到的是上一条策略的条件
+      setSpec(full.strategy.spec ?? starterSpec(catalog));
       setKind(full.strategy.kind);
       setPrompt(full.strategy.prompt ?? '');
+      if (full.strategy.risk) setRisk(full.strategy.risk);
       setSavedId(id);
       setContract(s.contract);
       setTf(s.interval);
@@ -142,7 +153,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } catch (e) {
       onToast('err', '载入失败', (e as Error).message);
     }
-  }, [library, onToast]);
+  }, [library, catalog, onToast]);
 
   useEffect(() => {
     void refreshLibrary();
@@ -203,7 +214,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
       // 提示词策略要问很多次模型，超时给足；规则策略几百毫秒就完
       const timeout = kind === 'prompt' ? 900_000 : 300_000;
       const r = await jsend<QuantBacktestResult>('POST', '/api/quant/backtest', {
-        contract, interval: tf, capital, spec, kind, prompt, step,
+        contract, interval: tf, capital, spec, kind, prompt,
       }, undefined, AbortSignal.timeout(timeout));
       setResult(r);
       onToast('ok',
@@ -214,7 +225,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } catch (e) {
       onToast('err', '回测失败', (e as Error).message);
     } finally { setBusy(''); }
-  }, [contract, tf, capital, spec, kind, prompt, step, onToast]);
+  }, [contract, tf, capital, spec, kind, prompt, onToast]);
 
   const startResearch = useCallback(async () => {
     if (!canRun) { onToast('err', '只有本机能跑研究'); return; }
@@ -299,13 +310,13 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     try {
       const saved = await jsend<{ ok: boolean; strategy: { id: string; name: string } }>(
         'POST', '/api/quant/strategies',
-        { id: existing ? existing.id : undefined, name, kind, contract, interval: tf, spec, prompt },
+        { id: existing ? existing.id : undefined, name, kind, contract, interval: tf, spec, prompt, risk },
       );
       setSavedId(saved.strategy.id);
       // 有回测结果才记结论。没有就只存规则 —— 库里会显示「没跑过回测」
       if (result) {
         await jsend('POST', '/api/quant/strategies/' + saved.strategy.id + '/run', {
-          contract, interval: tf, spec, kind, prompt, step,
+          contract, interval: tf, spec, kind, prompt, risk,
         }, undefined, AbortSignal.timeout(900_000));
       }
       await refreshLibrary();
@@ -317,7 +328,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } catch (e) {
       onToast('err', existing ? '更新失败' : '保存失败', (e as Error).message);
     }
-  }, [result, spec, kind, prompt, step, contract, tf, savedId, library, onToast, refreshLibrary]);
+  }, [result, spec, kind, prompt, risk, contract, tf, savedId, library, onToast, refreshLibrary]);
 
   const hypotheses = events.filter((e) => e.type === 'hypothesis');
   const roundResults = events.filter((e) => e.type === 'round');
@@ -524,27 +535,57 @@ export default function QuantDesk({ canRun, onToast }: Props) {
               <div className="quant-prompt-hint">
                 回测时行情会被匿名化（币种、日期全部抹掉，价格归一化到 100）。
                 不这么做，模型会在记忆里「认出」某段行情，测出来的就不是策略，是它的记性。
+                实盘也做同样的匿名化 —— 两边输入不一致的话，回测结论就代表不了实盘。
+              </div>
+              <div className="quant-prompt-hint">
+                离场规则固定：ATR 的 2 倍止损、盈亏比 2 止盈。模型只管方向，不管价位 ——
+                不然同一句话每次回测给出的止损都不一样，参数搜索和判定都无从谈起。
               </div>
 
-              <div className="row2" style={{ marginTop: 8 }}>
-                <label className="quant-field">
-                  <span>每几根问一次</span>
-                  <input className="input" type="number" min={1} max={200} value={step}
-                    onChange={(e) => setStep(Number(e.target.value) || 20)} />
-                </label>
-              </div>
               {/*
-                只有一个旋钮：间隔。问多少次完全由它和数据长度决定（9000 根 ÷ 20 = 约 450 次）。
-                以前还有个「最多问几次」的上限，它砍掉的是后段 —— 回测看着覆盖全期，
-                实际后面一多半沿用最后一次判断。那个选项去掉了，代价改成在这里说清楚。
+                没有"每几根问一次"的选项：策略的周期就是判断节奏，每根已收盘 K 线问一次。
+                抽样会让两次判断之间的那几根沿用旧结论 —— 回测看着覆盖全期，
+                实际隔一段才真正看过一次行情。代价写在下面，写在明处。
               */}
-              <div className={'quant-prompt-hint' + (step <= 5 ? ' warn' : '')}>
-                {step <= 5
-                  ? '每 ' + step + ' 根问一次。按 9000 根算要问约 ' + Math.round(9000 / step) + ' 次 —— 这很贵，也很慢。'
-                  : '每 ' + step + ' 根问一次。按 9000 根算约 ' + Math.round(9000 / step) + ' 次模型调用；调大间隔可以少花。'}
+              <div className="quant-prompt-hint warn">
+                回测按策略周期逐根询问：9000 根就是约 9000 次模型调用，会跑很久、也花钱。
+                想要更少的调用，就选更大的周期，而不是让中间几根沿用旧结论。
               </div>
             </div>
             )}
+
+            {/*
+              风险参数。以前它们在 AI 交易页上，对所有策略共用一套数字；
+              现在跟着策略走 —— 不同策略的止损距离、信号密度不一样，
+              用同一套单笔风险去卡它们，要么把稳健的压得太小，要么把激进的放得太大。
+            */}
+            <div className="quant-section">
+              <div className="quant-section-head">
+                <b>风险</b>
+                <span className="dim">张数由这几个数算出来，模型不参与</span>
+              </div>
+              <div className="row2">
+                <label className="quant-field">
+                  <span>单笔风险（权益的 %）</span>
+                  <input className="input" type="number" step={0.1} min={0.05} max={5} value={risk.riskPct}
+                    onChange={(e) => setRisk({ ...risk, riskPct: Number(e.target.value) })} />
+                </label>
+                <label className="quant-field">
+                  <span>单笔保证金上限（%）</span>
+                  <input className="input" type="number" min={5} max={100} value={risk.maxMarginPct}
+                    onChange={(e) => setRisk({ ...risk, maxMarginPct: Number(e.target.value) })} />
+                </label>
+              </div>
+              <label className="quant-field">
+                <span>止损下限（ATR 倍数）</span>
+                <input className="input" type="number" step={0.1} min={0.2} max={6} value={risk.stopAtrMult}
+                  onChange={(e) => setRisk({ ...risk, stopAtrMult: Number(e.target.value) })} />
+              </label>
+              <div className="quant-note" style={{ marginTop: 6 }}>
+                这一笔亏到止损，最多亏掉权益的 {risk.riskPct}%；同时不超过可用保证金的 {risk.maxMarginPct}%，
+                两者谁小听谁的。止损比 {risk.stopAtrMult}×ATR 还近的单子直接不做。
+              </div>
+            </div>
 
             <div className="quant-actions">
               <button className="btn quant-btn-primary" disabled={busy !== '' || researching} onClick={() => void runBacktest()}>

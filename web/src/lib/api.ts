@@ -494,14 +494,10 @@ export interface AiStrategy {
   interval: string;
   leverage: number;
   marginMode: 'isolated' | 'cross';
-  riskPct: number;
   maxPositions: number;
   maxDailyLossPct: number;
   minConfidence: number;
   minRR: number;
-  maxMarginPct: number;
-  cooldownMin: number;
-  stopAtrMult: number;
   liveConfirmed: boolean;
   dayKey: string;
   dayStartEquity: number;
@@ -753,6 +749,8 @@ export interface SavedStrategySummary {
   spec: QuantSpec | null;
   /** 提示词策略才有 */
   prompt: string | null;
+  /** 这条策略的风险参数：单笔风险、保证金上限、止损下限 */
+  risk: { riskPct: number; maxMarginPct: number; stopAtrMult: number };
   createdAt: number;
   updatedAt: number;
   lastRun: {

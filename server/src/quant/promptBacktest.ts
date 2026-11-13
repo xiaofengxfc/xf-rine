@@ -9,7 +9,9 @@
  *   1. 上下文匿名化（buildAnonContext + assertAnonymous）
  *   2. 每根只看得到自己（引擎结构上不给后面的数据）
  *   3. 调用次数要有上限 —— 9000 根每根问一次模型是不可承受的，
- *      所以按 step 抽样：每 N 根问一次，中间沿用上一次的判断。
+ *      所以每根已收盘的 K 线问一次：策略的周期是什么，就按那个节奏判断一次。
+ *      这里曾经有个「每几根问一次」的抽样选项，它让两次判断之间的那几根沿用旧结论 ——
+ *      回测看着覆盖全期，实际隔一段才真正看过一次行情。做策略不该省这一步。
  */
 
 import type { Candle } from './backtest.js';
@@ -17,8 +19,7 @@ import { buildAnonContext, assertAnonymous, parseVerdict, type Verdict, type Pro
 
 export interface PromptRunOpts {
   prompt: string;
-  /** 每隔几根问一次模型。1 = 每根都问（很贵），10 = 每十根问一次 */
-  step: number;
+
   /** 从第几根开始问（前面留给窗口预热） */
   startIndex: number;
 
@@ -50,16 +51,17 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
   let cancelled = false;
 
   /**
-   * 采样点：从 startIndex 开始，每 step 根一个，问遍整段历史。
+   * 采样点：从 startIndex 开始，**每一根都问**。
    *
-   * 这里没有"最多问几次"的上限 —— 问多少次完全由 step 决定：
-   * 9000 根、每 20 根问一次就是约 450 次。想要少花就把间隔调大，
-   * 而不是设一个上限让后半段没人管。以前那个上限砍掉的是后段，
-   * 回测看着覆盖全期，实际后面一多半沿用最后一次判断。
+   * 策略的周期就是判断的节奏：4h 的策略每 4 小时看一次，1h 的每小时看一次。
+   * 不设"每几根问一次"的抽样 —— 抽样会让两次判断之间的那几根沿用旧结论，
+   * 回测看着覆盖全期，实际隔一段才真正看过一次行情。
+   *
+   * 代价写在明处：9000 根就是 9000 次模型调用。这是选提示词策略的固有成本，
+   * 不是靠一个选项能省掉的 —— 省掉的那部分，正好是回测的可信度。
    */
-  const every = Math.max(1, opts.step);
   const picked: number[] = [];
-  for (let i = opts.startIndex; i < candles.length; i += every) picked.push(i);
+  for (let i = opts.startIndex; i < candles.length; i++) picked.push(i);
   const total = picked.length;
 
   for (let k = 0; k < total; k++) {
@@ -124,7 +126,7 @@ export function expandSignals(candles: Candle[], signals: PromptSignal[]): Verdi
  * 为什么必须有它：模型胜率 52% 看起来不错，但如果在同一段数据上无脑随机做多也是 52%，
  * 那这个 52% 什么也没说明。判定里要求提示词策略必须超过随机基线。
  */
-export function randomBaselineSignals(candles: Candle[], step: number, startIndex: number, seed = 7): Verdict[] {
+export function randomBaselineSignals(candles: Candle[], startIndex: number, seed = 7): Verdict[] {
   const out: Verdict[] = new Array(candles.length).fill('flat');
   let s = seed >>> 0;
   const rnd = () => {
@@ -133,7 +135,7 @@ export function randomBaselineSignals(candles: Candle[], step: number, startInde
   };
   let cur: Verdict = 'flat';
   for (let i = 0; i < candles.length; i++) {
-    if (i >= startIndex && (i - startIndex) % Math.max(1, step) === 0) {
+    if (i >= startIndex) {
       const r = rnd();
       cur = r < 0.45 ? 'long' : r < 0.9 ? 'short' : 'flat';
     }
