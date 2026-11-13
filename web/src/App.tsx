@@ -15,6 +15,7 @@ import ContractRail from './components/ContractRail.tsx';
 import TopBar, { type View } from './components/TopBar.tsx';
 import ResearchDesk from './components/ResearchDesk.tsx';
 import AiTradingDesk from './components/AiTradingDesk.tsx';
+import QuantDesk from './components/QuantDesk.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
 import LocalBar from './components/LocalBar.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
@@ -144,9 +145,10 @@ export default function App() {
    * 研究台不依赖交易所，也不碰仓位；交易台那边的一切状态在切换时都留着，
    * 切回来还是原来那个币种、那个周期。
    */
-  const [view, setViewState] = useState<View>(() => (
-    window.location.hash === '#research' ? 'research' : window.location.hash === '#ai' ? 'ai' : 'desk'
-  ));
+  const [view, setViewState] = useState<View>(() => {
+    const h = window.location.hash;
+    return h === '#research' ? 'research' : h === '#ai' ? 'ai' : h === '#quant' ? 'quant' : 'desk';
+  });
   /**
    * 研究台第一次打开之后就一直挂着，切回日内台只是藏起来。
    *
@@ -156,6 +158,7 @@ export default function App() {
   const [researchMounted, setResearchMounted] = useState(view === 'research');
   /** AI 交易台也一样：切走再切回来，决策流和表单不该重新拉一遍 */
   const [aiMounted, setAiMounted] = useState(view === 'ai');
+  const [quantMounted, setQuantMounted] = useState(view === 'quant');
 
   /**
    * 切页面时把 hash 一起改掉。
@@ -167,10 +170,12 @@ export default function App() {
     setViewState(v);
     if (v === 'research') setResearchMounted(true);
     if (v === 'ai') setAiMounted(true);
+    if (v === 'quant') setQuantMounted(true);
     try {
       const url = v === 'research' ? '#research'
         : v === 'ai' ? '#ai'
-          : window.location.pathname + window.location.search;
+          : v === 'quant' ? '#quant'
+            : window.location.pathname + window.location.search;
       window.history.replaceState(null, '', url);
     } catch { /* 某些 WebView 不让改，忽略 */ }
   }, []);
@@ -264,7 +269,7 @@ export default function App() {
       if (settingsOpen) { e.preventDefault(); setSettingsOpen(false); return; }
       if (railOpen) { e.preventDefault(); setRailOpen(false); return; }
       // 研究台不是浮层，但在手机上按返回直接退出程序太粗：先退回日内台，再按一次才退出
-      if (view === 'research' || view === 'ai') { e.preventDefault(); setView('desk'); }
+      if (view === 'research' || view === 'ai' || view === 'quant') { e.preventDefault(); setView('desk'); }
     };
     window.addEventListener('xf-back', onBack);
     return () => window.removeEventListener('xf-back', onBack);
@@ -1176,7 +1181,7 @@ export default function App() {
 
   return (
     <>
-      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}`}>
+      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
         <TopBar
           env={config?.env ?? 'live'}
           ticker={ticker}
@@ -1303,6 +1308,11 @@ export default function App() {
           </main>
         )}
 
+        {quantMounted && (
+          <main className="ai-main" hidden={view !== 'quant'}>
+            <QuantDesk canRun={canPickLocal} onToast={push} />
+          </main>
+        )}
 
         <aside className="side">
 

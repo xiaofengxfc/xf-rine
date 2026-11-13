@@ -31,7 +31,22 @@ const ALLOWED_INTERVALS = new Set(['5m', '15m', '30m', '1h', '4h']);
 export interface StrategyConfig {
   /** 总开关。关掉之后一个决定都不做 —— 停不是「只给建议」，是彻底不做 */
   enabled: boolean;
-  /** 盯的合约池。轮着来，一轮只做一个，免得一次决策把账单放大八倍 */
+  /**
+   * 用哪条策略。
+   *
+   * 一条策略是在**某一个币种**上训练、回测、判定达标的。拿它在别的币上跑，
+   * 等于用一个从未验证过的东西去下单。所以合约池不是自由填的：它跟着策略走。
+   *
+   * 空串表示还没选策略 —— 这种状态下即使 enabled=true 也不该发单，
+   * 因为"没有策略"意味着"没有经过回测的规则"。
+   */
+  strategyId: string;
+  /**
+   * 实际要盯的合约池。
+   *
+   * 由 strategyId 对应的策略推导出来（见 resolveContracts），不从页面直接收。
+   * 页面上那一格只读，显示的就是这里。
+   */
   contracts: string[];
   interval: string;
   depth: Depth;
@@ -70,7 +85,8 @@ export interface StrategyConfig {
 
 export const STRATEGY_DEFAULTS: StrategyConfig = {
   enabled: false,
-  contracts: ['BTC_USDT', 'ETH_USDT'],
+  strategyId: '',
+  contracts: [],
   interval: '15m',
   depth: 'standard',
   leverage: 10,
@@ -124,7 +140,19 @@ export function sanitizeStrategy(input: unknown, base: StrategyConfig = STRATEGY
   const intervalRaw = String(o.interval ?? base.interval);
   return {
     enabled: typeof o.enabled === 'boolean' ? o.enabled : base.enabled,
-    contracts: o.contracts === undefined ? base.contracts : cleanContracts(o.contracts, base.contracts),
+    strategyId: typeof o.strategyId === 'string' ? o.strategyId.trim() : base.strategyId,
+    /**
+     * 合约池由调用方传入，但只接受"服务端算出来的那一份"。
+     *
+     * 路由层按 strategyId 查出策略、算出 [contract] 之后传进来（见 /ai/strategy）。
+     * 这里不能无条件保留 base.contracts —— 之前那么写，导致切策略时新合约被吞掉，
+     * 库里永远是空数组，AI 一轮什么都跑不了。
+     *
+     * 页面传什么不生效：上面那句 contracts 根本没读 o.contracts。
+     */
+    contracts: o.contracts === undefined
+      ? base.contracts
+      : cleanContracts(o.contracts, base.contracts),
     interval: ALLOWED_INTERVALS.has(intervalRaw) ? intervalRaw : base.interval,
     depth,
     leverage: Math.round(clamp(o.leverage ?? base.leverage, 1, 50, base.leverage)),
@@ -165,6 +193,100 @@ export function saveStrategy(cfg: StrategyConfig): StrategyConfig {
   writeFileSync(tmp, JSON.stringify(clean, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   renameSync(tmp, AI_STRATEGY_PATH);
   return clean;
+}
+
+
+// ---------- 策略 → 合约池 ----------
+
+/**
+ * 一条策略能跑在哪些合约上。
+ *
+ * 答案是：只能是它自己训练时用的那个币种。
+ *
+ * 原因很直接：策略是在某个合约的历史数据上搜索参数、跑样本外判定通过的。
+ * 换一个币，那条"样本外期望 +0.3%/笔"的结论就不再有任何依据 ——
+ * 它测的是 BTC 的走势，不是 ETH 的。把参数搬到别的币上，看起来是在"分散"，
+ * 实际是在用没验证过的东西下单。
+ *
+ * 所以合约池不开放手填：选了哪条策略，池子里就只有那条策略的合约。
+ * 想要多币种，就在回测研究台里分别对每个币训练、各自达标，再分别开。
+ */
+export interface StrategyBinding {
+  /** 策略库里的 id */
+  id: string;
+  /** 策略名，页面显示用 */
+  name: string;
+  /** 它训练时的合约，就是唯一能跑的合约 */
+  contract: string;
+  interval: string;
+  /** 最近一次回测是否达标；null 表示没跑过 */
+  passed: boolean | null;
+  /** 没达标时的原因，页面要显示 */
+  failed: string[];
+  /** 样本量够不够。不够的话 passed 不可信 */
+  enoughSample: boolean;
+}
+
+/**
+ * 把一条已保存的策略收成绑定信息。
+ *
+ * 这个函数不做 IO —— 由调用方把策略读出来递进来，好在 runner / routes 里都能用，
+ * 也方便单独测。
+ */
+export function bindingOf(saved: {
+  id: string;
+  name: string;
+  contract: string;
+  interval: string;
+  lastRun: { passed: boolean; failed: string[]; enoughSample: boolean } | null;
+} | null): StrategyBinding | null {
+  if (!saved) return null;
+  return {
+    id: saved.id,
+    name: saved.name,
+    contract: saved.contract,
+    interval: saved.interval,
+    passed: saved.lastRun ? saved.lastRun.passed : null,
+    failed: saved.lastRun ? saved.lastRun.failed : [],
+    enoughSample: saved.lastRun ? saved.lastRun.enoughSample : false,
+  };
+}
+
+/**
+ * 决定这次能不能跑。
+ *
+ * 返回理由，而不是布尔：页面上要能说清"为什么不能开"，
+ * 否则用户只能看到一个灰掉的按钮。
+ */
+export function checkRunnable(cfg: StrategyConfig, binding: StrategyBinding | null): {
+  ok: boolean;
+  reason: string;
+} {
+  if (!cfg.strategyId) {
+    return { ok: false, reason: '还没选策略。AI 只能按一条回测过的策略下单' };
+  }
+  if (!binding) {
+    return { ok: false, reason: '选中的策略已经不在了（可能被删了），重新选一条' };
+  }
+  if (binding.passed === null) {
+    return {
+      ok: false,
+      reason: '这条策略还没跑过回测。先到回测研究台按一次回测，看过判定再说',
+    };
+  }
+  if (!binding.enoughSample) {
+    return {
+      ok: false,
+      reason: '这条策略的回测样本不够（样本外交易少于 30 笔），判定不可信，不能拿去下单',
+    };
+  }
+  if (!binding.passed) {
+    return {
+      ok: false,
+      reason: '这条策略上次回测没过：' + (binding.failed.join('、') || '原因不明'),
+    };
+  }
+  return { ok: true, reason: '' };
 }
 
 // ---------- 当日亏损 ----------

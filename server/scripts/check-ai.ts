@@ -137,7 +137,7 @@ async function main(): Promise<void> {
   const { AiRunner } = await import('../src/aiRunner.js');
 
   const base = strat.sanitizeStrategy({
-    enabled: true, contracts: ['BTC_USDT'], interval: '15m', depth: 'standard',
+    enabled: true, strategyId: 'st_test', contracts: ['BTC_USDT'], interval: '15m', depth: 'standard',
     leverage: 10, riskPct: 0.5, maxPositions: 2, maxDailyLossPct: 3,
     minConfidence: 0.55, minRR: 1.5, maxMarginPct: 40, cooldownMin: 15, stopAtrMult: 0.8,
   });
@@ -231,6 +231,10 @@ async function main(): Promise<void> {
       contractMeta: async () => info,
       account: async () => account,
       openPositions: async () => [],
+      // 自检里用一条"已达标"的假策略：contract/interval 固定，passed=true
+      binding: (id: string) => (id === 'st_test'
+        ? { contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true }
+        : null),
       execute: async (req) => {
         calls.push(req.contract + ':' + req.side + ':' + req.size + ':' + req.stop + ':' + req.target);
         return { id: 'ord-1', status: 'finished', fillPrice: 62010, size: req.size };
@@ -266,6 +270,10 @@ async function main(): Promise<void> {
       contractMeta: async () => info,
       account: async () => ({ total: 980, available: 980 }),
       openPositions: async () => [],
+      // 自检里用一条"已达标"的假策略：contract/interval 固定，passed=true
+      binding: (id: string) => (id === 'st_test'
+        ? { contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true }
+        : null),
       execute: async () => { throw new Error('不该走到这一步'); },
     });
     const rec = await runner.tick(true);
@@ -282,7 +290,57 @@ async function main(): Promise<void> {
     const { writeFileSync } = await import('node:fs');
     writeFileSync(path, '{ 这不是 json');
     const cfg = strat.loadStrategy();
-    ok('enabled=false 且合约池是默认值', cfg.enabled === false && cfg.contracts.length > 0, JSON.stringify(cfg.contracts));
+    // 合约池现在由策略推导，默认是空的 —— 空池 + enabled=false 才是"什么都没开"的正确状态
+    ok('坏文件读成「什么都没开」', cfg.enabled === false && cfg.contracts.length === 0, JSON.stringify(cfg.contracts));
+    ok('也没有绑定的策略', cfg.strategyId === '', cfg.strategyId);
+  }
+
+  console.log('\n[10] 没有达标的策略就不能下单');
+  {
+    const { checkRunnable, bindingOf } = strat;
+    const cfg = { ...base, enabled: true, strategyId: '' };
+    const none = checkRunnable(cfg, null);
+    ok('没选策略就不让跑', !none.ok && none.reason.includes('还没选策略'), none.reason);
+
+    const missing = checkRunnable({ ...cfg, strategyId: 'gone' }, null);
+    ok('策略被删了也不让跑', !missing.ok && missing.reason.includes('不在了'), missing.reason);
+
+    const noRun = bindingOf({ id: 'a', name: 'A', contract: 'BTC_USDT', interval: '1h', lastRun: null });
+    const r1 = checkRunnable({ ...cfg, strategyId: 'a' }, noRun);
+    ok('没跑过回测不让跑', !r1.ok && r1.reason.includes('还没跑过回测'), r1.reason);
+
+    const thin = bindingOf({ id: 'a', name: 'A', contract: 'BTC_USDT', interval: '1h', lastRun: { passed: true, failed: [], enoughSample: false } });
+    const r2 = checkRunnable({ ...cfg, strategyId: 'a' }, thin);
+    ok('样本不够不让跑', !r2.ok && r2.reason.includes('样本不够'), r2.reason);
+
+    const failed = bindingOf({ id: 'a', name: 'A', contract: 'BTC_USDT', interval: '1h', lastRun: { passed: false, failed: ['样本外期望'], enoughSample: true } });
+    const r3 = checkRunnable({ ...cfg, strategyId: 'a' }, failed);
+    ok('没达标不让跑，并说出原因', !r3.ok && r3.reason.includes('样本外期望'), r3.reason);
+
+    const good = bindingOf({ id: 'a', name: 'A', contract: 'BTC_USDT', interval: '1h', lastRun: { passed: true, failed: [], enoughSample: true } });
+    const r4 = checkRunnable({ ...cfg, strategyId: 'a' }, good);
+    ok('达标的策略可以跑', r4.ok, r4.reason);
+    ok('合约只取策略训练的那个币', good?.contract === 'BTC_USDT', String(good?.contract));
+    ok('周期也取策略的', good?.interval === '1h', String(good?.interval));
+  }
+
+  // 执行器这一层：没选策略时，一轮什么都不做
+  {
+    strat.saveStrategy({ ...base, enabled: true, strategyId: '' });
+    let executed = 0;
+    const runner = new AiRunner({
+      snapshot: async () => fakeSnapshot(),
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => [],
+      binding: () => null,
+      execute: async () => { executed += 1; throw new Error('不该下单'); },
+    });
+    const rec = await runner.tick(true);
+    ok('没选策略时这一轮不决策', rec === null);
+    ok('也没有发出任何单', executed === 0);
+    ok('停下的原因写在 skip 里', runner.status().skip.includes('还没选策略'), runner.status().skip);
+    strat.saveStrategy({ ...base, enabled: true, strategyId: 'st_test' });
   }
 
   stub.close();

@@ -49,7 +49,6 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
   const [payload, setPayload] = useState<AiStrategyPayload | null>(null);
   const [records, setRecords] = useState<AiDecisionRecord[]>([]);
   const [form, setForm] = useState<AiStrategy | null>(null);
-  const [contractsText, setContractsText] = useState('');
   const [busy, setBusy] = useState<Busy>('');
   const [err, setErr] = useState('');
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
@@ -58,7 +57,6 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
     setPayload(p);
     if (!keepForm) {
       setForm(p.strategy);
-      setContractsText(p.strategy.contracts.join(', '));
     }
   }, []);
 
@@ -94,18 +92,18 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
     setForm((f) => (f ? { ...f, ...p } : f));
   }, []);
 
-  /** 把表单 + 合约池文字拼成一次请求。enabled 由调用方决定，不从表单里读 */
+  /**
+   * 把表单拼成一次请求。enabled 由调用方决定，不从表单里读。
+   *
+   * 不再传 contracts：合约池由 strategyId 推导，服务端不认手填的那份。
+   */
   const submit = useCallback(async (enabled: boolean, extra: Record<string, unknown> = {}) => {
     if (!form) return null;
-    const contracts = contractsText
-      .split(/[,，\s]+/)
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean);
-    const body = { ...form, ...extra, contracts, enabled };
+    const body = { ...form, ...extra, enabled };
     const p = await jsend<AiStrategyPayload>('POST', '/api/ai/strategy', body);
     applyPayload(p, true);
     return p;
-  }, [form, contractsText, applyPayload]);
+  }, [form, applyPayload]);
 
   const save = useCallback(async () => {
     setBusy('save');
@@ -139,7 +137,6 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
         'POST', '/api/ai/halt', { halt: withHalt },
       );
       setForm(r.strategy);
-      setContractsText(r.strategy.contracts.join(', '));
       await load();
       await loadDecisions();
       onToast('ok', withHalt ? '已急停并熔断 24 小时' : '已急停', '策略和日志都留着，随时可以再开');
@@ -164,6 +161,26 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
 
   const on = Boolean(payload?.strategy.enabled);
   const halted = Boolean(status && status.haltUntil > Date.now());
+
+  /**
+   * 能不能开。
+   *
+   * 三个条件缺一不可：选了策略、策略跑过回测、回测样本够且达标。
+   * 服务端也会再拦一次（那才是权威），这里只是别让人对着一个能点、点了必然报错的按钮。
+   */
+  const binding = payload?.binding ?? null;
+  const whyNotReady = !form?.strategyId
+    ? '先选一条策略'
+    : !binding
+      ? '选中的策略不在了，重新选一条'
+      : binding.passed === null
+        ? '这条策略还没跑过回测，到回测研究台按一次回测'
+        : !binding.enoughSample
+          ? '回测样本不够 30 笔，判定不可信，不能开'
+          : !binding.passed
+            ? '这条策略上次回测没过：' + (binding.failed.join('、') || '原因不明')
+            : '';
+  const readyToRun = whyNotReady === '';
   const counts = status?.counts ?? { decisions: 0, orders: 0, refusals: 0, errors: 0 };
 
   const title = useMemo(() => {
@@ -209,7 +226,12 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
                 </button>
               </>
             ) : (
-              <button className="btn ai-btn-start" disabled={busy !== '' || !canEdit} onClick={() => void toggle(true)}>
+              <button
+                className="btn ai-btn-start"
+                disabled={busy !== '' || !canEdit || !readyToRun}
+                title={readyToRun ? '开始按这条策略下单' : whyNotReady}
+                onClick={() => void toggle(true)}
+              >
                 {busy === 'toggle' ? '启动中…' : '开始 AI 交易'}
               </button>
             )}
@@ -230,6 +252,11 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
         {halted && (
           <div className="warn-box ai-halt">
             <b>熔断中：</b>{status?.haltReason}（到 {timeStr(status?.haltUntil ?? 0)} 自动解除）
+          </div>
+        )}
+        {!on && !readyToRun && (
+          <div className="ai-hint-line" style={{ color: 'var(--warn)' }}>
+            还不能开始：{whyNotReady}
           </div>
         )}
         {!liveTrading && (
@@ -258,14 +285,57 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
             <span className="dim" style={{ fontSize: 11 }}>{canEdit ? '' : '只读：改策略只认本机'}</span>
           </div>
           <div className="panel-foot">
+            {/*
+              这里原来是"合约池（逗号分隔）"一个输入框。
+
+              现在不让人填了：策略是在某一个币种上训练、回测、判定达标的，
+              换一个币跑，那条"样本外期望为正"的结论就没有任何依据。
+              所以"选策略"和"决定在哪个币上跑"是同一个动作，合成一格。
+            */}
             <div className="field">
-              <label>合约池（逗号分隔，一轮只做一个）</label>
-              <input
-                className="input" value={contractsText} disabled={!canEdit}
-                onChange={(e) => setContractsText(e.target.value)}
-                placeholder="BTC_USDT, ETH_USDT"
-              />
+              <label>策略（决定用哪个币、什么周期）</label>
+              <select
+                className="select"
+                value={form?.strategyId ?? ''}
+                disabled={!canEdit || on}
+                onChange={(e) => patch({ strategyId: e.target.value })}
+              >
+                <option value="">— 选一条过了回测的策略 —</option>
+                {(payload?.strategies ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} · {s.contract} {s.interval}
+                    {s.lastRun ? (s.lastRun.passed ? ' · 已达标' : ' · 未达标') : ' · 没跑过回测'}
+                  </option>
+                ))}
+              </select>
+              {!payload?.strategies.length && (
+                <div className="hint" style={{ color: 'var(--warn)' }}>
+                  策略库里还是空的。到「回测研究台」编一条、跑回测到达标，再回来选
+                </div>
+              )}
             </div>
+
+            {/* 选中的策略长什么样，摆在开关旁边 —— 开之前就该看见上次回测是过还是没过 */}
+            {payload?.binding && (
+              <div className={'quant-binding ' + (payload.binding.passed ? 'ok' : 'bad')}>
+                <div className="quant-binding-head">
+                  <b>{payload.binding.name}</b>
+                  <span className="dim">{payload.binding.contract} · {payload.binding.interval}</span>
+                </div>
+                <div className="quant-binding-note">
+                  {payload.binding.passed === null
+                    ? '还没跑过回测，不能开'
+                    : !payload.binding.enoughSample
+                      ? '回测样本不够 30 笔，判定不可信，不能开'
+                      : payload.binding.passed
+                        ? '上次回测达标'
+                        : '上次回测没过：' + (payload.binding.failed.join('、') || '原因不明')}
+                </div>
+                <div className="quant-binding-note dim">
+                  合约池锁定为 {payload.binding.contract} —— 策略只在它训练过的币上有依据
+                </div>
+              </div>
+            )}
 
             <div className="field">
               <label>周期</label>

@@ -1985,3 +1985,98 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
   .stat-detail { word-break: break-word; }
   .chart-panel .chart-wrap { height: 340px; }
 }
+
+/* ===========================================================================
+   回测研究台
+   =========================================================================== */
+.quant-desk { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 1400px; margin: 0 auto; min-width: 0; }
+.quant-top { padding: 10px 12px; }
+.quant-top-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.quant-field { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; color: var(--text-2); }
+.quant-field .input, .quant-field .select { min-width: 90px; }
+.quant-top-note { font-size: 11px; color: var(--text-2); margin-bottom: 4px; }
+.quant-grid { display: grid; grid-template-columns: 420px minmax(0, 1fr); gap: 10px; align-items: start; min-width: 0; }
+.quant-right { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.quant-section { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.quant-section:last-of-type { border-bottom: 0; }
+.quant-section-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; font-size: 11.5px; }
+.quant-section-head b { font-weight: 650; }
+.quant-section-head .dim { font-size: 10.5px; }
+.quant-section-head .link-btn { margin-left: auto; }
+.quant-cond { display: flex; align-items: center; gap: 4px; margin-bottom: 5px; flex-wrap: wrap; }
+.quant-cond .select { font-size: 11px; padding: 3px 5px; min-width: 0; flex: 1 1 80px; }
+.quant-shift { display: flex; align-items: center; gap: 3px; font-size: 10.5px; }
+.quant-shift .input { width: 44px; padding: 3px 5px; }
+.quant-del { color: var(--text-2); }
+.quant-del:hover { color: var(--down); }
+.quant-params td { padding: 3px 4px; }
+.quant-params .input { width: 58px; padding: 3px 5px; font-size: 11.5px; }
+.quant-inline { display: flex; gap: 5px; }
+.quant-inline .select { flex: 1; }
+.quant-inline .input { width: 72px; }
+.quant-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.quant-actions .btn { width: auto; padding: 8px 13px; font-size: 12px; }
+.quant-btn-primary { background: var(--accent); color: #fff; }
+.quant-btn-ghost { background: var(--bg-3); color: var(--text-1); border: 1px solid var(--line); }
+.quant-btn-ghost:hover:not(:disabled) { color: var(--text-0); }
+.quant-verdict { padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12.5px; margin-bottom: 8px; }
+.quant-verdict.pass { background: var(--up-dim); color: var(--up); }
+.quant-verdict.fail { background: var(--down-dim); color: var(--down); }
+.quant-checks { margin-bottom: 8px; }
+.quant-checks td { font-size: 11.5px; }
+.quant-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }
+.quant-stats > div { background: var(--bg-2); border-radius: var(--radius-sm); padding: 6px 8px; }
+.quant-stats span { display: block; font-size: 10px; color: var(--text-2); }
+.quant-stats b { font-family: var(--mono); font-size: 13px; }
+.quant-note { font-size: 10.5px; color: var(--text-2); line-height: 1.6; }
+.quant-issue { background: var(--down-dim); color: var(--down); border-radius: var(--radius-sm); padding: 7px 9px; font-size: 11.5px; line-height: 1.6; margin: 6px 0; }
+.quant-search-sum { font-size: 11.5px; color: var(--text-1); margin: 6px 0; }
+.quant-best-params { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
+.quant-chip { background: var(--bg-3); border-radius: 4px; padding: 2px 7px; font-family: var(--mono); font-size: 11px; }
+.quant-round-cond { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0; }
+.quant-equity { margin-top: 8px; }
+.quant-equity svg { width: 100%; height: 140px; display: block; }
+.quant-base { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+.quant-eq-up { stroke: var(--up); stroke-width: 1.5; }
+.quant-eq-down { stroke: var(--down); stroke-width: 1.5; }
+.quant-equity-meta { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-1); font-family: var(--mono); }
+.quant-round { border-bottom: 1px solid var(--line-soft); padding: 8px 0; }
+.quant-round:last-child { border-bottom: 0; }
+.quant-round-head { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.quant-round-head .dim { font-size: 11px; line-height: 1.6; }
+.quant-round-result { font-size: 11.5px; color: var(--text-1); }
+.quant-stage { font-size: 11.5px; color: var(--text-2); margin-bottom: 6px; }
+.quant-done { margin-top: 10px; padding: 9px 11px; border-radius: var(--radius-sm); background: var(--bg-2); font-size: 12px; line-height: 1.65; }
+.quant-binding { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 9px; font-size: 11.5px; line-height: 1.6; }
+.quant-binding.ok { border-color: rgba(45, 212, 139, 0.35); background: rgba(45, 212, 139, 0.06); }
+.quant-binding.bad { border-color: rgba(255, 95, 109, 0.3); background: var(--down-dim); }
+.quant-binding-head { display: flex; gap: 8px; align-items: baseline; }
+.quant-binding-note { color: var(--text-1); }
+@media (max-width: 1100px) {
+  .quant-grid { grid-template-columns: minmax(0, 1fr); }
+  .quant-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* 策略页顶部：标题 + 新建/打开 */
+.quant-top-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.quant-title { font-size: 13px; font-weight: 650; margin-right: 8px; }
+.quant-subtitle { font-size: 11px; color: var(--text-2); }
+.quant-top-actions { display: flex; gap: 6px; }
+.quant-top-actions .btn { width: auto; padding: 6px 11px; font-size: 11.5px; }
+.quant-picker { border: 1px solid var(--line); border-radius: var(--radius-sm); margin-bottom: 10px; max-height: 260px; overflow: auto; }
+.quant-picker-row { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; padding: 8px 10px; background: none; border: 0; border-bottom: 1px solid var(--line-soft); color: var(--text-1); font-size: 11.5px; cursor: pointer; }
+.quant-picker-row:last-child { border-bottom: 0; }
+.quant-picker-row:hover { background: var(--bg-2); color: var(--text-0); }
+.quant-picker-row b { color: var(--text-0); font-weight: 600; }
+.quant-picker-row .dim { margin-left: auto; }
+
+/* 右侧空状态：三个步骤 */
+.quant-empty .panel-foot { padding-top: 4px; }
+.quant-steps { display: flex; flex-direction: column; gap: 10px; }
+.quant-step { display: flex; gap: 10px; align-items: baseline; font-size: 11.5px; line-height: 1.65; color: var(--text-1); }
+.quant-step b { flex: none; color: var(--accent); font-weight: 650; min-width: 44px; }
+
+/* 策略列表展开时不该把下面的表单推乱：给它自己的高度，超出滚动 */
+.quant-picker { flex: none; }
+.quant-top-head + .quant-picker + .quant-top-row { margin-top: 10px; }
+.quant-top-row { padding-top: 2px; }

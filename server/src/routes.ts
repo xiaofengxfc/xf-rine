@@ -10,6 +10,9 @@ import type { Direction, Zone } from './sr/types.js';
 import * as sr from './sr/client.js';
 import { SidecarError } from './sr/client.js';
 import { mountResearch } from './sr/research.js';
+import { mountQuant } from './quant/routes.js';
+import { getStrategy as getSavedStrategy, listStrategies as listSavedStrategies } from './quant/library.js';
+import { checkRunnable, bindingOf } from './aiStrategy.js';
 import { newsDigest } from './news.js';
 import { analyze, testConnection, listModels, AiError, type AiSnapshot } from './ai.js';
 import { AiRunner, type ExecRequest, type RunnerDeps } from './aiRunner.js';
@@ -2447,6 +2450,13 @@ mountResearch(router, {
   wrap: (fn) => wrap(fn),
 });
 
+/**
+ * 回测研究台（/quant/*）。
+ * 和研究台同一个理由放在文件末尾：它依赖 requireLocal / wrap，
+ * 提前调用会踩到 const 的暂时性死区。
+ */
+mountQuant(router, { wrap: (fn) => wrap(fn), requireLocal });
+
 // ---------- AI 交易（/ai/strategy、/ai/decide、/ai/decisions、/ai/status） ----------
 
 /**
@@ -2474,6 +2484,24 @@ const aiDeps: RunnerDeps = {
   account: async () => {
     const a = await readAccount();
     return { total: a.total, available: a.available };
+  },
+
+  /**
+   * 把 strategyId 翻成"哪个币、什么周期、过没过回测"。
+   *
+   * 执行器每一轮都要问一次，所以这里只读本地 JSON，不碰交易所 —— 一次读几 KB，
+   * 比让执行器自己缓存一份"策略可能已经被改了"的副本安全。
+   */
+  binding: (strategyId: string) => {
+    const saved = getSavedStrategy(strategyId);
+    if (!saved) return null;
+    return {
+      contract: saved.contract,
+      interval: saved.interval,
+      passed: saved.lastRun ? saved.lastRun.passed : null,
+      failed: saved.lastRun ? saved.lastRun.failed : [],
+      enoughSample: saved.lastRun ? saved.lastRun.enoughSample : false,
+    };
   },
 
   openPositions: async () => {
@@ -2531,6 +2559,14 @@ aiRunner.start();
 const aiPayload = () => ({
   strategy: loadStrategy(),
   status: aiRunner.status(),
+  /** 策略库：页面上的"选策略"格子里要列出来 */
+  strategies: listSavedStrategies(),
+  /** 当前绑定的那条策略的细节（合约、周期、上次回测过没过），没选就是 null */
+  binding: (() => {
+    const id = loadStrategy().strategyId;
+    const s = id ? getSavedStrategy(id) : null;
+    return s ? bindingOf(s) : null;
+  })(),
   path: AI_STRATEGY_PATH,
   ai: { configured: Boolean(config.ai.apiKey), baseUrl: config.ai.baseUrl, model: config.ai.model },
   liveTrading: config.liveTrading,
@@ -2558,13 +2594,35 @@ router.post('/ai/strategy', wrap(async (req, res) => {
   merged.dayKey = current.dayKey;
   merged.dayStartEquity = current.dayStartEquity;
 
+  /**
+   * 合约池和周期**永远**由策略决定，不管开没开。
+   *
+   * 放在 if (enabled) 里面是错的：关着的时候页面显示的空合约池就是真的空，
+   * 打开开关那一次才落定，中间那段显示的状态和实际要跑的不是一回事。
+   * 而且页面直接传的 contracts 一律不认 —— 上面那句 sanitize 里读的是调用方给的，
+   * 这里再覆盖一次，确保"只有策略能决定在哪个币上跑"。
+   */
+  const bound = merged.strategyId ? getSavedStrategy(merged.strategyId) : null;
+  merged.contracts = bound ? [bound.contract] : [];
+  if (bound) merged.interval = bound.interval;
+
   if (merged.enabled) {
     if (!config.ai.apiKey) {
       throw new GateError(400, 'AI_NOT_CONFIGURED', '还没有配置 AI 密钥（设置页 → AI），没有模型就没法决策');
     }
-    if (merged.contracts.length === 0) {
-      throw new GateError(400, 'NO_CONTRACT', '合约池是空的，AI 不知道看哪个合约');
+
+    /**
+     * 必须先选一条过了回测的策略。
+     *
+     * 这一条替代了原来那句「合约池是空的」。区别在于：以前合约池是手填的，
+     * 填什么就能拿什么下单；现在合约池由策略决定，而策略必须先在回测里达标。
+     * "选一条策略"和"决定在哪个币上跑"是同一件事，不该分两步问。
+     */
+    const gate = checkRunnable(merged, bound ? bindingOf(bound) : null);
+    if (!gate.ok) {
+      throw new GateError(400, 'STRATEGY_NOT_READY', gate.reason);
     }
+
     requireKeys();
     if (config.env === 'live' && !merged.liveConfirmed) {
       throw new GateError(

@@ -429,6 +429,48 @@ export async function testConnection(ai?: AiConfig): Promise<{ ok: true; model: 
 }
 
 /**
+ * 给别的模块用的一次 JSON 调用。
+ *
+ * 存在的理由：quant/ai.ts 要问模型提假设，而 postChat 里攒着一堆踩过的坑
+ * （中转站不认 response_format、推理模型把预算花在思考上、超时怎么降级）。
+ * 那些坑再复制一遍到新文件里，迟早两边改不一样。所以开一个口子，
+ * 让新模块走同一条路，而不是各写各的。
+ */
+export async function chatJson(opts: {
+  system: string;
+  user: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  /** 429 时重试几次。研究场景里一轮要调好几次，第一轮就撞限流的概率不低 */
+  retries?: number;
+}): Promise<{ json: Record<string, unknown> | null; text: string; model: string }> {
+  const retries = opts.retries ?? 2;
+  let lastErr: unknown = null;
+  // 重试之间要等一会儿，但这里不睡：把退避交给调用方太散，干脆让每次重试立刻发 ——
+  // 中转站的限流窗口通常就是几十秒，硬等反而把整个研究卡住。
+  // 真正的等待由上层（research 的轮次间隔）负责。
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await postChat({
+        messages: [
+          { role: 'system', content: opts.system },
+          { role: 'user', content: opts.user },
+        ],
+        maxTokens: opts.maxTokens ?? 1200,
+        jsonMode: true,
+        timeoutMs: opts.timeoutMs ?? 90_000,
+      });
+      return { json: extractJson(res.content), text: res.content, model: res.model };
+    } catch (e) {
+      lastErr = e;
+      const isRate = e instanceof AiError && (e.status === 429 || e.label === 'AI_RATE_LIMIT');
+      if (!isRate || attempt === retries) throw e;
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * 每点一次就真问一次模型。
  * 以前这里按「币种:周期」缓存十分钟，refresh 为假就直接回缓存。
  * 结果人刷新页面点「开始分析」，拿到的是上一次的结论，界面上还写着同一个时间，

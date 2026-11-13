@@ -487,6 +487,9 @@ export interface ResearchScan {
 /** 策略配置。字段和 server/src/aiStrategy.ts 里那份一一对应，改一边要改另一边 */
 export interface AiStrategy {
   enabled: boolean;
+  /** 用哪条策略。空白表示还没选，不能开 */
+  strategyId: string;
+  /** 由策略推导，页面只读 */
   contracts: string[];
   interval: string;
   depth: 'quick' | 'standard' | 'deep';
@@ -596,8 +599,169 @@ export interface AiRunnerStatus {
 export interface AiStrategyPayload {
   strategy: AiStrategy;
   status: AiRunnerStatus;
+  /** 策略库：选择器用 */
+  strategies: SavedStrategySummary[];
+  /** 当前绑定那条策略的细节；没选是 null */
+  binding: StrategyBinding | null;
   path: string;
   ai: { configured: boolean; baseUrl: string; model: string };
   liveTrading: boolean;
 }
 
+
+// ---------- 回测研究台（/api/quant/*） ----------
+
+export interface QuantIndicator {
+  id: string;
+  label: string;
+  params: { name: string; label: string; def: number }[];
+}
+
+export interface QuantCriteria {
+  minTrades: number;
+  requirePositiveExpectancy: boolean;
+  maxDrawdownPct: number;
+  costStressMultiple: number;
+  maxDecayPct: number;
+}
+
+export interface QuantCatalog {
+  indicators: QuantIndicator[];
+  criteria: QuantCriteria;
+  fallback: {
+    thesis: string;
+    side: 'long' | 'short';
+    params: Record<string, number>;
+    ranges: Record<string, [number, number, number]>;
+    entry: QuantCondition[];
+    stop: { kind: 'atr' | 'pct'; value: number };
+    target: { kind: 'atr' | 'pct' | 'rr'; value: number };
+    whatToValidate: string;
+    origin: 'first' | 'revise';
+  };
+  limits: { maxRounds: number; maxBars: number };
+}
+
+export interface QuantIndicatorRef {
+  name: string;
+  periodKey?: string;
+}
+
+export interface QuantCondition {
+  left: QuantIndicatorRef;
+  op: '>' | '<' | '>=' | '<=' | 'crossUp' | 'crossDown';
+  right: QuantIndicatorRef;
+  rightParam?: string;
+  shift?: number;
+  rightShift?: number;
+}
+
+export interface QuantSpec {
+  name: string;
+  side: 'long' | 'short';
+  params: Record<string, number>;
+  ranges: Record<string, [number, number, number]>;
+  entry: QuantCondition[];
+  stop: { kind: 'atr' | 'pct'; value: number };
+  target: { kind: 'atr' | 'pct' | 'rr'; value: number };
+  maxPositions: number;
+}
+
+export interface QuantCriterionResult {
+  key: string;
+  label: string;
+  pass: boolean;
+  value: string;
+  threshold: string;
+  why: string;
+}
+
+export interface QuantVerdict {
+  passed: boolean;
+  failed: QuantCriterionResult[];
+  checks: QuantCriterionResult[];
+}
+
+export interface QuantBest {
+  params: Record<string, number>;
+  blindExpectancyPct: number;
+  blindTrades: number;
+  blindPayoff: number;
+  blindWinRate: number;
+  blindMaxDrawdownPct: number;
+  blindReturnPct: number;
+  costExpectancy: Record<string, number>;
+  decay: number;
+}
+
+export interface QuantRound {
+  round: number;
+  semanticIssues: { code: string; message: string }[] | null;
+  candidates: number;
+  enoughSample: number;
+  best: QuantBest | null;
+  verdict: QuantVerdict | null;
+}
+
+/** 研究流里的每一条事件 */
+export type QuantEvent =
+  | { type: 'stage'; stage: string; message: string }
+  | { type: 'data'; bars: number; days: number; gaps: number; from: number; to: number }
+  | { type: 'hypothesis'; round: number; thesis: string; entry: { left: string; op: string; right: string; shift: number }[]; params: Record<string, number> }
+  | ({ type: 'round' } & QuantRound)
+  | { type: 'done'; verdict: string; report: unknown }
+  | { type: 'error'; message: string };
+
+export interface QuantTradeRow {
+  side: string; entryTime: number; exitTime: number;
+  entryPrice: number; exitPrice: number; net: number; reason: string;
+}
+
+export interface QuantBacktestResult {
+  mode: 'single' | 'search';
+  bars: number;
+  days: number;
+  gaps: number;
+  stats?: {
+    trades: number; wins: number; losses: number; winRate: number; payoff: number;
+    expectancy: number; expectancyPct: number; totalReturnPct: number;
+    maxDrawdownPct: number; profitFactor: number; maxLosingStreak: number;
+    totalFee: number; totalFunding: number;
+  };
+  equity?: { t: number; v: number }[];
+  trades?: QuantTradeRow[];
+  candidates?: number;
+  enoughSample?: number;
+  best?: QuantBest | null;
+  verdict: QuantVerdict | null;
+}
+
+export interface SavedStrategySummary {
+  id: string;
+  name: string;
+  contract: string;
+  interval: string;
+  createdAt: number;
+  updatedAt: number;
+  lastRun: {
+    at: number;
+    passed: boolean;
+    failed: string[];
+    expectancyPct: number;
+    trades: number;
+    payoff: number;
+    maxDrawdownPct: number;
+    enoughSample: boolean;
+  } | null;
+}
+
+/** AI 交易绑定的策略：合约池由它决定，不是手填的 */
+export interface StrategyBinding {
+  id: string;
+  name: string;
+  contract: string;
+  interval: string;
+  passed: boolean | null;
+  failed: string[];
+  enoughSample: boolean;
+}

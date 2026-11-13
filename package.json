@@ -17,6 +17,8 @@
     "check:data": "pnpm -F server exec tsx scripts/check-data.ts",
     "check:pick": "pnpm -F server exec tsx scripts/check-pick.ts",
     "check:ai": "pnpm -F server exec tsx scripts/check-ai.ts",
+    "check:quant": "pnpm -F server exec tsx scripts/check-quant.ts",
+    "research": "pnpm -F server exec tsx scripts/research.ts",
     "pack:sidecar": "node sidecar/tools/build-exe.mjs",
     "pack:win": "pnpm -F web build && node sidecar/tools/build-exe.mjs && pnpm --filter ./desktop dist",
     "pack:android": "pnpm -F web build && pnpm --filter ./mobile apk"

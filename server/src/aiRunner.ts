@@ -71,6 +71,13 @@ export interface RunnerDeps {
   account(): Promise<{ total: number; available: number }>;
   openPositions(): Promise<{ contract: string; direction: 'long' | 'short'; size: number }[]>;
   execute(req: ExecRequest): Promise<ExecutedOrder>;
+  /**
+   * 当前绑定的策略。
+   *
+   * 执行器自己不读策略库：它要知道的是"这一轮按哪条策略、在哪个币上跑"，
+   * 而这件事由路由层统一裁决（策略没了、没达标，都在那里拦）。
+   */
+  binding(strategyId: string): { contract: string; interval: string; passed: boolean | null; failed: string[]; enoughSample: boolean } | null;
 }
 
 export interface DecisionRecord {
@@ -244,6 +251,36 @@ export class AiRunner {
         this.skip = '策略没开';
         return null;
       }
+
+      /**
+       * 策略必须存在、跑过回测、样本够、而且达标。
+       *
+       * 这一道不能松：AI 下单依据的是"这条规则在这个币上验证过"，
+       * 任何一条不满足，下单就变成拍脑袋。拦下来时把原因写进 skip，
+       * 页面上直接显示，而不是一个沉默的停摆。
+       */
+      if (!cfg.strategyId) {
+        this.skip = '还没选策略';
+        return null;
+      }
+      const bound = this.deps.binding(cfg.strategyId);
+      if (!bound) {
+        this.skip = '选中的策略已经不在了，重新选一条';
+        return null;
+      }
+      if (bound.passed === null) {
+        this.skip = '这条策略还没跑过回测，先到回测研究台跑一次';
+        return null;
+      }
+      if (!bound.enoughSample) {
+        this.skip = '回测样本不够，判定不可信，不能下单';
+        return null;
+      }
+      if (!bound.passed) {
+        this.skip = '这条策略上次回测没过：' + (bound.failed.join('、') || '原因不明');
+        return null;
+      }
+
       if (cfg.haltUntil > Date.now()) {
         this.skip = '熔断中：' + (cfg.haltReason || '日内亏损到上限');
         return null;
@@ -278,27 +315,29 @@ export class AiRunner {
         return null;
       }
 
-      // 挑一个合约：没有持仓、过了冷却、最久没被看过的那个
+      /**
+       * 合约池 = 这条策略训练时用的那个币。
+       *
+       * 不再是"用户填一串合约、轮着做"。策略是在某一个币上搜索参数、样本外判定通过的，
+       * 换币就没有依据了。想多做几个币，就各自训练各自开的策略。
+       */
+      const contract = bound.contract;
       const cooldown = Math.max(1, withDay.cooldownMin) * 60_000;
       const now = Date.now();
-      const free = withDay.contracts.filter((c) => !positions.some((p) => p.contract === c));
-      if (free.length === 0) {
-        this.skip = '合约池里的每个合约都有仓了';
+      if (positions.some((p) => p.contract === contract)) {
+        this.skip = contract + ' 上已经有仓了';
         return null;
       }
-      const ready = free
-        .filter((c) => force || now - (this.lastDecideAt.get(c) ?? 0) >= cooldown)
-        .sort((a, b) => (this.lastDecideAt.get(a) ?? 0) - (this.lastDecideAt.get(b) ?? 0));
-      if (ready.length === 0) {
-        const nextAt = Math.min(...free.map((c) => (this.lastDecideAt.get(c) ?? 0) + cooldown));
-        this.skip = '都在冷却，最早 ' + Math.max(1, Math.round((nextAt - now) / 60_000)) + ' 分钟后可以再看';
+      if (!force && now - (this.lastDecideAt.get(contract) ?? 0) < cooldown) {
+        const wait = Math.max(1, Math.round((cooldown - (now - (this.lastDecideAt.get(contract) ?? 0))) / 60_000));
+        this.skip = '还在冷却，' + wait + ' 分钟后可以再看';
         return null;
       }
-      const contract = ready[0]!;
       this.skip = '';
       this.lastDecideAt.set(contract, now);
 
-      const rec = await this.runOne(withDay, contract, account, positions, t0);
+      // 周期也跟着策略走：策略是在某个周期上训练的，拿别的周期跑等于换了策略
+      const rec = await this.runOne(withDay, contract, bound.interval, account, positions, t0);
       // 这一轮跑通了，把上一次的错清掉 —— 否则那一行会一直挂着，像是「现在还在出错」
       this.lastError = '';
       return rec;
@@ -317,11 +356,12 @@ export class AiRunner {
   private async runOne(
     cfg: StrategyConfig,
     contract: string,
+    interval: string,
     account: { total: number; available: number },
     positions: { contract: string }[],
     t0: number,
   ): Promise<DecisionRecord> {
-    const snapshot = await this.deps.snapshot(contract, cfg.interval);
+    const snapshot = await this.deps.snapshot(contract, interval);
     const decision: AiDecision = await decide(snapshot, { depth: cfg.depth });
 
     const meta = await this.deps.contractMeta(contract).catch(() => null);
@@ -348,7 +388,7 @@ export class AiRunner {
       env: config.env,
       envLabel: envLabel(),
       contract,
-      interval: cfg.interval,
+      interval,
       depth: cfg.depth,
       model: decision.model,
       plan: decision.plan,

@@ -3,7 +3,7 @@ import type { Ticker } from '../lib/api.ts';
 import { toggleTheme, useTheme } from '../lib/theme.ts';
 
 /** 三个页面：日内台（看盘下单）、研究台（本地数据算关键位）、AI 交易（策略与决策流） */
-export type View = 'desk' | 'research' | 'ai';
+export type View = 'desk' | 'research' | 'ai' | 'quant';
 
 interface Props {
   ticker: Ticker | undefined;
@@ -57,6 +57,12 @@ export default function TopBar({
           {/* 开着的时候点一个绿点：切到别的页面也别忘了它正在自己下单 */}
           {aiOn && <i className="tab-dot live" />}
         </button>
+        {/*
+          「策略」而不是「回测研究台」：这一页最常做的事是编策略和回测，
+          四个字的名字在窄屏上会被挤掉，而且"回测研究台"听起来是看报告的地方，
+          不是一个能编辑东西的入口。
+        */}
+        <button className={view === 'quant' ? 'on' : ''} onClick={() => onView('quant')}>策略</button>
       </div>
 
       {local ? (
