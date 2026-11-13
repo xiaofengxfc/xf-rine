@@ -83,6 +83,18 @@ export interface StrategySpec {
 
 export interface BacktestOpts {
   /**
+   * 外部指标：由调用方算好、引擎直接按名字取。
+   *
+   * 现在用来喂「最近支撑价 / 最近阻力价」—— 它们来自关键位引擎，不是从 K 线算出来的，
+   * 但条件表达式要能像用 EMA、RSI 那样用它们（比如「现价离最近阻力不到 0.5×ATR 就不做多」）。
+   * 名字和内置指标共用一套命名空间，撞名以内置的为准。
+   */
+  /**
+   * 签名是 (下标, 这根 K 线)。第二参数不能省：参数搜索会把 K 线切成训练/验证/盲测三段，
+   * 段内下标和原始下标对不上，只靠下标取值会整体错位。调用方按 K 线时间查表即可。
+   */
+  virtual?: Record<string, (i: number, candle: Candle) => number>;
+  /**
    * 外部信号：第 i 根收盘后该做多 / 做空 / 不做。
    *
    * 给了这个，引擎就不再算 spec.entry 的条件，方向完全由它决定 ——
@@ -180,13 +192,26 @@ export interface IndicatorSeries {
 export class IndicatorCache {
   private candles: Candle[];
   private series = new Map<string, IndicatorSeries>();
+  private virtual: Record<string, (i: number, candle: Candle) => number>;
 
-  constructor(candles: Candle[]) {
+  constructor(candles: Candle[], virtual: Record<string, (i: number, candle: Candle) => number> = {}) {
     this.candles = candles;
+    this.virtual = virtual;
   }
 
   /** 按引用取指标：周期从 params[periodKey] 里读，不同实例互不干扰 */
   get(ref: IndicatorRef, params: Params): IndicatorSeries {
+    // 外部指标优先：它由调用方算好，没有"周期"这个概念
+    const virt = this.virtual[ref.name];
+    if (virt) {
+      return {
+        at: (i: number) => {
+          const c = this.candles[i];
+          return c ? virt(i, c) : NaN;
+        },
+      };
+    }
+
     const periodKey = ref.periodKey ?? 'period';
     const local: Params = { ...params };
     // 把"这个实例的周期"放到标准键上，indicators.ts 那层不用知道调用方怎么命名的
@@ -256,8 +281,11 @@ export function conditionHolds(c: Condition, i: number, cache: IndicatorCache, p
 export function warmupOf(spec: StrategySpec): number {
   let need = 0;
   let needPrevBar = false;
+  /** 外部指标（关键位那种）自带时间线，不需要按 K 线预热 */
+  const isVirtual = (n: string) => n === 'zoneSupport' || n === 'zoneResistance';
   for (const c of spec.entry) {
     for (const ref of [c.left, c.right]) {
+      if (isVirtual(ref.name)) continue;
       const resolved = spec.params[ref.periodKey ?? 'period'] ?? spec.params.period ?? 20;
       const local: Params = { ...spec.params, period: resolved };
       if (ref.name === 'atr') local.atrPeriod = spec.params[ref.periodKey ?? 'atrPeriod'] ?? spec.params.atrPeriod ?? resolved;
@@ -285,7 +313,7 @@ import { warmupFor as warmupForIndicator } from './indicators.js';
  * 信号已经确定之后才被读取的。要加新逻辑，先问一句：它需要第 i 根之后的数据吗？
  */
 export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOpts): BacktestResult {
-  const cache = new IndicatorCache(candles);
+  const cache = new IndicatorCache(candles, opts.virtual);
   const warmup = warmupOf(spec);
   const trades: Trade[] = [];
   const equity: { t: number; v: number }[] = [];

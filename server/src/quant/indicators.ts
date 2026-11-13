@@ -25,6 +25,9 @@ const WARMUP: Record<string, (p: Params) => number> = {
   // 关键位：用最近 N 根的摆动高/低点，N 给默认值
   swingHigh: (p) => Math.max(3, Math.round(p.period ?? 20)) + 1,
   swingLow: (p) => Math.max(3, Math.round(p.period ?? 20)) + 1,
+  // 关键位由外部时间线提供，不按 K 线预热
+  zoneSupport: () => 1,
+  zoneResistance: () => 1,
   // 注意 atr 单独用 atrPeriod：同一个 params 里既有 EMA 的 period 又有 ATR 的周期时，
   // 共用一个键会让止损距离悄悄跟着指标周期变
 };
@@ -212,4 +215,8 @@ export const INDICATORS: { id: string; label: string; params: { name: string; la
   { id: 'swingHigh', label: '摆动高点', params: [{ name: 'period', label: '左右根数', def: 10 }] },
   { id: 'swingLow', label: '摆动低点', params: [{ name: 'period', label: '左右根数', def: 10 }] },
   { id: 'close', label: '收盘价', params: [] },
+  // 这两个不是从 K 线算的：来自关键位引擎，由回测/实盘那边作为外部序列喂进来。
+  // 放在同一个清单里，条件编辑器就能像选 EMA 一样选它们。
+  { id: 'zoneSupport', label: '最近支撑价', params: [] },
+  { id: 'zoneResistance', label: '最近阻力价', params: [] },
 ];

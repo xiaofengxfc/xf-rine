@@ -27,6 +27,8 @@ export interface PromptRunOpts {
   lookback: number;
   /** 匿名化时要检查的禁用词（币种名、交易所名） */
   forbidden: string[];
+  /** 每一根上算出来的关键位，会被归一化后写进上下文 */
+  zonesByTime?: Map<number, import('./zones.js').ZonePoint[]>;
   /** 问模型。返回它的原话 */
   ask: (system: string, user: string) => Promise<string>;
   onProgress?: (done: number, total: number) => void;
@@ -67,7 +69,7 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
   for (let k = 0; k < total; k++) {
     if (opts.isCancelled?.()) { cancelled = true; break; }
     const idx = picked[k]!;
-    const ctx = buildAnonContext(candles, idx, opts.lookback);
+    const ctx = buildAnonContext(candles, idx, opts.lookback, opts.zonesByTime?.get(candles[idx]!.t) ?? []);
 
     // 先确认没夹带身份信息，再发。发出去再发现就晚了 —— 那段上下文已经进了模型的上下文
     try {

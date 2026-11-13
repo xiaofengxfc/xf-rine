@@ -19,6 +19,7 @@ import { buildIndicator } from '../src/quant/indicators.js';
 import { sanitizeHypothesis, FALLBACK_HYPOTHESIS, validateSemantics } from '../src/quant/ai.js';
 import { buildAnonContext, assertAnonymous, parseVerdict } from '../src/quant/promptStrategy.js';
 import { randomBaselineSignals } from '../src/quant/promptBacktest.js';
+import { buildZoneTimeline, zoneSeries, nearestZone } from '../src/quant/zones.js';
 
 let fails = 0;
 let passes = 0;
@@ -474,6 +475,75 @@ console.log('\\n[12] 提示词策略：匿名化、解析、外部信号');
   const b = randomBaselineSignals(rise, 20, 7);
   ok('随机基线和种子绑定，两次一致', JSON.stringify(a) === JSON.stringify(b));
   ok('随机基线不是全 flat', a.some((x) => x !== 'flat'));
+}
+console.log('\\n[13] 关键位：时间线不碰未来、最近支撑阻力选得对');
+{
+  const mk = (n: number) => Array.from({ length: n }, (_, i) => {
+    const px = 100 + Math.sin(i / 5) * 5;
+    return bar(i * 3600, px, px + 1, px - 1, px);
+  });
+  const candles = mk(200);
+
+  // 假引擎：记录每次调用看到的最后一根下标，用来证明没喂未来数据
+  const lastSeen: number[] = [];
+  const fake = async (window: Candle[]) => {
+    lastSeen.push(window[window.length - 1]!.t / 3600);
+    return [{
+      center: window[window.length - 1]!.c,
+      low: 0, high: 0, type: 'support' as const,
+      pTouch: 0.5, pHold: 0.5, edge: 1,
+    }];
+  };
+
+  const tl = await buildZoneTimeline(candles, 50, 10, fake);
+  ok('时间线建出来了', tl.slices.length > 0, String(tl.slices.length));
+  // 每次调用看到的最后一根，必须正好是这一片的起点（i），不可能更靠后
+  const aligned = tl.slices.every((s, k) => lastSeen[k] === candles[s.fromIndex]!.t / 3600);
+  ok('每一步只看到当时的最后一根，没有喂未来', aligned);
+
+  const series = zoneSeries(tl, candles);
+  // 在切片起点取值：那里价格正好等于假引擎算出来的中心价，支撑和阻力至少有一边成立
+  const at = tl.slices[2]!.fromIndex;
+  ok('序列按 K 线时间取值（切片起点查得到）',
+    Number.isFinite(series.support(at, candles[at]!)) || Number.isFinite(series.resistance(at, candles[at]!)),
+    '两者都是 NaN');
+  // 反例：价格已经跌到那条支撑下方时，"最近支撑"本来就该没有 ——
+  // 这里不是序列坏了，是事实如此。把它写进测试，免得以后有人把它改回去
+  const below = tl.slices[2]!.fromIndex + 1;
+  const centerOfSlice = tl.slices[2]!.zones[0]!.center;
+  if (candles[below]!.c < centerOfSlice) {
+    ok('价格跌到支撑下方时，最近支撑为空', !Number.isFinite(series.support(below, candles[below]!)), '居然还给了值');
+  } else {
+    ok('价格仍在支撑上方（这一根不适用反例）', true);
+  }
+  // 切片之外（最早那 10 根预热区）应当是 NaN
+  ok('预热区没有关键位', !Number.isFinite(series.support(0, candles[0]!)), '不该有值');
+
+  // 最近支撑/阻力：支撑取下方最近的，阻力取上方最近的
+  const zones = [
+    { center: 90, low: 89, high: 91, type: 'support' as const, pTouch: 0.6, pHold: 0.7, edge: 2 },
+    { center: 95, low: 94, high: 96, type: 'support' as const, pTouch: 0.5, pHold: 0.6, edge: 1 },
+    { center: 110, low: 109, high: 111, type: 'resistance' as const, pTouch: 0.7, pHold: 0.5, edge: 3 },
+    { center: 120, low: 119, high: 121, type: 'resistance' as const, pTouch: 0.4, pHold: 0.4, edge: 1 },
+  ];
+  const n = nearestZone(zones, 100);
+  ok('最近支撑是下方最近的那条（95）', n.support?.center === 95, String(n.support?.center));
+  ok('最近阻力是上方最近的那条（110）', n.resistance?.center === 110, String(n.resistance?.center));
+  const none = nearestZone(zones, 200);
+  ok('价格在最高位上方时没有阻力', none.resistance === null);
+}
+
+console.log('\\n[14] 提示词上下文带上关键位，且仍然匿名');
+{
+  const candles: Candle[] = [];
+  let px = 62000;
+  for (let i = 0; i < 80; i++) { px += 50; candles.push(bar(1700000000 + i * 3600, px, px + 100, px - 100, px)); }
+  const zones = [{ center: px + 500, low: px + 400, high: px + 600, type: 'resistance' as const, pTouch: 0.72, pHold: 0.55 }];
+  const ctx = buildAnonContext(candles, 79, 40, zones);
+  ok('上下文里有「关键位」这一段', ctx.text.includes('关键位'));
+  ok('写着触达/守住概率', ctx.text.includes('72%') && ctx.text.includes('55%'));
+  ok('关键位价格也归一化了（不出现 6 万量级）', !/6[0-9]{4}/.test(ctx.text), ctx.text.match(/[0-9]{5}/)?.[0] ?? '');
+  ok('仍然没有币种名', !/BTC|USDT/i.test(ctx.text));
 }
 const total = passes + fails;
 console.log('\n通过 ' + passes + ' 项，失败 ' + fails + ' 项（共 ' + total + '）');

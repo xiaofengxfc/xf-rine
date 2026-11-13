@@ -18,7 +18,7 @@
  *   3. **OOS 衰减**：训练段表现减去盲测段表现。衰减太大说明参数是在拟合历史噪音。
  */
 
-import type { Candle, Params, StrategySpec, BacktestResult } from './backtest.js';
+import type { Candle, Params, StrategySpec, BacktestResult, BacktestOpts } from './backtest.js';
 import { backtest, warmupOf } from './backtest.js';
 
 /** 一段回测窗口 */
@@ -184,7 +184,12 @@ const pct = (v: number): number => Math.round(v * 100) / 100;
 export function searchParameters(
   spec: StrategySpec,
   candles: Candle[],
-  base: { multiplier: number; feeRate: number; slippagePct: number; capital: number; riskPerTrade: number; leverage: number; fundingRatePer8h: number },
+  base: {
+    multiplier: number; feeRate: number; slippagePct: number; capital: number;
+    riskPerTrade: number; leverage: number; fundingRatePer8h: number;
+    /** 外部指标（关键位）。要在训练/验证/盲测三段里都生效，所以原样透传 */
+    virtual?: BacktestOpts['virtual'];
+  },
   opts: SearchOptions = {},
 ): Candidate[] {
   const method = opts.method ?? 'grid';

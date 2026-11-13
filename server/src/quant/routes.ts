@@ -22,6 +22,7 @@ import { judge, DEFAULT_CRITERIA, type Verdict } from './criteria.js';
 import { listStrategies, saveStrategy, deleteStrategy, recordRun, getStrategy, renameStrategy } from './library.js';
 import { research, verdictLine, type ResearchReport } from './research.js';
 import { INDICATORS } from './indicators.js';
+import { buildZoneTimeline, zoneSeries, zonesByTime, toZonePoint, EMPTY_TIMELINE, type ZoneTimeline, type ZonePoint } from './zones.js';
 import { FALLBACK_HYPOTHESIS, toSpec, type Hypothesis } from './ai.js';
 
 /** 一次研究最多跑几轮。再多就是在拟合噪音，而且账单会很难看 */
@@ -233,12 +234,14 @@ export function mountQuant(router: Router, deps: {
       return;
     }
 
+    // 记结论这一路也要有同样的关键位序列，否则「按策略库跑一遍」和「按回测按钮跑一遍」数不一样
+    const { virtual } = await zoneVirtual(contract, interval, series.candles);
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
     let run: { result: BacktestResult; enoughSample: boolean; verdict: Verdict | null };
 
     if (hasRanges) {
       // 有范围时用搜索选出来的最优参数再跑一次整段，拿到完整的回测结果再记账
-      const candidates = searchParameters(spec, series.candles, market, { minTrades: DEFAULT_CRITERIA.minTrades });
+      const candidates = searchParameters(spec, series.candles, { ...market, virtual }, { minTrades: DEFAULT_CRITERIA.minTrades });
       const eligible = candidates.filter((c) => !c.insufficientSample);
       const best = eligible[0] ?? candidates[0];
       if (!best || !best.blindResult) {
@@ -259,7 +262,7 @@ export function mountQuant(router: Router, deps: {
         }) : null,
       };
     } else {
-      const r = backtest(spec, series.candles, market);
+      const r = backtest(spec, series.candles, { ...market, virtual });
       run = {
         result: r,
         enoughSample: r.stats.trades >= DEFAULT_CRITERIA.minTrades,
@@ -479,10 +482,16 @@ export function mountQuant(router: Router, deps: {
       return;
     }
 
+    /**
+     * 关键位时间线。规则策略可以引用「最近支撑价 / 最近阻力价」，
+     * 那两个序列就是从这里来的 —— 滚动计算，第 i 根只用 i 之前的数据。
+     */
+    const { virtual } = await zoneVirtual(contract, interval, series.candles);
+
     // 有参数范围就搜索，没有就拿 params 直接跑一次
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
     if (hasRanges) {
-      const candidates = searchParameters(spec, series.candles, market, {
+      const candidates = searchParameters(spec, series.candles, { ...market, virtual }, {
         method: body.method === 'random' ? 'random' : 'grid',
         maxTrials: Math.min(400, Math.max(20, Number(body.maxTrials) || 200)),
         minTrades: DEFAULT_CRITERIA.minTrades,
@@ -511,7 +520,7 @@ export function mountQuant(router: Router, deps: {
     }
 
     // 没有范围：整段数据跑一次，权益曲线直接回去画图
-    const result = backtest(spec, series.candles, market);
+    const result = backtest(spec, series.candles, { ...market, virtual });
     res.json({
       mode: 'single',
       bars: series.candles.length,
@@ -618,11 +627,16 @@ async function runPromptBacktest(input: {
   const { chatJson } = await import('../ai.js');
   const forbidden = ['BTC', 'ETH', 'USDT', 'GATE', input.contract.split('_')[0] ?? ''];
 
+  // 关键位也要有：模型看得到「上方最近的阻力在哪」和看得到价格一样重要。
+  // 这段计算是本地引擎调用（热态 70ms 一次），跟逐根问模型的耗时比可以忽略
+  const { timeline } = await zoneVirtual(input.contract, input.interval, input.candles);
+
   const asked = await runPromptSignals(input.candles, {
     prompt: input.prompt,
     startIndex: Math.max(input.lookback, 30),
     lookback: input.lookback,
     forbidden,
+    zonesByTime: zonesByTime(timeline, input.candles),
     ask: async (system, user) => {
       // 温度交给 chatJson 那层的默认（0.2）；提示词策略要的是稳定，不是创意
       const r = await chatJson({ system, user, maxTokens: 300, timeoutMs: 60_000 });
@@ -662,4 +676,54 @@ async function runPromptBacktest(input: {
     enoughSample,
     verdict,
   };
+}
+
+// ---------- 关键位时间线 ----------
+
+/** 周期代号：sidecar 只认这一套 */
+const TF_CODE: Record<string, string> = {
+  '1m': 'M1', '5m': 'M5', '15m': 'M15', '30m': 'M30',
+  '1h': 'H1', '4h': 'H4', '8h': 'H8', '1d': 'D1',
+};
+
+/** 每多少根 K 线重算一次关键位。50 根是精度和耗时的折中：9000 根 → 180 次引擎调用，约十几秒 */
+const ZONE_EVERY = 50;
+
+/**
+ * 拿一段 K 线去问引擎要关键位。
+ *
+ * 只喂 window（i 及之前的部分），不喂整段 —— 喂多了就是未来函数，
+ * 而这正是「回测里的关键位」最容易骗人的地方。
+ */
+async function analyzeWindow(contract: string, interval: string, window: Candle[]): Promise<ZonePoint[]> {
+  const { analyzeBars } = await import('../sr/client.js');
+  const tf = TF_CODE[interval] ?? interval.toUpperCase();
+  const bars = window.map((c) => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c, volume: c.v }));
+  const r = await analyzeBars({
+    symbol: contract, tf, frames: [{ tf, bars }], n_zones: 3, direction: 'both', mtf: false,
+  } as Parameters<typeof analyzeBars>[0]);
+  return r.zones.map(toZonePoint);
+}
+
+/**
+ * 给回测准备外部序列：最近支撑价 / 最近阻力价。
+ *
+ * 引擎不可用时返回空对象，条件里的 zoneSupport/zoneResistance 会一直是 NaN，
+ * 于是引用它们的条件恒不成立 —— 回测跑得出来但一笔不做，比直接报错更容易看懂。
+ */
+async function zoneVirtual(contract: string, interval: string, candles: Candle[]): Promise<{
+  virtual: Record<string, (i: number, c: Candle) => number>;
+  timeline: ZoneTimeline;
+}> {
+  try {
+    const timeline = await buildZoneTimeline(candles, ZONE_EVERY, 60, (w) => analyzeWindow(contract, interval, w));
+    if (timeline.slices.length === 0) return { virtual: {}, timeline };
+    const series = zoneSeries(timeline, candles);
+    return {
+      virtual: { zoneSupport: series.support, zoneResistance: series.resistance },
+      timeline,
+    };
+  } catch {
+    return { virtual: {}, timeline: EMPTY_TIMELINE };
+  }
 }

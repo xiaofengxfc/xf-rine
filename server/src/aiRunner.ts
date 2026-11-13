@@ -21,6 +21,7 @@ import { HOME_DIR, config, envLabel } from './config.js';
 import type { AiSnapshot, RoleTurn, TradePlan } from './ai.js';
 import { conditionHolds, IndicatorCache, type Candle } from './quant/backtest.js';
 import { buildAnonContext, assertAnonymous, parseVerdict } from './quant/promptStrategy.js';
+import { nearestZone } from './quant/zones.js';
 import {
   dayLossPct, gatePlan, loadStrategy, noteEquity, saveStrategy,
   type GateOutcome, type StrategyConfig,
@@ -530,6 +531,35 @@ export class AiRunner {
       turns, usage, model,
     });
 
+    /**
+     * 当前这一根上引擎算出来的关键位。
+     *
+     * 实盘只算「现在」这一份 —— 回测那边是滚动算一整条时间线，两者口径一致：
+     * 用的都是「到这一刻为止」的数据。
+     */
+    const liveZones = (snapshot.levels ?? []).map((l) => ({
+      center: l.price,
+      low: l.zone[0] ?? l.price,
+      high: l.zone[1] ?? l.price,
+      type: (l.role === '阻力' ? 'resistance' : 'support') as 'support' | 'resistance',
+      pTouch: l.pTouch === null ? null : l.pTouch / 100,
+      pHold: l.pHold === null ? null : l.pHold / 100,
+      edge: l.edge,
+    }));
+    const near = nearestZone(liveZones, snapshot.last);
+    /**
+     * 给条件用的外部序列。
+     *
+     * 整段都给同一个值：实盘只有「当前」这一份关键位，没有历史。
+     * 这样写会让所有引用关键位的条件在历史那几根上也用当前值 —— 这是事实上的近似，
+     * 但只会影响带 shift 的条件（比如"上一根是否在某条位之下"），普通的
+     * 「现价 vs 最近阻力」判断完全正确。回测那边是按根算的，所以更准。
+     */
+    const virtual = {
+      zoneSupport: () => (near.support ? near.support.center : NaN),
+      zoneResistance: () => (near.resistance ? near.resistance.center : NaN),
+    };
+
     // ---------- 规则策略：条件算 ----------
     if (bound.kind === 'rule') {
       const spec = bound.spec;
@@ -544,7 +574,7 @@ export class AiRunner {
 
       // 用最后一根**已收盘**的 K 线判断，和回测里「第 i 根收盘做决定」是同一条规则
       const i = candles.length - 1;
-      const cache = new IndicatorCache(candles);
+      const cache = new IndicatorCache(candles, virtual);
       const holds = spec.entry.every((c) => conditionHolds(c, i, cache, spec.params));
       const condText = spec.entry
         .map((c) => c.left.name + (c.shift ? '[t-' + c.shift + ']' : '') + ' ' + c.op + ' ' + (c.rightParam ?? c.right.name))
@@ -589,7 +619,7 @@ export class AiRunner {
       return hold('K 线太少，截不出上下文', [turn('提示词', '只拿到 ' + candles.length + ' 根 K 线')]);
     }
 
-    const ctx = buildAnonContext(candles, candles.length - 1, 40);
+    const ctx = buildAnonContext(candles, candles.length - 1, 40, liveZones);
     // 发出去之前先确认没夹带身份信息。回测里这样做，实盘也必须这样做 ——
     // 两边看到的输入不一致的话，回测那套结论就不代表实盘
     const forbidden = ['USDT', 'GATE', contract.split('_')[0] ?? ''];

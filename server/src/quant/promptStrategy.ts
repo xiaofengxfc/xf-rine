@@ -51,7 +51,22 @@ const NL = String.fromCharCode(10);
  *   · 换掉时间 → 否则它知道这段行情后面是什么
  *   · 价格归一化到 100 → 否则 60000 这个数字本身就暴露了币种和时间
  */
-export function buildAnonContext(candles: Candle[], upTo: number, lookback = 40): AnonContext {
+export interface AnonZone {
+  center: number;
+  low: number;
+  high: number;
+  type: 'support' | 'resistance';
+  pTouch: number | null;
+  pHold: number | null;
+}
+
+export function buildAnonContext(
+  candles: Candle[],
+  upTo: number,
+  lookback = 40,
+  /** 这一根上算出来的关键位。价格会跟着一起归一化，不泄露绝对价位 */
+  zones: AnonZone[] = [],
+): AnonContext {
   const from = Math.max(0, upTo - lookback + 1);
   const window = candles.slice(from, upTo + 1);
   const base = window[0]?.c ?? 0;
@@ -76,12 +91,24 @@ export function buildAnonContext(candles: Candle[], upTo: number, lookback = 40)
   const lo = Math.min(...window.map((c) => c.l));
   const posInRange = hi > lo ? ((last - lo) / (hi - lo)) * 100 : 50;
 
+  const zoneLines = zones.slice(0, 6).map((zon) => {
+    const tag = zon.type === 'support' ? '支撑' : '阻力';
+    const touch = zon.pTouch === null ? '—' : (zon.pTouch * 100).toFixed(0) + '%';
+    const hold = zon.pHold === null ? '—' : (zon.pHold * 100).toFixed(0) + '%';
+    return '- ' + tag + ' 区间 ' + norm(zon.low).toFixed(3) + '~' + norm(zon.high).toFixed(3)
+      + '（中心 ' + norm(zon.center).toFixed(3) + '），触达概率 ' + touch + '，守住概率 ' + hold;
+  });
+
   const text = [
     '你是一个交易策略的执行者。下面是一段被匿名化的行情：',
     '- 标的代号 ASSET，品种和交易所都已被隐去，价格以窗口第一根收盘价归一化为 100。',
     '- 时间是相对序号：Bar 0 是最早一根，Bar -1 是最后一根（当前根）。',
     '',
     ...rows,
+    '',
+    ...(zoneLines.length > 0
+      ? ['', '关键位（同样已归一化）：', ...zoneLines]
+      : []),
     '',
     '窗口统计：',
     '- 区间涨跌：' + ret.toFixed(2) + '%',
