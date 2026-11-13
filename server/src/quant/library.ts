@@ -65,10 +65,23 @@ function readLibrary(): Library {
   try {
     const raw = JSON.parse(readFileSync(LIBRARY_PATH, 'utf8')) as Library;
     if (!Array.isArray(raw.strategies)) return { strategies: [] };
-    // 老数据没有 kind 字段：有 spec 的按规则策略算
+    /**
+     * 读出来时顺手把合约名和周期归一化。
+     *
+     * 以前合约是手填的，粘一个带尾随空格的 "SPACEHOOD_USDT " 进来，存的时候不报错，
+     * 用的时候才炸：回测拿到 0 根 K 线、下单报「没有这个合约」，而界面上看着
+     * 和正常的一模一样 —— 空格在 UI 里根本看不出来。这里一次抹掉，
+     * 老数据读出来就自动修好，不用用户重新存一遍。
+     */
     for (const s of raw.strategies) {
       if (!s.kind) s.kind = s.spec ? 'rule' : 'prompt';
       if (s.prompt === undefined) s.prompt = null;
+      s.contract = String(s.contract ?? '').trim().toUpperCase();
+      s.interval = String(s.interval ?? '').trim();
+      if (s.lastRun) {
+        s.lastRun.contract = String(s.lastRun.contract ?? '').trim().toUpperCase();
+        s.lastRun.interval = String(s.lastRun.interval ?? '').trim();
+      }
     }
     return raw;
   } catch {
@@ -116,6 +129,9 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
   const lib = readLibrary();
   const now = Date.now();
   const kind: StrategyKind = input.kind === 'prompt' ? 'prompt' : 'rule';
+  // 合约名和周期一律去空白：粘进来的字符串常带尾随空格，而它在界面上看不出来
+  const contract = String(input.contract ?? '').trim().toUpperCase();
+  const interval = String(input.interval ?? '').trim();
   const prompt = kind === 'prompt' ? String(input.prompt ?? '').trim() : null;
   const spec = kind === 'rule' ? (input.spec ?? null) : null;
 
@@ -133,8 +149,8 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
       || (existing.prompt ?? '') !== (prompt ?? '');
     existing.name = input.name;
     existing.kind = kind;
-    existing.contract = input.contract;
-    existing.interval = input.interval;
+    existing.contract = contract;
+    existing.interval = interval;
     existing.spec = spec;
     existing.prompt = prompt;
     existing.updatedAt = now;
@@ -147,8 +163,8 @@ export function saveStrategy(input: SaveInput): SavedStrategy {
     id: newId(),
     name: input.name,
     kind,
-    contract: input.contract,
-    interval: input.interval,
+    contract,
+    interval,
     spec,
     prompt,
     createdAt: now,

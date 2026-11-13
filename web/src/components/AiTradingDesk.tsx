@@ -1,6 +1,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { jget, jsend } from '../lib/api.ts';
+import ContractPicker from './ContractPicker.tsx';
 import type {
   AiDecisionRecord, AiStrategy, AiStrategyPayload, AiRunnerStatus,
 } from '../lib/api.ts';
@@ -158,6 +159,22 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
       onToast('err', '决策失败', (e as Error).message);
     } finally { setBusy(''); }
   }, [loadDecisions, onToast]);
+
+  /**
+   * 合约池空了就自动填成策略上记的那个币。
+   *
+   * 换了选择器之后，从没选过的表单是空的 —— 空着提交上去，执行器只能退回策略的默认合约，
+   * 而页面上那一格显示为空，看着像「没配」。填上默认值，界面上写的就是实际会用的。
+   */
+  useEffect(() => {
+    const bound = payload?.binding;
+    if (!bound) return;
+    setForm((f) => {
+      if (!f) return f;
+      if ((f.contracts ?? []).length > 0) return f;
+      return { ...f, contracts: [bound.contract] };
+    });
+  }, [payload?.binding]);
 
   const on = Boolean(payload?.strategy.enabled);
   const halted = Boolean(status && status.haltUntil > Date.now());
@@ -320,13 +337,12 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
               但换币意味着"回测是在另一个品种上做的"——下面那块会把两个币并排显示。
             */}
             <div className="field">
-              <label>合约池（这只策略要跑在哪个币上）</label>
-              <input
-                className="input"
-                value={(form?.contracts ?? []).join(', ')}
+              <label>合约（这只策略要跑在哪个币上）</label>
+              {/* 和交易台的合约选择同一份列表：Gate 的合约表，不手填 */}
+              <ContractPicker
+                value={(form?.contracts ?? [])[0] ?? ''}
                 disabled={!canEdit || on}
-                placeholder="BTC_USDT"
-                onChange={(e) => patch({ contracts: e.target.value.split(/[,，\s]+/).filter(Boolean).map((s) => s.toUpperCase()) })}
+                onChange={(c) => patch({ contracts: [c] })}
               />
               <div className="hint">改完合约要回「策略」页重跑一次回测，结论才对应得上</div>
             </div>

@@ -382,6 +382,15 @@ async function main(): Promise<void> {
     const s3 = lib.saveStrategy({ id: s1.id, name: '再改个名', kind: 'rule', contract: 'BTC_USDT', interval: '1h', spec: changed });
     ok('只改名字不动规则，结论保留', s3.lastRun?.passed === true, JSON.stringify(s3.lastRun));
 
+    // 合约名带尾随空格：界面上看不出来，但会让 Gate 的 URL 变成 ...%20 然后当它不存在
+    const dirty = lib.saveStrategy({
+      name: '带空格的', kind: 'rule', contract: '  btc_usdt  ', interval: ' 1h ',
+      spec,
+    });
+    eq('合约名去掉空白并大写', dirty.contract, 'BTC_USDT');
+    eq('周期去掉空白', dirty.interval, '1h');
+    lib.deleteStrategy(dirty.id);
+
     lib.deleteStrategy(s1.id);
   }
   console.log('\\n[12] 提示词策略：实盘也匿名化，且只问一次模型');

@@ -2652,6 +2652,27 @@ router.post('/ai/strategy', wrap(async (req, res) => {
       throw new GateError(400, 'STRATEGY_NOT_READY', gate.reason);
     }
 
+    /**
+     * 合约得在当前环境里真的能交易。
+     *
+     * 模拟盘只上架几十个合约，主网一千多 —— 在模拟盘里选一个只在主网有的合约，
+     * 前面一路绿灯，直到下单那一刻才被交易所回一句 CONTRACT_NOT_FOUND。
+     * 在这里一次说清，比让用户猜「哪个环节不认这个币」强。
+     */
+    if (merged.contracts.length > 0) {
+      const tradable = await tradableNames().catch(() => null);
+      if (tradable) {
+        const missing = merged.contracts.filter((c) => !tradable.has(c));
+        if (missing.length > 0) {
+          throw new GateError(
+            400, 'CONTRACT_NOT_TRADABLE',
+            (config.env === 'testnet' ? '模拟盘' : '实盘') + '上没有 ' + missing.join('、')
+            + ' 这个合约。模拟盘只上架了几十个，换一个，或者先切到实盘再开',
+          );
+        }
+      }
+    }
+
     requireKeys();
     if (config.env === 'live' && !merged.liveConfirmed) {
       throw new GateError(

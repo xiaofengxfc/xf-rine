@@ -34,6 +34,27 @@ interface ContractMeta {
   takerFee: number;
 }
 
+/**
+ * 这个合约在 Gate 上存不存在。
+ *
+ * 放在保存策略和开启 AI 交易之前：合约名写错（BTC 而不是 BTC_USDT、或者拼错、或者已下架）
+ * 本身不是致命错误，但它会让后面的回测、下单各报一句英文或一句"0 根 K 线"，
+ * 用户得一路倒推才知道是第一步就错了。在这里一次说清。
+ */
+export async function contractProblem(contract: string): Promise<string | null> {
+  const name = String(contract ?? '').trim().toUpperCase();
+  if (!name) return '没有填合约';
+  if (!/^[A-Z0-9]+_[A-Z0-9]+$/.test(name)) {
+    return '合约名要写成 BTC_USDT 这种形式，现在填的是「' + contract + '」';
+  }
+  try {
+    await gatePublic('/futures/usdt/contracts/' + encodeURIComponent(name), {}, 60_000, 15_000);
+    return null;
+  } catch {
+    return 'Gate 上没有合约 ' + name + ' —— 名字写错了，或者它已经下架';
+  }
+}
+
 /** 合约乘数和费率：回测要按它换算张数，不能拍脑袋 */
 async function contractMeta(contract: string): Promise<ContractMeta> {
   const c = await gatePublic<{ quanto_multiplier: string; taker_fee_rate: string }>(
@@ -101,8 +122,17 @@ export function mountQuant(router: Router, deps: {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const name = String(body.name ?? '').trim() || '未命名策略';
-    const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
-    const interval = String(body.interval ?? '1h');
+    // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
+    const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
+    const interval = String(body.interval ?? '1h').trim();
+
+    // 存之前先确认这个合约真的存在，别让一条跑不了的策略进库
+    const bad = await contractProblem(contract).catch(() => null);
+    if (bad) {
+      res.status(400).json({ error: 'BAD_CONTRACT', detail: bad });
+      return;
+    }
+
     try {
       const saved = saveStrategy({
         id: typeof body.id === 'string' && body.id ? body.id : undefined,
@@ -160,8 +190,9 @@ export function mountQuant(router: Router, deps: {
   router.post('/quant/strategies/:id/run', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '记录回测结论');
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
-    const interval = String(body.interval ?? '1h');
+    // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
+    const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
+    const interval = String(body.interval ?? '1h').trim();
     const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const spec = body.spec as StrategySpec | undefined;
     const prompt = String(body.prompt ?? '').trim();
@@ -268,8 +299,9 @@ export function mountQuant(router: Router, deps: {
   router.post('/quant/research', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '跑 AI 研究');
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
-    const interval = String(body.interval ?? '1h');
+    // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
+    const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
+    const interval = String(body.interval ?? '1h').trim();
     const rounds = Math.min(MAX_ROUNDS, Math.max(1, Number(body.rounds) || 3));
 
     res.status(200);
@@ -299,7 +331,12 @@ export function mountQuant(router: Router, deps: {
       send({ type: 'stage', stage: 'data', message: '拉 ' + contract + ' ' + interval + ' 的历史 K 线' });
       const series = await getSeries(contract, interval, MAX_BARS);
       if (series.candles.length < 300) {
-        send({ type: 'error', message: '只拿到 ' + series.candles.length + ' 根 K 线，太短，做不了研究' });
+        send({
+          type: 'error',
+          message: series.candles.length === 0
+            ? 'Gate 上没有 ' + contract + ' 的 ' + interval + ' K 线 —— 合约名多半写错了'
+            : '只拿到 ' + series.candles.length + ' 根 K 线（' + contract + ' ' + interval + '），太短，做不了研究',
+        });
         res.end();
         return;
       }
@@ -368,14 +405,27 @@ export function mountQuant(router: Router, deps: {
    */
   router.post('/quant/backtest', wrap(async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const contract = String(body.contract ?? 'BTC_USDT').toUpperCase();
-    const interval = String(body.interval ?? '1h');
+    // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
+    const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
+    const interval = String(body.interval ?? '1h').trim();
     const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const spec = body.spec as StrategySpec | undefined;
 
     const series = await getSeries(contract, interval, MAX_BARS);
     if (series.candles.length < 300) {
-      res.status(400).json({ error: 'DATA_TOO_SHORT', detail: '只拿到 ' + series.candles.length + ' 根 K 线' });
+      /**
+     * 0 根 K 线几乎总是「合约名写错了」，不是「数据太短」。
+     *
+     * 以前统一报「只拿到 0 根 K 线」，用户看到这句话无从下手 ——
+     * 到底是合约不对、周期不对、还是交易所没数据？现在分开说，
+     * 并在 0 根时直接点出"这个合约在 Gate 上不存在"。
+     */
+    res.status(400).json({
+      error: 'DATA_TOO_SHORT',
+      detail: series.candles.length === 0
+        ? 'Gate 上没有 ' + contract + ' 的 ' + interval + ' K 线 —— 合约名多半写错了，或者这个周期没有数据'
+        : '只拿到 ' + series.candles.length + ' 根 K 线（' + contract + ' ' + interval + '），太短，跑不出可信的回测',
+    });
       return;
     }
     const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));

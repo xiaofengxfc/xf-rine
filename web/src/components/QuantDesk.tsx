@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend } from '../lib/api.ts';
+import ContractPicker from './ContractPicker.tsx';
 import type {
   QuantCatalog, QuantCondition, QuantSpec, QuantVerdict,
   QuantBacktestResult, QuantEvent, SavedStrategySummary, StrategyKind,
@@ -275,12 +276,30 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   const saveToLibrary = useCallback(async () => {
     if (kind === 'rule' && spec.entry.length === 0) { onToast('err', '策略还没有入场条件'); return; }
     if (kind === 'prompt' && !prompt.trim()) { onToast('err', '提示词是空的'); return; }
-    const name = window.prompt('给这条策略起个名字：', spec.name || '我的策略');
-    if (!name) return;
+
+    /**
+     * 已存过的就直接覆盖那一条，不再问名字。
+     *
+     * 以前不管存没存过都弹框要名字。于是「更新到策略库」实际是"改个名字再覆盖"：
+     * 弹框里改一个字，原策略就悄悄换了名；不改也说不上是更新还是新建。
+     * 现在分清楚：
+     *   · 第一次存 —— 要名字（不然库里一条无名记录，以后分不出谁是谁）
+     *   · 已存过   —— 直接更新原记录，名字保持不变；想改名用「改名」按钮
+     */
+    const existing = savedId ? library.find((s) => s.id === savedId) : undefined;
+    let name: string;
+    if (existing) {
+      name = existing.name;
+    } else {
+      const input = window.prompt('给这条策略起个名字：', spec.name || '我的策略');
+      if (!input) return;
+      name = input.trim();
+    }
+
     try {
       const saved = await jsend<{ ok: boolean; strategy: { id: string; name: string } }>(
         'POST', '/api/quant/strategies',
-        { id: savedId || undefined, name, kind, contract, interval: tf, spec, prompt },
+        { id: existing ? existing.id : undefined, name, kind, contract, interval: tf, spec, prompt },
       );
       setSavedId(saved.strategy.id);
       // 有回测结果才记结论。没有就只存规则 —— 库里会显示「没跑过回测」
@@ -290,14 +309,15 @@ export default function QuantDesk({ canRun, onToast }: Props) {
         }, undefined, AbortSignal.timeout(900_000));
       }
       await refreshLibrary();
-      onToast('ok', '已存进策略库',
+      onToast('ok',
+        existing ? '已更新「' + saved.strategy.name + '」' : '已存进策略库',
         result
           ? '回 AI 交易页就能选到「' + saved.strategy.name + '」'
           : '还没跑回测，AI 交易那边会显示「没跑过」并拦住 —— 想用就先回来跑一次');
     } catch (e) {
-      onToast('err', '保存失败', (e as Error).message);
+      onToast('err', existing ? '更新失败' : '保存失败', (e as Error).message);
     }
-  }, [result, spec, kind, prompt, step, contract, tf, savedId, onToast, refreshLibrary]);
+  }, [result, spec, kind, prompt, step, contract, tf, savedId, library, onToast, refreshLibrary]);
 
   const hypotheses = events.filter((e) => e.type === 'hypothesis');
   const roundResults = events.filter((e) => e.type === 'round');
@@ -349,7 +369,8 @@ export default function QuantDesk({ canRun, onToast }: Props) {
         <div className="quant-top-row">
           <label className="quant-field">
             <span>合约</span>
-            <input className="input" value={contract} onChange={(e) => setContract(e.target.value.toUpperCase())} />
+            {/* 从 Gate 的合约表里选，不手填：写错一个字母就会得到「0 根 K 线」 */}
+            <ContractPicker value={contract} onChange={setContract} />
           </label>
           <label className="quant-field">
             <span>周期</span>

@@ -344,12 +344,14 @@ export class AiRunner {
       }
 
       /**
-       * 合约池 = 这条策略训练时用的那个币。
+       * 合约从配置里的合约池取，池子是空的才退回策略上记的那个。
        *
-       * 不再是"用户填一串合约、轮着做"。策略是在某一个币上搜索参数、样本外判定通过的，
-       * 换币就没有依据了。想多做几个币，就各自训练各自开的策略。
+       * 这里以前写死 bound.contract，导致 AI 交易页上的「合约」那一格完全没作用 ——
+       * 页面改了、存了、显示也变了，实际下单永远还是策略存的时候那个币。
+       * 现在池子里挑一个还没有持仓的；都满了就退到第一个。
        */
-      const contract = bound.contract;
+      const pool = withDay.contracts.length > 0 ? withDay.contracts : [bound.contract];
+      const contract = pool.find((c) => !positions.some((p) => p.contract === c)) ?? pool[0]!;
       const cooldown = Math.max(1, withDay.cooldownMin) * 60_000;
       const now = Date.now();
       if (positions.some((p) => p.contract === contract)) {
