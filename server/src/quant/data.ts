@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HOME_DIR } from '../config.js';
-import { gatePublic } from '../gate/rest.js';
+import { exchange } from '../exchange/index.js';
 import type { Candle } from './backtest.js';
 
 /** 缓存放在用户目录：换设备、重装都不会把几十兆的 K 线删掉 */
@@ -93,9 +93,8 @@ function writeCache(s: Series): void {
  * 不减的话每次都会把上一页最老那根再带回来一次，翻十页多十根重复。
  */
 async function fetchPage(contract: string, interval: string, to: number | null): Promise<Candle[]> {
-  const query: Record<string, string | number> = { contract, interval, limit: 1000 };
-  if (to !== null) query.to = to;
-  const list = await gatePublic<GateCandle[]>('/futures/usdt/candlesticks', query, 5 * 60_000, 20_000);
+  // 一次要 1000 根。Gate 一次就给满了；Bitget 的窗口限制由适配器内部翻页补上
+  const list = await exchange().candles(contract, interval, 1000, to ?? undefined);
   if (!Array.isArray(list)) return [];
   return list.map((c) => ({
     t: Number(c.t),

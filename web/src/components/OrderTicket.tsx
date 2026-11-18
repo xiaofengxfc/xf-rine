@@ -86,6 +86,12 @@ export default function OrderTicket({
   const sizeMin = Math.max(1, Math.ceil(contract?.sizeMin ?? 1));
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
   const sizeMax = Math.floor(contract?.sizeMax ?? 0);
+  /** N 张折成多少个币：一个币的数量常常要到小数点后好几位，别四舍五入成一串 0 */
+  const qtyOf = (n: number): string => {
+    const v = n * mult;
+    if (!(v > 0)) return '—';
+    return v.toLocaleString('en-US', { maximumFractionDigits: 8 });
+  };
   // 杠杆上限跟着合约走。切到上限更低的合约时，原来的 50x 必须夹回去：
   // 不夹的话摘要会按交易所根本不接受的杠杆算保证金，设置杠杆那一步也会静默失败，
   // 最后真正下单用的还是账户上原来的杠杆，和确认条上写的不是一回事。
@@ -326,13 +332,34 @@ export default function OrderTicket({
             张数（{mult ? fmtUsd(mult, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} 币/张）
             <span className="dim"> · 按 {posPct}% 可用余额算得 {sizing.size} 张</span>
           </label>
-          <input
-            className="input"
-            inputMode="numeric"
-            placeholder={`最小 ${sizeMin}`}
-            value={sizeStr}
-            onChange={(e) => { setSizeStr(e.target.value.replace(/[^0-9]/g, '')); setSizeTouched(true); setPending(false); }}
-          />
+          <div className="size-wrap">
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder={`最小 ${sizeMin}`}
+              // 桌面端悬停时浏览器也会弹一句，和下面那张卡片说的是同一件事
+              title={`最低 ${sizeMin} 张 = ${qtyOf(sizeMin)} 币`}
+              value={sizeStr}
+              onChange={(e) => { setSizeStr(e.target.value.replace(/[^0-9]/g, '')); setSizeTouched(true); setPending(false); }}
+            />
+            {/**
+              * 最低下单量。
+              *
+              * 以前只在 placeholder 里写了个「最小 N」，一输入就看不见了 —— 想知道
+              * 到底最少能下多少，只能把字删光或者去翻别的地方。
+              * 现在悬停（桌面）和聚焦（手机点进输入框）都把它浮在输入框**上方**：
+              * 手机键盘弹起来只占下半屏，写在上面的提示不会被挡住。
+              */}
+            <div className="size-tip">
+              最低 <b>{sizeMin}</b> 张 = {qtyOf(sizeMin)} 币
+              {priceUsed > 0 && mult > 0 && (
+                <>
+                  {' · '}名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT
+                  {' · '}{lev}x 要 {fmtUsd((sizeMin * mult * priceUsed) / Math.max(lev, 1))} USDT 保证金
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
         <div className="row4" style={{ marginBottom: 10 }}>

@@ -139,6 +139,11 @@ export interface Zone {
   bucket_hold_rate: number | null;
   bucket_fwd_ret: number | null;
   bucket_n: number | null;
+  /**
+   * 这条位是「之前出现过、这次没重算出来」的历史位。
+   * 页面把它画淡一点：让人还看得见刚才那条支撑，而不是凭空消失。
+   */
+  history?: boolean;
   /** 共振周期数（1 = 只有本周期）/ 具体是哪几个周期 */
   tf_count: number;
   tfs: string;
@@ -218,7 +223,10 @@ export interface LevelsResponse {
   /** 数据来自交易所实时 K 线，还是本地那个 Parquet 目录 */
   source?: 'gate' | 'local';
   barsUsed: number;
+  /** 这次算出来的位（位置已经钉住，不会随每次重算漂移） */
   zones: Zone[];
+  /** 之前出现过、这次没算出来的位。画淡一点，别让它凭空消失 */
+  historyZones?: Zone[];
   atr: number;
   last: number;
   nearestSupport: Zone | null;
@@ -344,6 +352,11 @@ export interface AiAnalysis {
 }
 
 export interface AppConfig {
+  /** 当前连的交易所。合约名、张数、下单都跟着它走 */
+  exchange: 'gate' | 'bitget';
+  exchangeLabel: string;
+  /** 这家支持的 K 线周期。Bitget 没有 8h，列出来点了只会报错 */
+  intervals: string[];
   env: 'testnet' | 'live';
   envLabel: string;
   restBaseUrl: string;
@@ -705,7 +718,9 @@ export type QuantEvent =
   | { type: 'data'; bars: number; days: number; gaps: number; from: number; to: number }
   | { type: 'hypothesis'; round: number; thesis: string; entry: { left: string; op: string; right: string; shift: number }[]; params: Record<string, number> }
   | ({ type: 'round' } & QuantRound)
-  | { type: 'done'; verdict: string; report: unknown }
+  /** saved：达标的方案已经自动存进策略库，页面可以直接载入编辑器 */
+  | { type: 'done'; verdict: string; report: unknown; saved?: { id: string; name: string; spec: QuantSpec } | null }
+  | { type: 'note'; message: string }
   | { type: 'error'; message: string };
 
 export interface QuantTradeRow {

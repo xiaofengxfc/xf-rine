@@ -172,7 +172,7 @@ export default function ChartPane({
   const needOlderRef = useRef(onNeedOlder);
   needOlderRef.current = onNeedOlder;
   /** 这一帧已经排了一次「把视口拉回数据边缘」，别排队排成一串 */
-  const clampingRef = useRef(false);
+
   /** 手指还在图上（拖动、缩放、惯性滑动）。这期间一律不写视口，见 placeView */
   const gestureRef = useRef(false);
   /**
@@ -329,6 +329,15 @@ export default function ChartPane({
         secondsVisible: false,
         rightOffset: 6,
         barSpacing: 8,
+        /**
+         * 不许往左拖出数据之外。
+         *
+         * 以前是自己数逻辑区间的负数，再用 scrollToPosition 把画面拽回来 —— 拖动时
+         * 那个回调每帧都来，于是每帧拽一次：手指往左滑，画面左右来回窜。1d 的根数少，
+         * 一屏就是小半年的行情，两下就撞到最左边，所以这个毛病在日线上最明显。
+         * 交给库夹边界，它跟着手势一起算，不会和手指打架。
+         */
+        fixLeftEdge: true,
       },
       localization: {
         locale: 'zh-CN',
@@ -486,9 +495,23 @@ export default function ChartPane({
     };
     // 用捕获阶段：画线工具按下时会自己 stopPropagation（挡住图上其它手势），
     // 冒泡阶段的监听收不到那一次 —— 而那恰恰也是「手指正按在图上」的时候。
+    /**
+     * 滚轮和触控板双指横扫也算「正在动视口」。
+     *
+     * 以前只认 pointer 事件，滚轮拖动期间不算手势，于是补进来一页历史时
+     * placeView 会当场把视口挪一下 —— 手感上就是「滚着滚着画面自己跳一下」。
+     */
+    const onWheel = () => {
+      gestureRef.current = true;
+      window.clearTimeout(releaseTimer);
+      releaseTimer = 0;
+      window.clearTimeout(lostTimer);
+      lostTimer = window.setTimeout(settle, GESTURE_HOLD_MS);
+    };
     const CAPTURE = { capture: true, passive: true } as const;
     host.addEventListener('pointerdown', onDown, CAPTURE);
     host.addEventListener('pointermove', onMove, CAPTURE);
+    host.addEventListener('wheel', onWheel, CAPTURE);
     window.addEventListener('pointerup', onUp, CAPTURE);
     window.addEventListener('pointercancel', onUp, CAPTURE);
 
@@ -536,6 +559,7 @@ export default function ChartPane({
       // 摘监听时 capture 必须和挂的时候一致，否则摘不掉（会留着引用旧的 ref）
       host.removeEventListener('pointerdown', onDown, true);
       host.removeEventListener('pointermove', onMove, true);
+      host.removeEventListener('wheel', onWheel, true);
       window.removeEventListener('pointerup', onUp, true);
       window.removeEventListener('pointercancel', onUp, true);
       gestureRef.current = false;
@@ -877,28 +901,9 @@ export default function ChartPane({
       }, 400);
 
       /**
-       * 别让人拖到数据左边去。
-       *
-       * 逻辑区间允许负数，拖过头左边就是一整片空白 —— 数据其实一根没少，
-       * 但看着就是「K 线缺了一大段」，而且拖到那里也不会再有新页进来。
-       *
-       * 拖动中的在同一帧里改区间会被图库忽略，得挪到下一帧再拉回来；
-       * 拉回来后停一小会儿，让下一批拖动事件重新触发，形成「到边就回弹」。
-       *
-       * 拉回来只挪右边界（scrollToPosition），不重设逻辑区间：后者会顺手把缩放改成
-       * 「刚好放下这么多根」，贴着边拖的时候画面会跟着一缩，看着又是一次跳。
+       * 左边界不用管了：timeScale 里开了 fixLeftEdge，库自己就夹住，
+       * 拖到第一根就停，不会再出现「往左一滑、画面弹回来又窜出去」。
        */
-      // 一帧只拉一次：再密也救不了，反而会和用户的手感打架
-      if ((r.from < -1 || r.to < 8) && !clampingRef.current) {
-        clampingRef.current = true;
-        // 左边界回到 0 还差这么多根，往右挪同样多根就贴回数据开头了
-        const back = Math.ceil(-r.from);
-        requestAnimationFrame(() => {
-          clampingRef.current = false;
-          if (!(back > 0)) return;
-          try { ts.scrollToPosition(ts.scrollPosition() + back, false); } catch { /* 位置不合法就算了 */ }
-        });
-      }
 
       // 贴到最左边了：到头说明这时候才有意义
       setAtEdge(r.from < 1.5);
@@ -941,7 +946,11 @@ export default function ChartPane({
     positions.map((p) => [p.contract, p.direction, p.entryPrice, p.size, p.liqPrice, p.leverage].join(',')).join(';'),
     pendingOrderLines(orders).map((o) => o.id + '@' + o.price + 'x' + o.size).join(';'),
     priceOrders.map((o) => o.id + '@' + o.triggerPrice + ':' + o.triggerRule + ':' + o.direction).join(';'),
-    zones.map((z) => [z.zone_type, z.center, z.p_touch, z.p_hold, z.n_events, z.tf_count].join(',')).join(';'),
+    // 中心价按最小变动价取整再比：引擎给的是浮点数，差 0.0001 不该触发整批重画
+    zones.map((z) => [
+      z.history ? 'h' : 'c', z.zone_type, fmtPrice(z.center, priceRound),
+      z.p_touch, z.p_hold, z.n_events, z.tf_count,
+    ].join(',')).join(';'),
   ].join('|');
 
   // ---- 图上的横线：持仓均价、挂着的限价单、止损止盈、支撑阻力 ----
@@ -1063,17 +1072,25 @@ export default function ChartPane({
     const byNear = [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
     const pctOf = (v: number | null) => (v === null ? '—' : Math.round(v * 100) + '%');
     byNear.forEach((z, i) => {
+      /**
+       * 历史位（这次没重算出来、但还记得的）画淡、画细、带「历史」两字。
+       * 以前这类位直接从图上消失，人回头想找「刚才那条支撑」就找不到了。
+       */
+      const dim = z.history === true;
       items.push({
         price: z.center,
         rank: 3 + i * 0.01,
-        color: z.zone_type === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)',
-        width: i < 2 ? 2 : 1,
-        style: LineStyle.Solid,
+        color: z.zone_type === 'support'
+          ? (dim ? 'rgba(46,211,160,0.35)' : 'rgba(46,211,160,0.8)')
+          : (dim ? 'rgba(255,95,109,0.35)' : 'rgba(255,95,109,0.8)'),
+        width: dim ? 1 : (i < 2 ? 2 : 1),
+        style: dim ? LineStyle.Dashed : LineStyle.Solid,
         // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
         title: (z.zone_type === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(z.center, priceRound)
           + ' · 触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold)
           + ' · 测试 ' + z.n_events + ' 次'
-          + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : ''),
+          + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : '')
+          + (dim ? ' · 历史' : ''),
       });
     });
 

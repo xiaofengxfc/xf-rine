@@ -24,6 +24,8 @@ interface Props {
 }
 
 interface Diag {
+  exchange?: 'gate' | 'bitget';
+  exchangeLabel?: string;
   env: 'testnet' | 'live';
   envLabel: string;
   restBaseUrl: string;
@@ -34,22 +36,58 @@ interface Diag {
   account?: Record<string, string>;
 }
 
-type Tab = 'testnet' | 'live' | 'ai' | 'theme' | 'feedback';
+type Tab = 'testnet' | 'live' | 'ai' | 'theme' | 'backup' | 'feedback';
 
-const ENV_INFO: Record<'testnet' | 'live', { label: string; host: string; keyVar: string; secretVar: string; money: string }> = {
-  testnet: {
-    label: '模拟盘',
-    host: 'api-testnet.gateapi.io',
-    keyVar: 'GATE_TESTNET_KEY',
-    secretVar: 'GATE_TESTNET_SECRET',
-    money: '测试网的假钱',
+interface EnvInfo {
+  label: string;
+  host: string;
+  keyVar: string;
+  secretVar: string;
+  /** Bitget 有第三把钥匙；Gate 没有这一项 */
+  passVar?: string;
+  money: string;
+}
+
+/**
+ * 两家交易所的地址和变量名，按「交易所 → 环境」两层。
+ *
+ * 写死一份 Gate 的话，切到 Bitget 之后这一页会把人指去填 GATE_LIVE_KEY，
+ * 填完当然是"没配密钥"。
+ */
+const EX_INFO: Record<'gate' | 'bitget', Record<'testnet' | 'live', EnvInfo>> = {
+  gate: {
+    testnet: {
+      label: '模拟盘',
+      host: 'api-testnet.gateapi.io',
+      keyVar: 'GATE_TESTNET_KEY',
+      secretVar: 'GATE_TESTNET_SECRET',
+      money: '测试网的假钱',
+    },
+    live: {
+      label: '实盘',
+      host: 'api.gateio.ws',
+      keyVar: 'GATE_LIVE_KEY',
+      secretVar: 'GATE_LIVE_SECRET',
+      money: '真钱',
+    },
   },
-  live: {
-    label: '实盘',
-    host: 'api.gateio.ws',
-    keyVar: 'GATE_LIVE_KEY',
-    secretVar: 'GATE_LIVE_SECRET',
-    money: '真钱',
+  bitget: {
+    testnet: {
+      label: '模拟盘',
+      host: 'api.bitget.com（请求头带 PAPTRADING）',
+      keyVar: 'BITGET_TESTNET_KEY',
+      secretVar: 'BITGET_TESTNET_SECRET',
+      passVar: 'BITGET_TESTNET_PASSPHRASE',
+      money: '模拟账户的假钱',
+    },
+    live: {
+      label: '实盘',
+      host: 'api.bitget.com',
+      keyVar: 'BITGET_LIVE_KEY',
+      secretVar: 'BITGET_LIVE_SECRET',
+      passVar: 'BITGET_LIVE_PASSPHRASE',
+      money: '真钱',
+    },
   },
 };
 
@@ -58,8 +96,11 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
   // 两套密钥各存各的，互不覆盖：填实盘的不该把模拟盘那格冲掉
   const [testKey, setTestKey] = useState('');
   const [testSecret, setTestSecret] = useState('');
+  // Bitget 的 passphrase：创建 API 时自己设的那串口令
+  const [testPass, setTestPass] = useState('');
   const [liveKey, setLiveKey] = useState('');
   const [liveSecret, setLiveSecret] = useState('');
+  const [livePass, setLivePass] = useState('');
   const [live, setLive] = useState(config?.liveTrading ?? false);
   const [switching, setSwitching] = useState(false);
   const [models, setModels] = useState<string[]>([]);
@@ -67,6 +108,14 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
   const [pickOpen, setPickOpen] = useState(false);
   const pickRef = useRef<HTMLDivElement>(null);
   const [diag, setDiag] = useState<Diag | null>(null);
+  /** 备份：导出用的密码（两遍）和导入用的密码各存各的，免得来回改 */
+  const [bkPass, setBkPass] = useState('');
+  const [bkPass2, setBkPass2] = useState('');
+  const [bkBusy, setBkBusy] = useState(false);
+  /** 刚导出的密文，方便手机上没有下载目录时直接复制 */
+  const [bkCipher, setBkCipher] = useState('');
+  const [bkImportPass, setBkImportPass] = useState('');
+  const [bkImportText, setBkImportText] = useState('');
   const [busy, setBusy] = useState(false);
   const [aiBase, setAiBase] = useState(config?.ai.baseUrl ?? '');
   const [aiModel, setAiModel] = useState(config?.ai.model ?? '');
@@ -99,7 +148,8 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
   async function saveEnv(env: 'testnet' | 'live') {
     const k = env === 'testnet' ? testKey : liveKey;
     const s = env === 'testnet' ? testSecret : liveSecret;
-    if (!k.trim() && !s.trim() && env !== currentEnv) {
+    const p = env === 'testnet' ? testPass : livePass;
+    if (!k.trim() && !s.trim() && !p.trim() && env !== currentEnv) {
       onToast('err', '没有要保存的内容', '至少填一项，留空表示不改');
       return;
     }
@@ -108,11 +158,13 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
       const payload: Record<string, unknown> = { slotEnv: env };
       if (k.trim()) payload.key = k.trim();
       if (s.trim()) payload.secret = s.trim();
+      if (p.trim()) payload.passphrase = p.trim();
       // 下单开关是全局的，只在当前环境这一页跟着改，免得在另一页顺手把它打开
       if (env === currentEnv) payload.liveTrading = live;
       await jsend('POST', '/api/config/keys', payload);
-      onToast('ok', ENV_INFO[env].label + '密钥已保存', '立即生效，不用重启');
-      if (env === 'testnet') { setTestKey(''); setTestSecret(''); } else { setLiveKey(''); setLiveSecret(''); }
+      onToast('ok', EX_INFO[config?.exchange ?? 'gate'][env].label + '密钥已保存', '立即生效，不用重启');
+      if (env === 'testnet') { setTestKey(''); setTestSecret(''); setTestPass(''); }
+      else { setLiveKey(''); setLiveSecret(''); setLivePass(''); }
       onSaved();
     } catch (e) {
       onToast('err', '保存失败', (e as Error).message);
@@ -219,6 +271,25 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
     } finally { setSwitching(false); }
   }
 
+  /**
+   * 换交易所。
+   *
+   * 这不是「换一个数据源」，是换一个账户：合约名、张数口径、持仓、挂单全变了。
+   * 服务端会顺手清掉解锁令牌、停掉 AI 交易、关掉下单开关，所以这里只说清楚发生了什么。
+   */
+  async function switchExchange(next: 'gate' | 'bitget') {
+    if (next === (config?.exchange ?? 'gate')) return;
+    setSwitching(true);
+    try {
+      const r = await jsend<{ exchangeLabel: string }>('POST', '/api/config/exchange', { exchange: next });
+      setLive(false);
+      onToast('ok', '已切换到 ' + r.exchangeLabel, '下单开关和 AI 交易已自动关闭；密钥要按这一家的重填');
+      onSaved();
+    } catch (e) {
+      onToast('err', '切换失败', (e as Error).message);
+    } finally { setSwitching(false); }
+  }
+
   async function testAi() {
     setTesting(true);
     try {
@@ -316,14 +387,87 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
     }
   }
 
+  /**
+   * 导出备份。
+   *
+   * 页面这一侧只负责把 localStorage 收齐交给服务端：加密在服务端做 —— 手机用局域网 IP
+   * 打开页面时不是安全上下文，浏览器根本没有 crypto.subtle，放在页面里手机上就用不了。
+   */
+  async function exportBackup() {
+    if (bkPass.length < 8) { onToast('err', '密码太短', '至少 8 位。这个文件里放着 API 密钥'); return; }
+    if (bkPass !== bkPass2) { onToast('err', '两次密码不一样'); return; }
+    const local: Record<string, string> = {};
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith('xf-rine:')) continue;
+      local[k] = localStorage.getItem(k) ?? '';
+    }
+    setBkBusy(true);
+    try {
+      const r = await jsend<{ envelope: unknown; counts: { env: number; strategies: number; local: number } }>(
+        'POST', '/api/backup/export', { password: bkPass, local },
+      );
+      const text = JSON.stringify(r.envelope, null, 2);
+      setBkCipher(text);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'xunfeng-' + stamp + '.xfbackup.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      onToast('ok', '备份已导出', r.counts.env + ' 项配置 · ' + r.counts.strategies + ' 条策略 · ' + r.counts.local + ' 项页面设置');
+      setBkPass('');
+      setBkPass2('');
+    } catch (e) {
+      onToast('err', '导出失败', (e as Error).message);
+    } finally { setBkBusy(false); }
+  }
+
+  /**
+   * 恢复。
+   *
+   * 服务端把文件写回去之后页面必须重载：内存里那份旧配置（币种、密钥尾号、
+   * 交易所）已经不成立了，不重载会看到一半新一半旧。
+   */
+  async function importBackup(text: string) {
+    if (!bkImportPass) { onToast('err', '要填密码'); return; }
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(text);
+    } catch {
+      onToast('err', '这不是备份文件', '选一个 .xfbackup.json，或者把里面的内容粘进来');
+      return;
+    }
+    setBkBusy(true);
+    try {
+      const r = await jsend<{ applied: string[]; local: Record<string, string> }>(
+        'POST', '/api/backup/import', { password: bkImportPass, envelope },
+      );
+      for (const [k, v] of Object.entries(r.local ?? {})) {
+        try { localStorage.setItem(k, v); } catch { /* 配额满了就算了 */ }
+      }
+      onToast('ok', '已恢复', (r.applied.join('、') || '没有可恢复的内容') + '。页面马上重新加载');
+      setBkImportPass('');
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+      onToast('err', '恢复失败', (e as Error).message);
+    } finally { setBkBusy(false); }
+  }
+
   function envTab(env: 'testnet' | 'live') {
-    const info = ENV_INFO[env];
+    const ex = config?.exchange ?? 'gate';
+    const exName = config?.exchangeLabel ?? (ex === 'bitget' ? 'Bitget' : 'Gate');
+    const info = EX_INFO[ex][env];
     const isCurrent = env === currentEnv;
     const state = config?.keysByEnv?.[env];
     const k = env === 'testnet' ? testKey : liveKey;
     const s = env === 'testnet' ? testSecret : liveSecret;
+    const p = env === 'testnet' ? testPass : livePass;
     const setK = env === 'testnet' ? setTestKey : setLiveKey;
     const setS = env === 'testnet' ? setTestSecret : setLiveSecret;
+    const setP = env === 'testnet' ? setTestPass : setLivePass;
 
     return (
       <>
@@ -390,12 +534,12 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
               {serverIp?.proxy?.on && (
                 <>
                   {' '}服务端查 IP 也走系统代理（<code>{serverIp.proxy.url}</code>）。
-                  Gate 的行情和交易直连，直连不通才退回代理，白名单填{' '}
+                  {exName} 的行情和交易直连，直连不通才退回代理，白名单填{' '}
                   <code>{serverIp.directIp ?? serverIp.ip}</code>。
                 </>
               )}
               {serverIp?.proxy && !serverIp.proxy.on && serverIp.ok && (!ip?.ok || serverIp.ip !== ip.ip) && (
-                <> 服务端直连出口是 <code>{serverIp.ip}</code>，Gate 的 API 请求从那里发出 —— 白名单要填这一个。</>
+                <> 服务端直连出口是 <code>{serverIp.ip}</code>，{exName} 的 API 请求从那里发出 —— 白名单要填这一个。</>
               )}
             </div>
           </div>
@@ -416,6 +560,16 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
           <label>{info.secretVar}</label>
           <input className="input" type="password" value={s} onChange={(e) => setS(e.target.value)} placeholder="留空表示不修改" spellCheck={false} />
         </div>
+        {info.passVar && (
+          <div className="field">
+            <label>{info.passVar}</label>
+            <input className="input" type="password" value={p} onChange={(e) => setP(e.target.value)} placeholder="留空表示不修改" spellCheck={false} />
+            <div className="hint">
+              Bitget 创建 API 时自己设的那串口令。它不在这里填，读账户和下单都会被拒
+              （报「无效的 PASSPHRASE」），而密钥本身看着是配好的。
+            </div>
+          </div>
+        )}
 
         {isCurrent && (
           <>
@@ -431,7 +585,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
 
             {diag && (
               <div className="hint" style={{ padding: 9, border: '1px solid var(--line)', borderRadius: 6, marginBottom: 10 }}>
-                <div>环境：{diag.envLabel} · <code>{diag.restBaseUrl}</code></div>
+                <div>交易所：{diag.exchangeLabel ?? config?.exchangeLabel ?? 'Gate'} · 环境：{diag.envLabel} · <code>{diag.restBaseUrl}</code></div>
                 <div>私有接口：{diag.privateOk ? <span className="up">正常</span> : <span className="down">{diag.privateError}</span>}</div>
                 {diag.account && (
                   <div style={{ marginTop: 4 }}>
@@ -446,7 +600,15 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
         <div className="hint" style={{ marginBottom: 12 }}>
           密钥只写进服务端的 <code>{config?.envPath ?? 'server/.env'}</code>，只有服务端读；
           页面拿到的永远只有尾号四位。
-          到 Gate「API 管理」建密钥时勾选 <b>合约交易 · 读写</b> 就够，<b>不要开提现权限</b>。
+          {ex === 'bitget' ? (
+            <>
+              到 Bitget「API 管理」建密钥时勾选 <b>合约交易 · 读写</b>，并把创建时设的口令
+              （Passphrase）一起填上 —— <b>KEY / SECRET / PASSPHRASE 三样缺一不可</b>。
+              <b>不要开提现权限</b>。
+            </>
+          ) : (
+            <>到 Gate「API 管理」建密钥时勾选 <b>合约交易 · 读写</b> 就够，<b>不要开提现权限</b>。</>
+          )}
         </div>
 
         {native && (
@@ -487,6 +649,29 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
           <button className="x" onClick={onClose}>×</button>
         </header>
 
+        {/*
+          交易所放在最上面：它决定下面这两格填的是哪一家的密钥。
+          同一时间只连一家 —— 合约名、张数、持仓、挂单的整套口径都绑在这一个选择上。
+        */}
+        <div className="ex-pick" style={{ marginBottom: 12 }}>
+          <div className="seg" style={{ width: '100%' }}>
+            {(['gate', 'bitget'] as const).map((x) => (
+              <button
+                key={x}
+                className={(config?.exchange ?? 'gate') === x ? 'on' : ''}
+                style={{ flex: 1 }}
+                disabled={switching}
+                onClick={() => void switchExchange(x)}
+              >
+                {x === 'gate' ? 'Gate' : 'Bitget'}
+              </button>
+            ))}
+          </div>
+          <div className="hint" style={{ marginTop: 6 }}>
+            切换会关掉下单开关和 AI 交易（因为换的是另一个账户），两家的密钥各存各的。
+          </div>
+        </div>
+
         {/* 五格之后每格只剩七十来像素，所以「当前环境」只留一个小点，文字留给标签自己 */}
         <div className="set-tabs">
           <button className={tab === 'testnet' ? 'on' : ''} onClick={() => setTab('testnet')}>
@@ -497,6 +682,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
           </button>
           <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>AI</button>
           <button className={tab === 'theme' ? 'on' : ''} onClick={() => setTab('theme')}>外观</button>
+          <button className={tab === 'backup' ? 'on' : ''} onClick={() => setTab('backup')}>备份</button>
           <button className={tab === 'feedback' ? 'on' : ''} onClick={() => setTab('feedback')}>反馈</button>
         </div>
 
@@ -674,6 +860,82 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
                 点了立刻生效，不用重启。浅色下 K 线的底色、网格、坐标轴会一起换，
                 涨跌色和画线颜色保持不变。
               </div>
+            </>
+          )}
+
+          {tab === 'backup' && (
+            <>
+              <div className="hint" style={{ marginBottom: 12 }}>
+                备份是一个<b>加密文件</b>：两家的密钥、策略库、AI 交易设置、画线和偏好都在里面。
+                <b>密码丢了就打不开</b>，谁也找不回来。
+                恢复会覆盖这台机器现在的配置（被覆盖的文件各留一份 <code>.bak</code>），恢复完页面会重新加载。
+              </div>
+
+              <div className="field">
+                <label>导出 · 设置密码（至少 8 位）</label>
+                <input
+                  className="input" type="password" spellCheck={false}
+                  value={bkPass} onChange={(e) => setBkPass(e.target.value)}
+                  placeholder="这个密码不存进任何地方，只用来加密这个文件"
+                />
+              </div>
+              <div className="field">
+                <label>再输一次</label>
+                <input
+                  className="input" type="password" spellCheck={false}
+                  value={bkPass2} onChange={(e) => setBkPass2(e.target.value)}
+                />
+              </div>
+              <div className="row4" style={{ marginBottom: 14 }}>
+                <button className="btn" disabled={bkBusy} onClick={() => void exportBackup()}>
+                  {bkBusy ? '处理中…' : '导出并下载'}
+                </button>
+                {bkCipher && (
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(bkCipher);
+                      onToast('ok', '已复制备份文本', '手机上没有下载目录时，把它存到别处再导入');
+                    }}
+                  >
+                    复制备份文本
+                  </button>
+                )}
+              </div>
+
+              <div className="field">
+                <label>恢复 · 选备份文件</label>
+                <input
+                  className="input"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    void file.text()
+                      .then((t) => setBkImportText(t))
+                      .catch(() => onToast('err', '读不了这个文件'));
+                  }}
+                />
+              </div>
+              <div className="field">
+                <label>或者把备份内容粘进来</label>
+                <textarea
+                  className="input" rows={3} spellCheck={false}
+                  value={bkImportText} onChange={(e) => setBkImportText(e.target.value)}
+                  placeholder='{"format":"xf-rine-backup", …}'
+                />
+              </div>
+              <div className="field">
+                <label>这个备份的密码</label>
+                <input
+                  className="input" type="password" spellCheck={false}
+                  value={bkImportPass} onChange={(e) => setBkImportPass(e.target.value)}
+                />
+              </div>
+              <button className="btn" disabled={bkBusy || !bkImportText} onClick={() => void importBackup(bkImportText)}>
+                恢复这份备份
+              </button>
             </>
           )}
 

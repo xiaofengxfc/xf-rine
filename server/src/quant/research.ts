@@ -39,6 +39,11 @@ export interface RunOpts {
   maxRounds?: number;
   /** 每一轮跑完回调一次，页面上能看见进度 */
   onRound?: (r: RoundSummary) => void;
+  /**
+   * 细一档的进度播报：模型在想的那一分钟里，页面上也得有东西在动。
+   * 只有 onRound 的话，两次回调之间最长能空一分多钟，看着就是「卡在回测中」。
+   */
+  onStage?: (stage: string, message: string) => void;
   /** 开始跑之前先给出这一轮用的假设，页面先画出来 */
   onHypothesis?: (r: RoundSummary) => void;
   /** 想停就设成 true */
@@ -81,6 +86,7 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
     }
 
     // ---- 1. 提假设 ----
+    opts.onStage?.('model', '第 ' + i + ' 轮：让模型提假设（最慢的一步，通常要几十秒）');
     const asked = await proposeHypothesis({
       contract: opts.contract,
       interval: opts.interval,
@@ -124,10 +130,12 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
         + issues.map((x) => x.hint).join('；') + '】').slice(0, 400);
       rounds.push(summary);
       opts.onRound?.(summary);
+      opts.onStage?.('reject', '第 ' + i + ' 轮：假设写得不成立，退回去重写');
       continue;
     }
 
     opts.onHypothesis?.(summary);
+    opts.onStage?.('search', '第 ' + i + ' 轮：按这个假设跑参数搜索');
 
     // ---- 2. 搜索 ----
     const spec = toSpec(asked.hypothesis, opts.contract + ' ' + opts.interval + ' #' + i);
@@ -143,6 +151,9 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
 
     summary.candidates = candidates.length;
     summary.enoughSample = candidates.filter((c) => !c.insufficientSample).length;
+    if (candidates.length === 0) {
+      opts.onStage?.('search', '第 ' + i + ' 轮：这组条件一个候选都没跑出来，换思路');
+    }
 
     // ---- 3. 判定 ----
     // 只看样本量够的：样本不足的那份排第一也是噪音，拿它去判定等于自己骗自己

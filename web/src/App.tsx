@@ -619,7 +619,9 @@ export default function App() {
         jget<ContractInfo>(`/api/contracts/${name}`),
         // 首屏直接要满一页：一页一千根，剩下的交给后台补
         jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}`),
-        jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
+        // 500 根：实测拉到 1000 根引擎给的位一个没变（它自己按整段聚类，不是按根数截），
+      // 白白多拉一趟 K 线，所以还是 500
+      jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
       ]);
       // 期间又切过币种，这份数据已经不是当前要看的东西了
       const cache = marketCacheRef.current;
@@ -1183,6 +1185,7 @@ export default function App() {
     <>
       <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
         <TopBar
+          exchange={config?.exchangeLabel ?? 'Gate'}
           env={config?.env ?? 'live'}
           ticker={ticker}
           // 本地模式下顶栏换成本地这个品种：不然顶上是 BTC 的价，图上是 AGT 的 0.074
@@ -1235,7 +1238,8 @@ export default function App() {
             contract={localOn ? (localPick?.symbol ?? contract) : contract}
             interval={localOn ? (localPick?.tf ?? interval) : interval}
             bars={bars}
-            zones={levels?.zones ?? []}
+            // 历史位一起交给图：这次没算出来但还留着的那几条，画淡一点
+            zones={[...(levels?.zones ?? []), ...(levels?.historyZones ?? [])]}
 
             positions={myPositions}
             orders={myOrders}
@@ -1253,7 +1257,7 @@ export default function App() {
             backfilling={backfilling}
             onNeedOlder={needOlder}
             // 本地模式下周期按钮只能给文件里真有的那几个，点了也没有的周期等于把人骗到空白图上
-            intervals={localOn ? localTfs : undefined}
+            intervals={localOn ? localTfs : config?.intervals}
             onIntervalChange={localOn ? setLocalTf : setInterval}
             onManualLevels={onManualLevels}
             canClose={armed && Boolean(token)}

@@ -2,21 +2,16 @@ import crypto from 'node:crypto';
 import { config, restBaseUrl, publicBaseUrl } from '../config.js';
 // 出网统一走 netFetch：配了系统代理时它会自动跟着走
 import { netFetch } from '../net.js';
+import { GateError } from '../exchange/errors.js';
 
 const PREFIX = '/api/v4';
 const TIMEOUT_MS = 15_000;
 
-export class GateError extends Error {
-  status: number;
-  label: string;
-  detail: string;
-  constructor(status: number, label: string, detail: string) {
-    super(`Gate ${status} ${label}: ${detail}`);
-    this.status = status;
-    this.label = label;
-    this.detail = detail;
-  }
-}
+/**
+ * 报错类现在住在 exchange/errors.ts（Bitget 那边也要用同一个类，
+ * 否则 routes 里的 instanceof 各认各的）。这里转出去一份，老的 import 不用改。
+ */
+export { GateError };
 
 function sign(method: string, path: string, query: string, body: string, ts: string): string {
   const bodyHash = crypto.createHash('sha512').update(body).digest('hex');
@@ -78,13 +73,14 @@ async function request<T>(
     if (name !== 'TimeoutError' && name !== 'AbortError') return e;
     const secs = Math.round(timeoutMs / 1000);
     if (method === 'GET') {
-      return new GateError(504, 'UPSTREAM_TIMEOUT', `${path} 在 ${secs} 秒内没有答复，过一会儿再试`);
+      return new GateError(504, 'UPSTREAM_TIMEOUT', `${path} 在 ${secs} 秒内没有答复，过一会儿再试`, 'Gate');
     }
     return new GateError(
       504,
       'UNKNOWN_RESULT',
       `${path} 超时（${secs} 秒）：不确定交易所是否已经受理这一单。`
       + '先到「委托 / 持仓」里核对，别直接重点 —— 重复下单会变成两单。',
+      'Gate',
     );
   };
   try {
@@ -115,7 +111,7 @@ async function request<T>(
         label = j.label ?? j.message ?? label;
         detail = j.detail ?? j.message ?? j.error ?? detail;
       } catch { /* keep raw */ }
-      throw new GateError(res.status, label, typeof detail === 'string' ? detail : JSON.stringify(detail));
+      throw new GateError(res.status, label, typeof detail === 'string' ? detail : JSON.stringify(detail), 'Gate');
     }
     return (safeText ? JSON.parse(safeText) : null) as T;
   } finally {
@@ -141,7 +137,7 @@ export const gatePublicTrade = <T>(path: string, params: Record<string, string |
 
 export function requireKeys(): void {
   if (!config.key || !config.secret) {
-    throw new GateError(401, 'NO_KEYS', '服务端未配置 GATE_KEY / GATE_SECRET，请到设置页填写密钥');
+    throw new GateError(401, 'NO_KEYS', '服务端未配置 GATE_KEY / GATE_SECRET，请到设置页填写密钥', 'Gate');
   }
 }
 

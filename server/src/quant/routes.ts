@@ -12,8 +12,8 @@
  */
 
 import { Router, type Request, type Response } from 'express';
-import { gatePublic } from '../gate/rest.js';
-import { config } from '../config.js';
+import { exchange } from '../exchange/index.js';
+import { config, exchangeLabel } from '../config.js';
 import { getSeries } from './data.js';
 import { backtest, type BacktestResult, type StrategySpec, type Candle } from './backtest.js';
 import { runPromptSignals, expandSignals, randomBaselineSignals } from './promptBacktest.js';
@@ -49,18 +49,16 @@ export async function contractProblem(contract: string): Promise<string | null> 
     return '合约名要写成 BTC_USDT 这种形式，现在填的是「' + contract + '」';
   }
   try {
-    await gatePublic('/futures/usdt/contracts/' + encodeURIComponent(name), {}, 60_000, 15_000);
+    await exchange().publicContract(name);
     return null;
   } catch {
-    return 'Gate 上没有合约 ' + name + ' —— 名字写错了，或者它已经下架';
+    return exchangeLabel() + ' 上没有合约 ' + name + ' —— 名字写错了，或者它已经下架';
   }
 }
 
 /** 合约乘数和费率：回测要按它换算张数，不能拍脑袋 */
 async function contractMeta(contract: string): Promise<ContractMeta> {
-  const c = await gatePublic<{ quanto_multiplier: string; taker_fee_rate: string }>(
-    '/futures/usdt/contracts/' + encodeURIComponent(contract), {}, 60_000, 15_000,
-  );
+  const c = await exchange().publicContract(contract);
   return {
     multiplier: Number(c.quanto_multiplier) || 0.0001,
     takerFee: Number(c.taker_fee_rate) || 0.0005,
@@ -362,6 +360,8 @@ export function mountQuant(router: Router, deps: {
         market: marketOf(meta, body),
         maxRounds: rounds,
         isCancelled: () => cancelled,
+        // 细一档的进度：模型在想的时候页面也得动，否则看着就是「卡在回测中」
+        onStage: (stage, message) => send({ type: 'stage', stage, message }),
         onHypothesis: (r) => send({
           type: 'hypothesis',
           round: r.round,
@@ -395,7 +395,45 @@ export function mountQuant(router: Router, deps: {
         }),
       });
 
-      send({ type: 'done', report, verdict: verdictLine(report) });
+      /**
+       * 达标的那一条直接进策略库。
+       *
+       * 以前研究跑完只把结论打在事件流里：页面一刷、或者人走开一会儿，这次研究就白跑了 ——
+       * 「假设通过了但结果没保存」说的就是这件事。现在自动存一条，并顺手把这次的回测结论
+       * 记上（不记的话策略库里会显示「没跑过回测」，AI 交易页也会把它拦住）。
+       */
+      let saved: { id: string; name: string; spec: StrategySpec } | null = null;
+      if (report.winner) {
+        try {
+          const when = new Date().toLocaleString('zh-CN', {
+            month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+          });
+          const name = (contract + ' ' + interval + ' · AI 达标 ' + when).slice(0, 60);
+          // 参数取的是搜索出来的那一组，不是假设里的默认值 —— 否则存下来的是另一条策略
+          const spec: StrategySpec = { ...toSpec(report.winner.hypothesis, name), params: report.winner.candidate.params };
+          const row = saveStrategy({
+            name, kind: 'rule', contract, interval, spec,
+            // 和页面上的默认风险参数一致；AI 交易那边会按这条策略自己的数跑
+            risk: { riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 },
+          });
+          const blind = report.winner.candidate.blindResult;
+          if (blind) {
+            recordRun(row.id, blind, {
+              passed: report.winner.verdict.passed,
+              // 库里存的是给人看的一句话，判定项对象要在这里压成标签
+              failed: (report.winner.verdict.failed ?? []).map((x) => x.label),
+              enoughSample: !report.winner.candidate.insufficientSample,
+              contract, interval,
+            });
+          }
+          saved = { id: row.id, name: row.name, spec };
+        } catch (e) {
+          // 存不进去不能连累结论：报告照样发出去，只是多一行说明
+          send({ type: 'note', message: '达标方案没能存进策略库：' + (e as Error).message });
+        }
+      }
+
+      send({ type: 'done', report, verdict: verdictLine(report), saved });
       res.end();
     } catch (e) {
       send({ type: 'error', message: (e as Error).message });

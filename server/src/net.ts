@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { Agent, ProxyAgent, fetch as undiciFetch } from 'undici';
 import type { Dispatcher } from 'undici';
-import { restBaseUrl } from './config.js';
+import { probeUrl } from './config.js';
 
 type FetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 
@@ -146,6 +146,17 @@ function dispatcherFor(route: 'direct' | 'proxy'): Dispatcher {
   return route === 'proxy' && state.on ? current : direct;
 }
 
+/**
+ * 给 WebSocket 用的 dispatcher。
+ *
+ * undici 的 fetch 能跟着 dispatcher 走代理，ws 库不会读系统代理 —— 直连被重置的网络里，
+ * 行情连接就只能一直 ECONNRESET。行情走 undici 的 WebSocket 时从这里拿 dispatcher，
+ * 和 REST 走同一条路；没配代理就返回 null，调用方按直连连。
+ */
+export function wsDispatcher(): Dispatcher | null {
+  return state.on && current !== direct ? current : null;
+}
+
 /** 走一条路发一次，顺手记下这次花了多久 */
 async function attempt(
   route: 'direct' | 'proxy',
@@ -170,7 +181,8 @@ async function probe(agent: Dispatcher, route: 'direct' | 'proxy'): Promise<bool
   const timer = setTimeout(() => ac.abort(), 5000);
   const started = Date.now();
   try {
-    const res = await undiciFetch(`${restBaseUrl()}/api/v4/futures/usdt/contracts/BTC_USDT`, {
+    // 探针地址跟着交易所走：换成 Bitget 之后还打 Gate 的接口，量出来的快慢不作数
+    const res = await undiciFetch(probeUrl(), {
       dispatcher: agent,
       signal: ac.signal,
       headers: { accept: 'application/json' },
@@ -191,6 +203,19 @@ async function probe(agent: Dispatcher, route: 'direct' | 'proxy'): Promise<bool
  * 重新确认代理状态。force 为真时即便地址没变也重新探一次。
  * 定时调它，用户换了代理、关了代理都能跟上，不需要重启服务。
  */
+/**
+ * 首次探测代理的那一次。
+ *
+ * 开机第一波请求（合约表、行情连接）如果抢在探测前面出发，状态还是「直连」，
+ * 在这一类直连被重置的网络里就会白白失败一次：页面开局空着、行情要重连两轮才上来。
+ * 让它们都等这一个 promise，代价是启动多几秒，换来的是第一屏就是对的。
+ */
+let primed: Promise<ProxyState> | null = null;
+export function primeProxy(): Promise<ProxyState> {
+  if (!primed) primed = refreshProxy(true).catch(() => state);
+  return primed;
+}
+
 export async function refreshProxy(force = false): Promise<ProxyState> {
   const found = await detectProxy();
   // 手里没在走代理时必须重探：代理后开、或者一会儿才连上，都得自动切过去
@@ -271,6 +296,8 @@ export async function netFetch(
   // 用默认的 8 秒必然超时 —— 调用方按需要放宽。不放宽的话，「拉不到」和「本来就没有」
   // 在页面上长得一样：币种列表空着，也没人说一句为什么。
   const limit = opts.attemptMs && opts.attemptMs > 0 ? opts.attemptMs : ATTEMPT_MS;
+  // 还没探过代理：先等那一次结论，别默认「直连」
+  if (state.at === 0 && opts.direct !== true) await primeProxy();
   const blocked = opts.private === true && blockedAt > 0 && Date.now() - blockedAt < BLOCK_TTL_MS;
   if (opts.direct === true || !state.on || blocked || isLoopbackUrl(url)) return attempt('direct', url, init, limit);
 

@@ -15,6 +15,8 @@ interface Props {
    */
   local?: { symbol: string; tf: string; price: number } | null;
   env: 'testnet' | 'live';
+  /** 现在连的是哪家交易所。写在品牌旁边，省得在 Bitget 上下单还以为在 Gate */
+  exchange: string;
   /** 当前页面 */
   view: View;
   onView: (v: View) => void;
@@ -33,7 +35,7 @@ interface Props {
 }
 
 export default function TopBar({
-  ticker, local, env, view, onView, aiOn, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
+  ticker, local, env, exchange, view, onView, aiOn, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
   onToggleArm, onOpenSettings, onOpenRail,
 }: Props) {
   const chg = ticker?.change24h ?? 0;
@@ -44,7 +46,7 @@ export default function TopBar({
 
       <div className="brand">
         <b>巡风</b>
-        <span className="wide-only">Gate 永续</span>
+        <span className="wide-only">{exchange} 永续</span>
         <em className={`env-badge ${env}`}>{env === 'testnet' ? '模拟盘' : '实盘'}</em>
       </div>
 

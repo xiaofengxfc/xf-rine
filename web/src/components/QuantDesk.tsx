@@ -104,6 +104,8 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   const [researching, setResearching] = useState(false);
   const [events, setEvents] = useState<QuantEvent[]>([]);
   const [stage, setStage] = useState('');
+  /** 已经跑了多少秒。没有它的时候，模型想一分钟页面一个字都不变，看着就是卡死 */
+  const [elapsed, setElapsed] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   /** 拉策略库。保存完、删完都要刷一次 */
@@ -227,6 +229,14 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     } finally { setBusy(''); }
   }, [contract, tf, capital, spec, kind, prompt, onToast]);
 
+  useEffect(() => {
+    if (!researching) { setElapsed(0); return; }
+    const t0 = Date.now();
+    setElapsed(0);
+    const timer = window.setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [researching]);
+
   const startResearch = useCallback(async () => {
     if (!canRun) { onToast('err', '只有本机能跑研究'); return; }
     const ctl = new AbortController();
@@ -246,6 +256,19 @@ export default function QuantDesk({ canRun, onToast }: Props) {
         setEvents((prev) => [...prev, ev]);
         if (ev.type === 'stage') setStage(ev.message);
         if (ev.type === 'done') setStage('跑完了');
+        /**
+         * 服务端把达标的方案存进策略库了，这里把它直接载进编辑器。
+         * 以前研究跑完只留一行结论文本：一刷页面就没了，回到「策略」页还是空的。
+         */
+        if (ev.type === 'done' && ev.saved) {
+          setSpec(ev.saved.spec);
+          setSavedId(ev.saved.id);
+          setKind('rule');
+          setResult(null);
+          void refreshLibrary();
+          onToast('ok', '达标方案已存进策略库', '「' + ev.saved.name + '」· 在 AI 交易页可以直接选它');
+        }
+        if (ev.type === 'note') onToast('err', '有一件事没做成', ev.message);
       }, ctl.signal);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') onToast('err', '研究中断', (e as Error).message);
@@ -640,7 +663,10 @@ export default function QuantDesk({ canRun, onToast }: Props) {
             <div className="panel quant-research">
               <div className="panel-head">
                 <span className="panel-title">AI 研究</span>
-                <span className="dim">{researching ? stage : doneEvent ? '完成' : '已停止'}</span>
+                <span className="dim">
+                  {researching ? stage : doneEvent ? '完成' : '已停止'}
+                  {researching && elapsed > 0 ? ' · 已跑 ' + elapsed + ' 秒' : ''}
+                </span>
               </div>
               <div className="panel-foot">
                 {hypotheses.map((h, i) => {
@@ -679,7 +705,11 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                             </span>
                           )}
                         </div>
-                      ) : <div className="dim">回测中…</div>}
+                      ) : (
+                        // 以前这里写死「回测中…」，模型想一分半它也是一动不动 ——
+                        // 用户以为卡死了。现在把当前这一步和已用时写出来
+                        <div className="dim">{researching ? (stage || '回测中…') : '这一轮没跑完'}</div>
+                      )}
                     </div>
                   );
                 })}

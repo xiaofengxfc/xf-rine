@@ -48,6 +48,15 @@ function num(v: string | undefined, fallback: number): number {
 
 export type GateEnv = 'testnet' | 'live';
 
+/**
+ * 用哪家交易所。
+ *
+ * 二选一：合约名、张数、持仓、挂单、保护单的整套口径都跟着它走。
+ * 换一家相当于换一个账户，密钥、地址、保证金模式都不一样 —— 所以这里不做「同时连两家」，
+ * 那种模糊最后一定算在钱上。
+ */
+export type ExchangeId = 'gate' | 'bitget';
+
 export interface AiConfig {
   baseUrl: string;
   apiKey: string;
@@ -55,9 +64,13 @@ export interface AiConfig {
 }
 
 export interface Config {
+  /** 当前连的是哪家 */
+  exchange: ExchangeId;
   env: GateEnv;
   key: string;
   secret: string;
+  /** Bitget 的第三把钥匙（创建 API 时自己设的口令）。Gate 用不到，留空 */
+  passphrase: string;
   liveTrading: boolean;
   port: number;
   /** 监听地址。默认只听本机；要拿手机连就设成 0.0.0.0 */
@@ -67,21 +80,48 @@ export interface Config {
   ai: AiConfig;
 }
 
-/** 每个环境一套密钥，切环境不用重填。GATE_KEY/GATE_SECRET 作为兜底的老写法保留。 */
-export function keySlot(env: GateEnv): { key: string; secret: string } {
+/**
+ * 初始化期间也能读的当前交易所。
+ *
+ * keySlot 会在 readConfig 里被调用，而那时候 `config` 这个变量还没赋值（死区），
+ * 直接读 config.exchange 会当场 ReferenceError —— 服务端启动即挂。
+ * 所以这里留一份先于 config 就绪的副本，readConfig 每次都会把它同步过来。
+ */
+let activeExchange: ExchangeId =
+  ((process.env.EXCHANGE ?? 'gate').trim().toLowerCase() === 'bitget' ? 'bitget' : 'gate') as ExchangeId;
+
+/**
+ * 每个环境、每家交易所各一套密钥，切来切去不用重填。
+ * 变量名保持 `交易所_环境_KEY` 这个形状，.env 里一行一件事，看得懂也改得动。
+ */
+export function keySlot(env: GateEnv, ex?: ExchangeId): { key: string; secret: string; passphrase: string } {
   const suffix = env === 'testnet' ? 'TESTNET' : 'LIVE';
-  return { key: `GATE_${suffix}_KEY`, secret: `GATE_${suffix}_SECRET` };
+  const prefix = (ex ?? activeExchange) === 'bitget' ? 'BITGET' : 'GATE';
+  return {
+    key: `${prefix}_${suffix}_KEY`,
+    secret: `${prefix}_${suffix}_SECRET`,
+    passphrase: `${prefix}_${suffix}_PASSPHRASE`,
+  };
 }
 
 /** 读指定环境的密钥。不传就读当前环境。 */
 export function readKey(env: GateEnv = config.env): string {
   const slot = keySlot(env);
-  return (process.env[slot.key] ?? process.env.GATE_KEY ?? '').trim();
+  // GATE_KEY / GATE_SECRET 是老版本的单环境写法，留着兜底，老 .env 不用改
+  const legacy = activeExchange === 'gate' ? process.env.GATE_KEY : undefined;
+  return (process.env[slot.key] ?? legacy ?? '').trim();
 }
 
 function readSecret(env: GateEnv): string {
   const slot = keySlot(env);
-  return (process.env[slot.secret] ?? process.env.GATE_SECRET ?? '').trim();
+  const legacy = activeExchange === 'gate' ? process.env.GATE_SECRET : undefined;
+  return (process.env[slot.secret] ?? legacy ?? '').trim();
+}
+
+/** Bitget 的 passphrase。Gate 没有这一项，读到空字符串 */
+function readPassphrase(env: GateEnv): string {
+  if (activeExchange !== 'bitget') return '';
+  return (process.env[keySlot(env).passphrase] ?? '').trim();
 }
 
 function maskKey(k: string): { configured: boolean; hint: string } {
@@ -94,10 +134,14 @@ export const AI_DEFAULT_MODEL = 'gpt-4o-mini';
 
 function readConfig(): Config {
   const env: GateEnv = (process.env.GATE_ENV ?? 'live').trim().toLowerCase() === 'testnet' ? 'testnet' : 'live';
+  // 先落定这一轮用哪家：下面读密钥、拼地址都靠它
+  activeExchange = ((process.env.EXCHANGE ?? 'gate').trim().toLowerCase() === 'bitget' ? 'bitget' : 'gate') as ExchangeId;
   return {
+    exchange: activeExchange,
     env,
     key: readKey(env),
     secret: readSecret(env),
+    passphrase: readPassphrase(env),
     liveTrading: (process.env.LIVE_TRADING ?? 'false').trim().toLowerCase() === 'true',
     port: num(process.env.PORT, 8787),
     host: (process.env.HOST ?? '').trim() || '127.0.0.1',
@@ -117,14 +161,18 @@ export function reloadConfig(): Config {
   return config;
 }
 
-const REST_ORIGIN: Record<GateEnv, string> = {
-  live: 'https://api.gateio.ws',
-  testnet: 'https://api-testnet.gateapi.io',
+const REST_ORIGIN: Record<ExchangeId, Record<GateEnv, string>> = {
+  gate: { live: 'https://api.gateio.ws', testnet: 'https://api-testnet.gateapi.io' },
+  /**
+   * Bitget 的模拟盘不换域名：同一个 api.bitget.com，靠请求头 PAPTRADING: 1
+   * 把请求切到模拟账户（见 bitget/rest.ts）。这里两个环境写同一个地址是对的。
+   */
+  bitget: { live: 'https://api.bitget.com', testnet: 'https://api.bitget.com' },
 };
 
 /** 账户、持仓、下单走这里：模拟盘打测试网，实盘打主网 */
 export function restBaseUrl(): string {
-  return REST_ORIGIN[config.env];
+  return REST_ORIGIN[config.exchange][config.env];
 }
 
 /**
@@ -133,7 +181,7 @@ export function restBaseUrl(): string {
  * K 线和成交额都不能用来做技术分析。只有账户和交易才需要用测试网。
  */
 export function publicBaseUrl(): string {
-  return REST_ORIGIN.live;
+  return REST_ORIGIN[config.exchange].live;
 }
 
 /**
@@ -147,6 +195,31 @@ export function marketWsUrl(): string {
 
 export function envLabel(): string {
   return config.env === 'testnet' ? '模拟盘' : '实盘';
+}
+
+/** 报错和页面上要说对是哪家交易所 */
+export function exchangeLabel(): string {
+  return config.exchange === 'bitget' ? 'Bitget' : 'Gate';
+}
+
+/** 当前交易所支持的 K 线周期。页面只列这些，免得点了一个空周期 */
+export function exchangeIntervals(): string[] {
+  return config.exchange === 'bitget'
+    ? ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
+    : ['1m', '5m', '15m', '30m', '1h', '4h', '8h', '1d'];
+}
+
+/**
+ * 测出网通不通用的那个地址。
+ *
+ * net.ts 要量「直连快还是代理快」，就得有一个又小又代表真实链路的请求。
+ * 以前这里是写死的 Gate 合约接口，换成 Bitget 之后还打 Gate 地址就不作数了。
+ */
+export function probeUrl(): string {
+  if (config.exchange === 'bitget') {
+    return 'https://api.bitget.com/api/v2/mix/market/ticker?symbol=BTCUSDT&productType=USDT-FUTURES';
+  }
+  return restBaseUrl() + '/api/v4/futures/usdt/contracts/BTC_USDT';
 }
 
 /** 页面只能看到尾号，密钥永不出网 */

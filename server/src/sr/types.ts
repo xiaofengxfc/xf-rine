@@ -48,6 +48,11 @@ export interface Zone {
   bucket_n: number | null;
   tf_count: number;
   tfs: string;
+  /**
+   * 本地加的字段，上游引擎没有：这条位是「之前出现过、这次没重算出来」的历史位。
+   * 只影响页面怎么画（画淡一点），不参与任何数值含义。
+   */
+  history?: boolean;
 }
 
 export interface AnalysisSummary {

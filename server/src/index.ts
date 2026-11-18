@@ -4,13 +4,19 @@ import { WebSocketServer } from 'ws';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { config, keyHint, restBaseUrl, envLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
+import { config, keyHint, restBaseUrl, envLabel, exchangeLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
 import { router } from './routes.js';
-import { MarketHub } from './gate/market.js';
+// 行情连接跟着所选交易所走：Gate 一套、Bitget 一套，对页面是同一个协议
+import { attachMarketHub, marketHubStatus, closeMarketHub } from './exchange/index.js';
 import { stopSidecar } from './sr/client.js';
-import { refreshProxy, proxyState, routeStats } from './net.js';
+import { primeProxy, refreshProxy, proxyState, routeStats } from './net.js';
 
 const app = express();
+/**
+ * 备份包里面有密钥、策略库和画线，base64 之后几百 KB 很常见。
+ * 这条要排在全局那个 256kb 的解析器前面 —— 排在后面等于一次都过不去。
+ */
+app.use('/api/backup', express.json({ limit: '16mb' }));
 app.use(express.json({ limit: '256kb' }));
 
 /**
@@ -136,7 +142,7 @@ if (apiOnly) {
 
 // 出网跟着系统代理走。Node 自己不读系统代理，这里替它读，并每分钟重新确认一次 ——
 // 用户开关代理、换节点之后不用重启服务。
-void refreshProxy(true).then((p) => {
+void primeProxy().then((p) => {
   console.log('  出网      ' + (p.on ? '走代理 ' + p.url + '（' + p.source + '）' : '直连') + (p.error ? '  ' + p.error : ''));
 });
 // 两条路谁快，量出来再决定每次请求走哪条（这里只打印，决策在 net.ts 里）
@@ -162,12 +168,12 @@ const wss = new WebSocketServer({
     cb(false, 401, 'Unauthorized');
   },
 });
-const hub = new MarketHub(wss);
-hub.connect();
+// 等代理探完再连：直连被重置的网络里，先连一次只会白掉一次线、白推一次 gate_down
+void primeProxy().then(() => attachMarketHub(wss));
 
 setInterval(() => {
-  const s = hub.status();
-  if (!s.alive) console.warn('[ws] gate 掉线，正在重连…');
+  const s = marketHubStatus();
+  if (!s.alive) console.warn('[ws] ' + config.exchange + ' 行情掉线，正在重连…');
 }, 30_000).unref();
 
 /**
@@ -199,7 +205,8 @@ server.listen(config.port, config.host, () => {
   const k = keyHint();
   console.log('');
   console.log('  巡风日内台  http://127.0.0.1:' + config.port);
-  console.log('  环境      ' + envLabel() + '  ' + restBaseUrl());
+  console.log('  交易所    ' + exchangeLabel() + '  ' + restBaseUrl());
+  console.log('  环境      ' + envLabel());
   console.log('  密钥      ' + (k.configured ? '已配置 ' + k.hint : '未配置（只能看盘，不能下单）'));
   console.log('  下单      ' + (config.liveTrading ? '已开启' + (config.env === 'live' ? ' —— 用的是真钱，谨慎' : '（模拟盘假钱）') : '关闭（只读）'));
   console.log('  配置      ' + ENV_PATH);
@@ -212,7 +219,7 @@ server.listen(config.port, config.host, () => {
 });
 
 const bye = () => {
-  hub.close();
+  closeMarketHub();
   server.close();
   // 引擎是子进程：不主动停，Node 退出后它会变成孤儿占着内存
   stopSidecar();

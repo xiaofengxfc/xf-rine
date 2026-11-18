@@ -1,12 +1,18 @@
 import { Router, type Request, type Response } from 'express';
 import {
   config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint,
-  remoteAccess, ENV_PATH, type GateEnv,
+  remoteAccess, ENV_PATH, exchangeLabel, exchangeIntervals, type GateEnv,
 } from './config.js';
-import { gatePublic, gatePublicTrade, gatePrivate, GateError, requireKeys } from './gate/rest.js';
+import { GateError } from './exchange/errors.js';
+import { exchange, resetExchangeCache } from './exchange/index.js';
+import type {
+  XContract, XPosition, XOrder, XTrigger, XTicker, XCandle, XOrderSpec, XAccount,
+} from './exchange/types.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
 import type { Bar } from './bar.js';
 import type { Direction, Zone } from './sr/types.js';
+import { stabilizeZones, zoneKey } from './sr/memory.js';
+import { BackupError, applyBackupFiles, collectBackup, decryptBackup, encryptBackup, sanitizeLocal } from './backup.js';
 import * as sr from './sr/client.js';
 import { SidecarError } from './sr/client.js';
 import { mountResearch } from './sr/research.js';
@@ -91,7 +97,12 @@ const EXHAUSTED_TTL = 10 * 60_000;
 const FAIL_LIMIT = 3;
 const FAIL_COOL_MS = 10_000;
 
-function seriesFor(key: string): BarSeries {
+function seriesFor(rawKey: string): BarSeries {
+  /**
+   * 缓存键带上交易所：两家的 K 线不是同一份数据（成交量、极值都不一样），
+   * 而且换交易所之后合约名虽然一样，背后是另一个市场。混着用等于把两家的历史拼成一根线。
+   */
+  const key = config.exchange + ':' + rawKey;
   const hit = seriesCache.get(key);
   if (hit) { hit.usedAt = Date.now(); return hit; }
   const fresh: BarSeries = {
@@ -230,6 +241,11 @@ function fail(res: Response, err: unknown): void {
     res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.detail, status: err.status });
     return;
   }
+  // 备份的报错（密码错、文件坏了、格式不认识）都是「你给的东西不对」，不是服务端崩了
+  if (err instanceof BackupError) {
+    res.status(400).json({ error: 'BACKUP', detail: err.message, status: 400 });
+    return;
+  }
   if (err instanceof DataError) {
     res.status(err.status === 200 ? 400 : err.status).json({ error: err.label, detail: err.message, status: err.status });
     return;
@@ -272,15 +288,44 @@ export function translate(e: unknown): unknown {
    * 认两处：Gate 的 label（READ_ONLY），和它的英文原文 —— 没有 label 的接口
    * 会把 message 直接顶到 label 上（见 gate/rest.ts）。
    */
-  if (e.label === 'READ_ONLY' || /does not have futures write permission/i.test(`${e.label} ${e.detail}`)) {
+  const readOnly = e.label === 'READ_ONLY'
+    || /does not have futures write permission/i.test(`${e.label} ${e.detail}`)
+    || (e.from === 'Bitget' && /permission|no authority|read[- ]?only|not allowed/i.test(String(e.detail)));
+  if (readOnly) {
+    const where = config.exchange === 'bitget'
+      ? '到 Bitget 的「API 管理」里给这把钥匙勾上「合约交易 · 读写」（要下单就勾读写），保存后重下一次就行'
+      : '到 Gate 的「API 管理」里把这把钥匙的权限改成「合约交易 · 读写」并保存，密钥本身不用换，改完重下一次就行';
     return new GateError(
       403,
       'KEY_NO_WRITE',
       '这把 API 密钥没有「合约交易」写权限，设杠杆、下单、平仓都会被交易所拒掉'
       + '（读行情、看账户是好的，所以页面上看不出问题）。'
-      + '到 Gate 的「API 管理」里把这把钥匙的权限改成「合约交易 · 读写」并保存，密钥本身不用换，改完重下一次就行。'
-      + `现在用的是${envLabel()}那套密钥，改的也是它。`,
+      + where + '。'
+      + `现在用的是${exchangeLabel()} ${envLabel()}那套密钥，改的也是它。`,
     );
+  }
+
+  /**
+   * Bitget 的拒单码对用户没有意义，挑几个常被撞上的翻成人话。
+   * 43012 = 保证金不足，40774 = 持仓方向对不上（多半是单向/双向持仓模式不一致）。
+   */
+  if (e.from === 'Bitget') {
+    if (e.label === '43012' || /insufficient.*(margin|balance)/i.test(String(e.detail))) {
+      return new GateError(
+        400, 'MARGIN_NOT_ENOUGH',
+        `保证金不够：${e.detail}。降张数、提高杠杆，或者先平掉别的仓位。`,
+        'Bitget',
+      );
+    }
+    if (e.label === '40774' || /position.*(side|direction)/i.test(String(e.detail))) {
+      return new GateError(
+        400, 'POSITION_SIDE',
+        `持仓方向对不上：${e.detail}。`
+        + 'Bitget 的「单向持仓 / 双向持仓」是在网页或 App 的合约设置里定的，'
+        + '这边按账户当前的模式下单；先到 Bitget 上确认一下这个合约是哪种模式，再重试。',
+        'Bitget',
+      );
+    }
   }
 
   if (e.label === 'MARKET_PRICE_TOO_DEVIATED' || e.label === 'PRICE_TOO_DEVIATED') {
@@ -294,7 +339,8 @@ export function translate(e: unknown): unknown {
     );
   }
 
-  if (e.label !== 'CONTRACT_NOT_FOUND' || config.env !== 'testnet') return e;
+  // 模拟盘只上架了几十个合约 —— 这是 Gate 测试网的情况，Bitget 的模拟盘是全量
+  if (e.label !== 'CONTRACT_NOT_FOUND' || config.env !== 'testnet' || config.exchange !== 'gate') return e;
   return new GateError(
     400,
     'NOT_IN_TESTNET',
@@ -305,19 +351,17 @@ export function translate(e: unknown): unknown {
 
 // ---------- 合约与行情 ----------
 
-interface GateContract {
-  name: string; quanto_multiplier: string; order_size_min: number; order_size_max: number;
-  order_price_round: string; mark_price_round: string; leverage_min: string; leverage_max: string;
-  last_price: string; mark_price: string; funding_rate: string; funding_rate_indicative: string;
-  funding_interval: number; in_delisting: boolean; status: string; position_size: number;
-  taker_fee_rate: string; maker_fee_rate: string; order_price_deviate: string;
-}
+/**
+ * 合约、持仓、挂单、行情这几种形状现在跟交易所无关了（定义在 exchange/types.ts）。
+ * 名字还叫 Gate* 是因为整个文件几万行都按这些字段名写，改一遍没有任何收益。
+ */
+type GateContract = XContract;
 
 /**
  * 合约元数据（最小变动、杠杆上限、手续费）不常变，缓存一分钟。
  * 行情接口要按合约取最小变动价，每 12 秒拉一次全表太浪费。
  */
-let contractCache: { at: number; list: GateContract[] } | null = null;
+let contractCache: { at: number; exchange: string; list: GateContract[] } | null = null;
 let contractBusy: Promise<void> | null = null;
 let contractRetry: NodeJS.Timeout | null = null;
 
@@ -328,8 +372,8 @@ function refreshContracts(): Promise<void> {
     // 这张表 1.4 MB、直连实测三十秒上下。超时给足，失败要说出来 ——
     // 以前这里静默吞掉，结果整个进程活着期间都是空表：最小变动价拿不到，
     // 「按比例算张数」也在猜，界面上却一个字都不提。
-    const list = await gatePublic<GateContract[]>('/futures/usdt/contracts', {}, 90_000, 90_000);
-    contractCache = { at: Date.now(), list };
+    const list = await exchange().contracts(90_000, 90_000);
+    contractCache = { at: Date.now(), exchange: config.exchange, list };
     console.log(`[contracts] 合约表就绪：${list.length} 个`);
   })()
     .catch((e) => {
@@ -351,8 +395,10 @@ const cachedContracts = (): GateContract[] => contractCache?.list ?? [];
 
 /** 不等：有就先用着，没有就返回空，顺手在后台拉。行情接口不该被这张大表拖住 */
 function contractsNow(): GateContract[] {
-  if (!contractCache || Date.now() - contractCache.at > 60 * 60_000) void refreshContracts();
-  return contractCache?.list ?? [];
+  // 换过交易所就当作没缓存：两家上架的合约和最小变动价都不一样
+  if (!contractCache || contractCache.exchange !== config.exchange
+    || Date.now() - contractCache.at > 60 * 60_000) void refreshContracts();
+  return contractCache?.exchange === config.exchange ? contractCache.list : [];
 }
 
 // 开机就拉：这张表三十秒才回来，等第一个请求来催就太晚了。
@@ -365,10 +411,12 @@ void refreshContracts();
  */
 const tradeContractCache = new Map<string, { at: number; c: GateContract }>();
 async function tradeContract(name: string): Promise<GateContract> {
-  const hit = tradeContractCache.get(name);
+  // 键里带交易所：同一个 BTC_USDT 在两家是两份不同的合约参数
+  const key = config.exchange + ':' + name;
+  const hit = tradeContractCache.get(key);
   if (hit && Date.now() - hit.at < 60_000) return hit.c;
-  const c = await gatePublicTrade<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
-  tradeContractCache.set(name, { at: Date.now(), c });
+  const c = await exchange().tradeContract(name);
+  tradeContractCache.set(key, { at: Date.now(), c });
   return c;
 }
 
@@ -376,7 +424,7 @@ async function tradeContract(name: string): Promise<GateContract> {
 router.get('/contracts/:name', wrap(async (req, res) => {
   const name = String(req.params.name);
   const [c, tradable] = await Promise.all([
-    gatePublic<GateContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`),
+    exchange().publicContract(name),
     tradableNames(),
   ]);
   res.json({
@@ -401,7 +449,7 @@ router.get('/contracts/:name', wrap(async (req, res) => {
   });
 }));
 
-interface GateCandle { t: number; o: string; h: string; l: string; c: string; v: number; sum: string }
+type GateCandle = XCandle;
 
 /**
  * 去交易所要一页。
@@ -411,9 +459,8 @@ interface GateCandle { t: number; o: string; h: string; l: string; c: string; v:
  * 是重复的 X，丢掉之后只剩 999 根，接缝处就少一根，图上看着是断的。
  */
 async function fetchPage(contract: string, interval: string, limit: number, step: number, before?: number): Promise<Bar[]> {
-  const params: Record<string, string | number> = { contract, interval, limit };
-  if (before) params.to = before - step;
-  const raw = await gatePublic<GateCandle[]>('/futures/usdt/candlesticks', params);
+  // to 是「早于这个时刻」的秒数。适配器按各家的写法翻（Bitget 要毫秒的 endTime）
+  const raw = await exchange().candles(contract, interval, limit, before ? before - step : undefined);
   return raw
     .map((c) => ({
       time: Number(c.t),
@@ -669,30 +716,6 @@ router.get('/candles', wrap(async (req, res) => {
 
 // ---------- 档位 ----------
 
-/**
- * 把关键位的距离改挂到「现价」上。
- *
- * 引擎只看得见已经收盘的 K 线，它嘴里的 last 是上一根收盘价；界面上要的是
- * 「离现在这个价格有多远」，所以按最新成交价重算距离。角色也跟着重算：
- * 现价穿过一条位之后，原来在头顶的阻力就变成脚下的支撑。
- */
-function withLiveZones(zones: Zone[], live: number, atrValue: number): Zone[] {
-  if (!(live > 0)) return zones;
-  const a = atrValue > 0 ? atrValue : 0;
-  return zones.map((z) => {
-    const role: Zone['zone_type'] = z.high < live ? 'support'
-      : z.low > live ? 'resistance'
-        : z.center <= live ? 'support' : 'resistance';
-    return {
-      ...z,
-      distance_pct: Number((((z.center - live) / live) * 100).toFixed(4)),
-      distance_atr: a > 0 ? Number(((z.center - live) / a).toFixed(4)) : z.distance_atr,
-      zone_type: role,
-      zone_label: role === 'support' ? '支撑带' : '压力带',
-    };
-  });
-}
-
 /** 某一侧离现价最近的那个位 */
 function nearestOf(zones: Zone[], role: 'support' | 'resistance'): Zone | null {
   const pool = zones.filter((z) => z.zone_type === role);
@@ -761,7 +784,8 @@ router.get('/levels', wrap(async (req, res) => {
   const source = String(req.query.source ?? 'gate') === 'local' ? 'local' : 'gate';
   const limit = Math.round(qnum(req.query.limit, 500, 120, 5000));
   // 每侧最多几个位：引擎的 n_zones 就是「单侧上限」
-  const nZones = Math.round(qnum(req.query.n_zones ?? req.query.maxOut, 3, 1, 8));
+  // 每侧 4 个：原来 3 个的时候，最近那个摆动高低点经常被挤掉，看着就是「该有的位没有」
+  const nZones = Math.round(qnum(req.query.n_zones ?? req.query.maxOut, 4, 1, 8));
   const dirRaw = String(req.query.direction ?? 'both').toLowerCase();
   const dir: Direction = dirRaw === 'long' || dirRaw === 'short' ? dirRaw : 'both';
   const mtf = String(req.query.mtf ?? 'true').toLowerCase() !== 'false';
@@ -773,7 +797,14 @@ router.get('/levels', wrap(async (req, res) => {
     const r = await sr.analyzeLocal({
       dir: requireDataDir(), symbol, tf, n_zones: nZones, direction: dir, mtf, n_bars: 0,
     });
-    const zones = withLiveZones(r.zones, r.current_price, r.engine.atr);
+    /**
+     * 交给记忆层：位置钉住、角色带迟滞、上次有这次没有的位留成历史。
+     * 不这么做的话，档位每分钟重算一次，图上的线就跟着漂一次、旧线还会整条消失。
+     */
+    const set = stabilizeZones(zoneKey(config.exchange, r.symbol, r.tf, dir, nZones), r.zones, {
+      atr: r.engine.atr, live: r.current_price,
+    });
+    const zones = set.current;
     res.json({
       contract: r.symbol,
       interval: r.tf,
@@ -782,6 +813,8 @@ router.get('/levels', wrap(async (req, res) => {
       last: r.current_price,
       atr: r.engine.atr,
       zones,
+      // 之前出现过、这次没重算出来的位：页面画淡一点，别让它凭空消失
+      historyZones: set.history,
       nearestSupport: nearestOf(zones, 'support'),
       nearestResistance: nearestOf(zones, 'resistance'),
       summary: r.summary,
@@ -806,7 +839,10 @@ router.get('/levels', wrap(async (req, res) => {
     symbol: contract, tf: frames[0]!.tf, frames, n_zones: nZones, direction: dir,
     mtf, tick: priceTickOf(contract),
   });
-  const zones = withLiveZones(r.zones, live, r.engine.atr);
+  const set = stabilizeZones(zoneKey(config.exchange, contract, interval, dir, nZones), r.zones, {
+    atr: r.engine.atr, live: live || r.current_price,
+  });
+  const zones = set.current;
   res.json({
     contract,
     interval,
@@ -815,6 +851,7 @@ router.get('/levels', wrap(async (req, res) => {
     last: live || r.current_price,
     atr: r.engine.atr,
     zones,
+    historyZones: set.history,
     nearestSupport: nearestOf(zones, 'support'),
     nearestResistance: nearestOf(zones, 'resistance'),
     summary: r.summary,
@@ -970,7 +1007,10 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
     symbol: contract, tf: tfCode, frames: [{ tf: tfCode, bars: closed }],
     n_zones: 3, direction: 'both', mtf: false, tick: priceTickOf(contract),
   });
-  const zones = withLiveZones(analysis.zones, live, analysis.engine.atr);
+  // 和 /levels 用同一个记忆层：模型嘴里的价位必须和图上画的是同一批
+  const zones = stabilizeZones(zoneKey(config.exchange, contract, tfCode, 'both', 3), analysis.zones, {
+    atr: analysis.engine.atr, live,
+  }).current;
   const news = await newsDigest(contract, 6).catch(() => null);
 
   let barHigh = live;
@@ -1069,6 +1109,11 @@ router.get('/config', (req, res) => {
      * 现在由服务端在这里说了算。
      */
     local,
+    /** 现在连的是哪家。页面上的「Gate / Bitget」和周期列表都按它来 */
+    exchange: config.exchange,
+    exchangeLabel: exchangeLabel(),
+    /** 这家支持哪些周期。Bitget 没有 8h，列出来点了只会报错 */
+    intervals: exchangeIntervals(),
     env: config.env,
     envLabel: envLabel(),
     restBaseUrl: restBaseUrl(),
@@ -1097,12 +1142,16 @@ router.get('/config', (req, res) => {
  */
 router.post('/config/keys', wrap(async (req, res) => {
   requireLocal(req, '写密钥');
-  const { key, secret, liveTrading, slotEnv } = req.body ?? {};
+  const { key, secret, passphrase, liveTrading, slotEnv } = req.body ?? {};
   const targetEnv: GateEnv = slotEnv === 'testnet' || slotEnv === 'live' ? slotEnv : config.env;
   const slot = keySlot(targetEnv);
   const patch: Record<string, string> = {};
   if (typeof key === 'string' && key.trim()) patch[slot.key] = key.trim();
   if (typeof secret === 'string' && secret.trim()) patch[slot.secret] = secret.trim();
+  // Bitget 的第三把钥匙；Gate 用不到，传了也不写
+  if (config.exchange === 'bitget' && typeof passphrase === 'string' && passphrase.trim()) {
+    patch[slot.passphrase] = passphrase.trim();
+  }
   if (typeof liveTrading === 'boolean') patch.LIVE_TRADING = liveTrading ? 'true' : 'false';
   // AI 三个字段各管各的：传了就写，字符串为空表示清除，不传就不动
   const { aiBaseUrl, aiApiKey, aiModel } = req.body ?? {};
@@ -1116,8 +1165,11 @@ router.post('/config/keys', wrap(async (req, res) => {
   writeEnv(patch);
   res.json({
     ok: true,
+    exchange: config.exchange,
+    exchangeLabel: exchangeLabel(),
     env: config.env,
     envLabel: envLabel(),
+    restBaseUrl: restBaseUrl(),
     keys: keyHint(),
     keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
@@ -1142,6 +1194,7 @@ router.post('/config/env', wrap(async (req, res) => {
    */
   aiRunner.stop();
   saveStrategy({ ...loadStrategy(), enabled: false, liveConfirmed: false });
+  // GATE_ENV 这个名字是历史遗留：模拟盘/实盘这个「环境」对两家交易所都适用，所以没改名
   writeEnv({ GATE_ENV: env, LIVE_TRADING: 'false' });
   res.json({
     ok: true,
@@ -1151,6 +1204,106 @@ router.post('/config/env', wrap(async (req, res) => {
     keys: keyHint(),
     keysByEnv: keysByEnv(),
     liveTrading: config.liveTrading,
+  });
+}));
+
+/**
+ * 换交易所。
+ *
+ * 和切环境一个道理，而且更彻底：合约名、张数口径、持仓、挂单、保护单全都换了账户。
+ * 旧账户上的解锁令牌、AI 交易的实盘确认一律作废 —— 在 Gate 上点过的确认
+ * 不该变成「在 Bitget 上也能用真钱」的授权。下单开关也一起关掉。
+ */
+router.post('/config/exchange', wrap(async (req, res) => {
+  requireLocal(req, '切换交易所');
+  const { exchange: next } = req.body ?? {};
+  if (next !== 'gate' && next !== 'bitget') {
+    throw new GateError(400, 'BAD_EXCHANGE', 'exchange 只能是 gate 或 bitget');
+  }
+  if (next !== config.exchange) {
+    armTokens.clear();
+    aiRunner.stop();
+    saveStrategy({ ...loadStrategy(), enabled: false, liveConfirmed: false });
+    writeEnv({ EXCHANGE: next, LIVE_TRADING: 'false' });
+    // 上一家的合约表、乘数缓存不能再拿去算账
+    resetExchangeCache();
+  }
+  res.json({
+    ok: true,
+    exchange: config.exchange,
+    exchangeLabel: exchangeLabel(),
+    intervals: exchangeIntervals(),
+    env: config.env,
+    envLabel: envLabel(),
+    restBaseUrl: restBaseUrl(),
+    keys: keyHint(),
+    keysByEnv: keysByEnv(),
+    liveTrading: config.liveTrading,
+  });
+}));
+
+// ---------- 备份 ----------
+
+/**
+ * 导出一份加密备份。
+ *
+ * 一个文件里同时装服务端和页面的状态：只带一半的话，「换台电脑接着用」就只能接一半。
+ * 密码在服务端做 KDF，密文才算出来 —— 手机用局域网 IP 打开页面时不是安全上下文，
+ * 浏览器不给 crypto.subtle，加密放在页面里就等于手机上用不了。
+ *
+ * 文件里有两家的 API 密钥，所以：密码至少 8 位、AES-256-GCM（自带完整性校验，
+ * 文件被改过会在解密时直接失败），并且只允许本机导出。
+ */
+router.post('/backup/export', wrap(async (req, res) => {
+  requireLocal(req, '导出备份');
+  const { password, local } = req.body ?? {};
+  const server = collectBackup();
+  const browser = sanitizeLocal(local);
+  const envelope = encryptBackup(server, browser, password);
+  res.json({
+    ok: true,
+    envelope,
+    counts: {
+      // 只报个数，不回显内容 —— 密钥不该在响应里出现
+      env: server.env.split(/\r?\n/).filter((l) => /^[A-Z][A-Z0-9_]*\s*=/.test(l.trim())).length,
+      strategies: (() => {
+        try { return (JSON.parse(server.strategies || '{}') as { strategies?: unknown[] }).strategies?.length ?? 0; } catch { return 0; }
+      })(),
+      aiStrategy: server.aiStrategy ? 1 : 0,
+      local: Object.keys(browser).length,
+    },
+  });
+}));
+
+/**
+ * 恢复一份备份。
+ *
+ * 这是「把整台机器的配置换掉」的操作，所以本机限定；恢复完主动做三件事：
+ * 解锁令牌作废（密钥可能换了另一套，旧的确认不该继续有效）、AI 交易停掉
+ * （恢复完不该自己开始下单）、交易所适配器的缓存清空（按键重新读）。
+ */
+router.post('/backup/import', wrap(async (req, res) => {
+  requireLocal(req, '恢复备份');
+  const { password, envelope } = req.body ?? {};
+  const payload = decryptBackup(envelope, password);
+  const { applied } = applyBackupFiles(payload.server);
+
+  armTokens.clear();
+  aiRunner.stop();
+  // ai-strategy.json 可能刚从备份里恢复，这里只把开关关掉，规则内容不动
+  saveStrategy({ ...loadStrategy(), enabled: false, liveConfirmed: false });
+  resetExchangeCache();
+
+  res.json({
+    ok: true,
+    applied,
+    local: sanitizeLocal(payload.local),
+    at: payload.createdAt,
+    env: config.env,
+    envLabel: envLabel(),
+    exchange: config.exchange,
+    exchangeLabel: exchangeLabel(),
+    keys: keyHint(),
   });
 }));
 
@@ -1333,6 +1486,8 @@ router.get('/ip', wrap(async (req, res) => {
 
 router.get('/diag', wrap(async (_req, res) => {
   const out: Record<string, unknown> = {
+    exchange: config.exchange,
+    exchangeLabel: exchangeLabel(),
     env: config.env,
     envLabel: envLabel(),
     restBaseUrl: restBaseUrl(),
@@ -1340,8 +1495,8 @@ router.get('/diag', wrap(async (_req, res) => {
     liveTrading: config.liveTrading,
   };
   try {
-    requireKeys();
-    const acct = await gatePrivate<Record<string, unknown>>('GET', '/futures/usdt/accounts');
+    exchange().requireKeys();
+    const acct = await exchange().account();
     out.privateOk = true;
     out.account = acct;
   } catch (e) {
@@ -1353,18 +1508,15 @@ router.get('/diag', wrap(async (_req, res) => {
 
 // ---------- 账户与持仓 ----------
 
-interface GatePosition {
-  contract: string; size: string; leverage: string; entry_price: string; mark_price: string;
-  liq_price: string; unrealised_pnl: string; realised_pnl: string; mode: string; value: string;
-}
+type GatePosition = XPosition;
 
 async function readAccount() {
-  const a = await gatePrivate<Record<string, string>>('GET', '/futures/usdt/accounts');
+  const a = await exchange().account();
   return {
-    total: Number(a.total ?? 0),
-    available: Number(a.available ?? 0),
-    unrealisedPnl: Number(a.unrealised_pnl ?? 0),
-    currency: a.currency ?? 'USDT',
+    total: a.total,
+    available: a.available,
+    unrealisedPnl: a.unrealised_pnl,
+    currency: a.currency,
   };
 }
 
@@ -1398,9 +1550,7 @@ function sideOf(mode: string, size: number): Direction {
 }
 
 async function readSides(contract: string): Promise<Side[]> {
-  const raw = await gatePrivate<GatePosition | GatePosition[]>(
-    'GET', `/futures/usdt/positions/${encodeURIComponent(contract)}`,
-  );
+  const raw = await exchange().positions(contract);
   const rows = Array.isArray(raw) ? raw : [raw];
   const out: Side[] = [];
   for (const p of rows) {
@@ -1429,7 +1579,7 @@ async function readSides(contract: string): Promise<Side[]> {
  * 这个式子和交易所的 unrealised_pnl 完全一致（模拟盘上多空各 1 张实测过），所以两边不会打架。
  */
 async function readPositions() {
-  const list = await gatePrivate<GatePosition[]>('GET', '/futures/usdt/positions');
+  const list = await exchange().positions();
   /**
    * 按张数过滤，必须转成数字再比。
    *
@@ -1479,7 +1629,7 @@ function unixSeconds(v: unknown): number {
 }
 
 async function readOpenOrders(contract?: string) {
-  const list = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/orders', { contract, status: 'open' });
+  const list = await exchange().openOrders(contract);
   return list.map((o) => ({
     id: String(o.id),
     contract: String(o.contract),
@@ -1541,10 +1691,10 @@ interface Trigger {
 const PROTECT_EXPIRATION_SEC = 86_400;
 
 async function readTriggers(contract?: string): Promise<Trigger[]> {
-  const list = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/price_orders', { status: 'open' });
+  const list = await exchange().triggers();
   return list.map((o) => {
-    const initial = (o.initial ?? {}) as Record<string, unknown>;
-    const trigger = (o.trigger ?? {}) as Record<string, unknown>;
+    const initial = o.initial as unknown as Record<string, unknown>;
+    const trigger = o.trigger as unknown as Record<string, unknown>;
     const auto = String(initial.auto_size ?? '');
     const closeAll = Boolean(initial.isclose);
     const expiration = Number(trigger.expiration ?? 0);
@@ -1639,27 +1789,27 @@ async function cancelSide(contract: string, dirs: Direction[], contractFlat: boo
     const mine = t.direction ? dirs.includes(t.direction) : t.closeAll && flatAfter;
     if (!mine) continue;
     try {
-      await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(t.id)}`);
+      await exchange().cancelTrigger(t.id);
       out.triggers.push(t.id);
     } catch (e) {
       out.errors.push(`撤触发单 ${t.id}: ${errText(e)}`);
     }
   }
 
-  let open: Record<string, unknown>[] = [];
+  let open: XOrder[] = [];
   try {
-    open = await gatePrivate<Record<string, unknown>[]>('GET', '/futures/usdt/orders', { contract, status: 'open' });
+    open = await exchange().openOrders(contract);
   } catch (e) {
     out.errors.push(`读挂单失败: ${errText(e)}`);
   }
   for (const o of open) {
     const id = String(o.id);
-    const size = Number(o.size ?? 0);
+    const size = Number(o.size);
     const reduceOnly = Boolean(o.is_reduce_only);
     const mine = flatAfter || dirs.some((d) => touchesSide(size, reduceOnly, d));
     if (!mine) continue;
     try {
-      await gatePrivate('DELETE', `/futures/usdt/orders/${encodeURIComponent(id)}`);
+      await exchange().cancelOrder(id);
       out.orders.push(id);
     } catch (e) {
       out.errors.push(`撤委托 ${id}: ${errText(e)}`);
@@ -1678,7 +1828,7 @@ async function clearOrphanTriggers(contract: string, dir: Direction): Promise<st
   if (sides.some((s) => s.direction === dir && s.size > 0)) return [];
   const out: string[] = [];
   for (const t of (await readTriggers(contract)).filter((x) => x.protective && x.direction === dir)) {
-    await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(t.id)}`);
+    await exchange().cancelTrigger(t.id);
     out.push(t.id);
   }
   return out;
@@ -1694,7 +1844,7 @@ router.post('/trade/arm', wrap(async (req, res) => {
     return;
   }
   if (!config.liveTrading) throw new GateError(403, 'LIVE_DISABLED', `服务端 LIVE_TRADING=false，先在设置里打开${envLabel()}下单开关`);
-  requireKeys();
+  exchange().requireKeys();
   const token = randomUUID();
   armTokens.add(token);
   res.json({ armed: true, token });
@@ -1719,17 +1869,14 @@ router.post('/leverage', wrap(async (req, res) => {
     throw new GateError(400, 'LEVERAGE_RANGE', `该合约杠杆范围 ${c.leverage_min} - ${c.leverage_max}`);
   }
   const cross = mode === 'cross';
-  // Gate 这个接口参数走 query，不放在 body 里
-  const r = await gatePrivate<Record<string, unknown>>(
-    'POST',
-    `/futures/usdt/positions/${encodeURIComponent(contract)}/leverage`,
-    cross ? { leverage: 0, cross_leverage_limit: lev } : { leverage: lev },
-  );
+  // 各家的写法差得远（Gate 靠 leverage=0 表示全仓，Bitget 是单独的保证金模式接口），
+  // 这一层翻译在适配器里
+  const r = await exchange().setLeverage(contract, { lev, cross });
   res.json({
     ok: true,
-    mode: cross ? 'cross' : 'isolated',
-    leverage: Number(r.leverage ?? 0),
-    crossLeverageLimit: Number(r.cross_leverage_limit ?? 0),
+    mode: r.mode,
+    leverage: r.leverage,
+    crossLeverageLimit: r.crossLeverageLimit,
   });
 }));
 
@@ -1763,7 +1910,8 @@ interface PlaceSpec {
 
 interface PreparedOrder {
   info: GateContract;
-  payload: Record<string, unknown>;
+  /** 统一的下单参数（张数为正负、price 为 '0' 表示市价），由适配器翻成各家写法 */
+  payload: XOrderSpec;
   price: number;
   isMarket: boolean;
   notional: number;
@@ -1851,7 +1999,7 @@ function explainMargin(e: unknown, prepared: PreparedOrder): unknown {
   if (!m) return e;
   const need = Number(m[1]);
   const avail = Number(m[2]);
-  const qty = Math.abs(Number(prepared.payload.size ?? 0));
+  const qty = Math.abs(Number(prepared.payload.size));
   if (!(need > 0) || !(avail >= 0) || !(qty > 0)) return e;
   const enough = Math.floor((qty * avail) / need);
   const price = prepared.price;
@@ -1885,11 +2033,7 @@ async function ensureMarginMode(
   }
   const cross = mode === 'cross';
   try {
-    await gatePrivate(
-      'POST',
-      `/futures/usdt/positions/${encodeURIComponent(contract)}/leverage`,
-      cross ? { leverage: 0, cross_leverage_limit: lev } : { leverage: lev },
-    );
+    await exchange().setLeverage(contract, { lev, cross });
     return { applied: true as const, mode, leverage: lev };
   } catch (e) {
     const detail = e instanceof GateError ? `${e.label} ${e.detail}` : String(e);
@@ -1902,17 +2046,17 @@ async function ensureMarginMode(
   }
 }
 
-async function placeOrder(spec: PlaceSpec): Promise<{ prepared: PreparedOrder; order: Record<string, unknown> }> {
+async function placeOrder(spec: PlaceSpec): Promise<{ prepared: PreparedOrder; order: XOrder }> {
   const prepared = await prepareOrder(spec);
   try {
-    const order = await gatePrivate<Record<string, unknown>>('POST', '/futures/usdt/orders', {}, prepared.payload);
+    const order = await exchange().placeOrder(prepared.payload);
     return { prepared, order };
   } catch (e) {
     throw explainMargin(e, prepared);
   }
 }
 
-const orderReceipt = (order: Record<string, unknown>) => ({
+const orderReceipt = (order: XOrder) => ({
   id: String(order.id),
   contract: String(order.contract),
   size: Number(order.size),
@@ -1966,7 +2110,7 @@ router.post('/order', wrap(async (req, res) => {
 
 router.delete('/order/:id', wrap(async (req, res) => {
   requireArm(req);
-  await gatePrivate('DELETE', `/futures/usdt/orders/${encodeURIComponent(String(req.params.id))}`);
+  await exchange().cancelOrder(String(req.params.id));
   res.json({ ok: true });
 }));
 
@@ -1981,7 +2125,7 @@ router.post('/order/:id/amend', wrap(async (req, res) => {
   requireArm(req);
   const id = String(req.params.id);
   const body = req.body ?? {};
-  const o = await gatePrivate<Record<string, unknown>>('GET', `/futures/usdt/orders/${encodeURIComponent(id)}`);
+  const o = await exchange().order(id);
   if (!o || !o.id) throw new GateError(404, 'ORDER_NOT_FOUND', '找不到这张委托，可能已经成交或撤掉了');
   if (String(o.status ?? '') !== 'open') {
     throw new GateError(400, 'ORDER_NOT_OPEN', '这张委托已经不在挂着（成交或已撤），改不了了');
@@ -2012,9 +2156,9 @@ router.post('/order/:id/amend', wrap(async (req, res) => {
   });
 
   // 到这一步新单已经确定挂得出去，才动旧单
-  await gatePrivate('DELETE', `/futures/usdt/orders/${encodeURIComponent(id)}`);
+  await exchange().cancelOrder(id);
   try {
-    const order = await gatePrivate<Record<string, unknown>>('POST', '/futures/usdt/orders', {}, prepared.payload);
+    const order = await exchange().placeOrder(prepared.payload);
     res.json({
       ok: true,
       replaced: { oldId: id, ...orderReceipt(order) },
@@ -2168,7 +2312,7 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   );
   for (const t of existing) {
     try {
-      await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(t.id)}`);
+      await exchange().cancelTrigger(t.id);
       canceled.push(t.id);
     } catch (e) {
       errors.push(`撤旧单 ${t.id}: ${e instanceof GateError ? `${e.label} ${e.detail}` : String(e)}`);
@@ -2182,7 +2326,7 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   const created: { kind: string; id: string; triggerPrice: number }[] = [];
   for (const job of jobs) {
     try {
-      const r = await gatePrivate<Record<string, unknown>>('POST', '/futures/usdt/price_orders', {}, {
+      const r = await exchange().placeTrigger({
         initial: {
           contract,
           size: 0,
@@ -2346,18 +2490,16 @@ router.post('/reverse-position', wrap(async (req, res) => {
 
 router.delete('/price-order/:id', wrap(async (req, res) => {
   requireArm(req);
-  await gatePrivate('DELETE', `/futures/usdt/price_orders/${encodeURIComponent(String(req.params.id))}`);
+  await exchange().cancelTrigger(String(req.params.id));
   res.json({ ok: true });
 }));
 
-interface GateTicker {
-  contract: string; last: string; mark_price: string; change_percentage: string;
-  volume_24h_quote: string; funding_rate: string; quanto_multiplier: string; total_size: string;
-}
+type GateTicker = XTicker;
 
 // ---------- 当前环境能交易哪些合约 ----------
 
-let tradableCache: { env: string; at: number; names: Set<string> | null } = { env: '', at: 0, names: null };
+let tradableCache: { env: string; exchange: string; at: number; names: Set<string> | null } =
+  { env: '', exchange: '', at: 0, names: null };
 
 /**
  * 当前环境可交易的合约名单。实盘就是主网全量（返回 null 表示不做限制）；
@@ -2365,13 +2507,13 @@ let tradableCache: { env: string; at: number; names: Set<string> | null } = { en
  */
 async function tradableNames(): Promise<Set<string> | null> {
   if (config.env !== 'testnet') return null;
-  if (tradableCache.env === config.env && Date.now() - tradableCache.at < 5 * 60_000) return tradableCache.names;
+  if (tradableCache.env === config.env && tradableCache.exchange === config.exchange
+    && Date.now() - tradableCache.at < 5 * 60_000) return tradableCache.names;
   try {
-    const res = await netFetch(restBaseUrl() + '/api/v4/futures/usdt/contracts', { headers: { Accept: 'application/json' } });
-    if (!res.ok) return tradableCache.names;
-    const list = (await res.json()) as { name?: string; status?: string }[];
-    const names = new Set(list.filter((c) => c.name && c.status !== 'delisted').map((c) => String(c.name)));
-    tradableCache = { env: config.env, at: Date.now(), names };
+    const names = await exchange().tradableNames();
+    // null = 这家不做限制（Bitget 的模拟盘和实盘是同一套合约）
+    if (!names) return null;
+    tradableCache = { env: config.env, exchange: config.exchange, at: Date.now(), names };
     return names;
   } catch {
     return tradableCache.names; // 拿不到就别拦，让交易所自己报错
@@ -2384,20 +2526,30 @@ interface TickerRow {
 }
 
 /** 全部行情也是一大坨，拉一次十几秒。缓存起来，页面每 12 秒问一次就直接给上次的，后台换新的 */
-let tickerCache: { at: number; rows: TickerRow[] } | null = null;
+let tickerCache: { at: number; exchange: string; rows: TickerRow[] } | null = null;
 let tickerBusy: Promise<void> | null = null;
 
 function refreshTickers(): Promise<void> {
   if (tickerBusy) return tickerBusy;
   tickerBusy = (async () => {
     const [list, tradable] = await Promise.all([
-      gatePublic<GateTicker[]>('/futures/usdt/tickers', {}, 60_000, 45_000),
+      exchange().tickers(60_000, 45_000),
       tradableNames().catch(() => null),
     ]);
-    // 拉不到合约元数据不影响行情，只是价格精度退回默认值
+    /**
+     * 合约表还没到位时价格精度会是 0，页面上价格就成了整数（63570 而不是 63570.0）。
+     * 刚启动、或者刚换过交易所（旧表已经判为无效）时都会碰上，这里最多等它 3 秒。
+     */
+    if (contractsNow().length === 0) {
+      await Promise.race([
+        refreshContracts().catch(() => undefined),
+        new Promise<void>((done) => { const t = setTimeout(done, 3000); t.unref?.(); }),
+      ]);
+    }
     const roundOf = new Map(contractsNow().map((c) => [c.name, Number(c.order_price_round)]));
     tickerCache = {
       at: Date.now(),
+      exchange: config.exchange,
       rows: list
         .filter((t) => Number(t.last) > 0)
         .map((t) => ({
@@ -2425,6 +2577,8 @@ function refreshTickers(): Promise<void> {
 }
 
 router.get('/tickers', wrap(async (_req, res) => {
+  // 换过交易所：手上这份是另一家的行情，不能给出去
+  if (tickerCache && tickerCache.exchange !== config.exchange) tickerCache = null;
   if (!tickerCache) {
     // 冷启动最多等 10 秒。再久就先把空列表给出去 —— 页面每 12 秒会再问一次，
     // 让第一屏挂在这儿一分钟，看起来就是「币种一直加载不出来」。
@@ -2433,7 +2587,7 @@ router.get('/tickers', wrap(async (_req, res) => {
       new Promise<void>((done) => { const t = setTimeout(done, 10_000); t.unref?.(); }),
     ]);
   } else if (Date.now() - tickerCache.at > 15_000) void refreshTickers();
-  res.json(tickerCache?.rows ?? []);
+  res.json(tickerCache?.exchange === config.exchange ? tickerCache.rows : []);
 }));
 
 export type { Direction };
@@ -2674,7 +2828,7 @@ router.post('/ai/strategy', wrap(async (req, res) => {
       }
     }
 
-    requireKeys();
+    exchange().requireKeys();
     if (config.env === 'live' && !merged.liveConfirmed) {
       throw new GateError(
         400, 'LIVE_NOT_CONFIRMED',

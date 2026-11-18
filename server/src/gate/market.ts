@@ -46,8 +46,11 @@ export class MarketHub {
   private openedAt = 0;
   private heartbeat: NodeJS.Timeout | null = null;
 
+  /** 存一份监听函数：换交易所时要把旧 hub 从 wss 上摘掉，否则两条连接都在跑 */
+  private onConn: (sock: WebSocket) => void;
+
   constructor(private wss: WebSocketServer) {
-    this.wss.on('connection', (sock) => {
+    this.onConn = (sock: WebSocket) => {
       const id = this.nextClientId++;
       const client: Client = {
         id,
@@ -73,7 +76,8 @@ export class MarketHub {
           }
         }
       });
-    });
+    };
+    this.wss.on('connection', this.onConn);
   }
 
   private onClientMessage(client: Client, raw: string): void {
@@ -245,6 +249,8 @@ export class MarketHub {
      */
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+    // 从 wss 上摘掉自己：换交易所会造一个新 hub，旧的不摘就会有两个都在往页面推
+    this.wss.off('connection', this.onConn);
     this.ws?.removeAllListeners();
     this.ws?.close();
     this.ws = null;
