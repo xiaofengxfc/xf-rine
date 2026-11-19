@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 import { detectBrowserIp } from '../lib/ip.ts';
 import { isNative, apiBase, clearTarget } from '../lib/endpoint.ts';
@@ -93,6 +93,10 @@ const EX_INFO: Record<'gate' | 'bitget', Record<'testnet' | 'live', EnvInfo>> = 
 
 export default function SettingsDialog({ config, contract = '', interval = '', onClose, onSaved, onToast }: Props) {
   const [tab, setTab] = useState<Tab>(config?.env ?? 'testnet');
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [tab]);
   // 两套密钥各存各的，互不覆盖：填实盘的不该把模拟盘那格冲掉
   const [testKey, setTestKey] = useState('');
   const [testSecret, setTestSecret] = useState('');
@@ -686,7 +690,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
           <button className={tab === 'feedback' ? 'on' : ''} onClick={() => setTab('feedback')}>反馈</button>
         </div>
 
-        <div className="body">
+        <div className="body" ref={bodyRef}>
           {(tab === 'testnet' || tab === 'live') && envTab(tab)}
 
           {tab === 'ai' && (

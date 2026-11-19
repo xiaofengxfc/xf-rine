@@ -46,10 +46,7 @@ function readMode(): ChartMode {
   } catch { return 'auto'; }
 }
 
-/**
- * 右侧空位的默认根数：停在最新一屏时，图上右边空出来这么多格。
- * 和建图时 timeScale.rightOffset 是同一个数 —— 恢复视口时要靠它把空位还回去。
- */
+/** 默认在最新 K 线后留出少量空白，供拖动浏览未来区域。 */
 const DEFAULT_RIGHT_MARGIN = 6;
 
 /**
@@ -320,8 +317,8 @@ export default function ChartPane({
       layout: {
         background: { type: ColorType.Solid, color: c.background },
         textColor: c.text,
-        fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-        fontSize: 11,
+        fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", sans-serif',
+        fontSize: 12,
         attributionLogo: false,
       },
       grid: {
@@ -333,6 +330,16 @@ export default function ChartPane({
         vertLine: { color: c.crosshair, width: 1, style: LineStyle.Dashed, labelBackgroundColor: c.crosshairLabel },
         horzLine: { color: c.crosshair, width: 1, style: LineStyle.Dashed, labelBackgroundColor: c.crosshairLabel },
       },
+      // 鼠标和触屏都允许图表四向平移；时间轴、价格轴都可拖动缩放。
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: { price: true, time: true },
+      },
       rightPriceScale: {
         borderColor: c.border,
         scaleMargins: { top: 0.08, bottom: 0.22 },
@@ -341,17 +348,11 @@ export default function ChartPane({
         borderColor: c.border,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 6,
+        rightOffset: DEFAULT_RIGHT_MARGIN,
         barSpacing: 8,
-        /**
-         * 不许往左拖出数据之外。
-         *
-         * 以前是自己数逻辑区间的负数，再用 scrollToPosition 把画面拽回来 —— 拖动时
-         * 那个回调每帧都来，于是每帧拽一次：手指往左滑，画面左右来回窜。1d 的根数少，
-         * 一屏就是小半年的行情，两下就撞到最左边，所以这个毛病在日线上最明显。
-         * 交给库夹边界，它跟着手势一起算，不会和手指打架。
-         */
-        fixLeftEdge: true,
+        // 不夹左右边界：可以浏览数据外区域，也可以拖进最新 K 线右侧的未来空白。
+        fixLeftEdge: false,
+        fixRightEdge: false,
       },
       localization: {
         locale: 'zh-CN',
@@ -708,15 +709,41 @@ export default function ChartPane({
        */
       let restored = false;
       try {
-        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as { fromTime?: number; toTime?: number } | null;
+        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as {
+          fromTime?: number;
+          toTime?: number;
+          margin?: number;
+          futureFrom?: number;
+          futureTo?: number;
+          pastFrom?: number;
+          pastTo?: number;
+        } | null;
         if (saved && Number.isFinite(saved.fromTime) && Number.isFinite(saved.toTime)) {
-          // 右边留一点空：上次停在最新一屏时，右侧就是那几根空位。
-          // 少于 8 根的窗口恢复出来和没有一样，不认这段记录。
           const range = viewportRange(
             clean,
-            { fromTime: saved.fromTime as number, toTime: saved.toTime as number, margin: DEFAULT_RIGHT_MARGIN },
+            {
+              fromTime: saved.fromTime as number,
+              toTime: saved.toTime as number,
+              margin: Number.isFinite(saved.margin) ? saved.margin as number : DEFAULT_RIGHT_MARGIN,
+              pastFrom: saved.pastFrom,
+              pastTo: saved.pastTo,
+            },
             8,
           );
+          if (range) {
+            chart.timeScale().setVisibleLogicalRange(range);
+            restored = true;
+          }
+        }
+        // 整个视口都在最后一根 K 线之后时，时间范围无法表达空白区，改用相对位置恢复。
+        if (!restored && saved && Number.isFinite(saved.futureFrom) && Number.isFinite(saved.futureTo)) {
+          const range = viewportRange(clean, {
+            fromTime: clean[0]!.time,
+            toTime: clean[0]!.time,
+            margin: 0,
+            futureFrom: saved.futureFrom as number,
+            futureTo: saved.futureTo as number,
+          });
           if (range) {
             chart.timeScale().setVisibleLogicalRange(range);
             restored = true;
@@ -727,7 +754,7 @@ export default function ChartPane({
       if (!restored) {
         // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
         const from = Math.max(0, clean.length - 160);
-        chart.timeScale().setVisibleLogicalRange({ from, to: clean.length + DEFAULT_RIGHT_MARGIN });
+        chart.timeScale().setVisibleLogicalRange({ from, to: clean.length - 1 + DEFAULT_RIGHT_MARGIN });
       }
     };
 
@@ -744,15 +771,32 @@ export default function ChartPane({
      */
     const redraw = (clean: PaintedBar[]) => {
       const ts = chart.timeScale();
-      // 重画之前先记下「正在看哪一段时间」，以及右边界之外还留了几根空位
-      const span = ts.getVisibleRange();
+      // 重画之前记下正在看的时间段和逻辑位置；完全离开数据的视口没有可用时间范围。
       const logical = ts.getVisibleLogicalRange();
       const beforeLen = countRef.current;
-      /**
-       * 空位只能从逻辑区间量：getVisibleRange() 会把右边界夹在最后一根 K 线上，
-       * 停在最新一屏时它看不出右边还空着几根。少了这几根，每补一页历史画面就往左挪。
-       */
+      const entirelyFuture = !!logical && beforeLen > 0 && logical.from > beforeLen - 1;
+      const entirelyPast = !!logical && logical.to < 0;
+      const previousFirst = firstTimeRef.current;
+      const previousLast = lastTimeRef.current;
+      let span: { from: number; to: number } | null = null;
+      if (logical && !entirelyFuture && !entirelyPast) {
+        try {
+          const visible = ts.getVisibleRange();
+          if (visible) span = { from: visible.from as number, to: visible.to as number };
+        } catch { /* 完全落在数据外时没有时间范围可读 */ }
+      } else if (entirelyFuture && previousLast != null) {
+        span = { from: previousLast, to: previousLast };
+      } else if (entirelyPast && previousFirst != null) {
+        span = { from: previousFirst, to: previousFirst };
+      }
+      // 保留右侧空白和视口边界偏移，补 K 线后仍停在同一处。
       const margin = logical && beforeLen > 0 ? Math.max(0, logical.to - (beforeLen - 1)) : 0;
+      const future = entirelyFuture
+        ? { futureFrom: logical!.from - (beforeLen - 1), futureTo: logical!.to - (beforeLen - 1) }
+        : {};
+      const past = logical && logical.from < 0
+        ? { pastFrom: logical.from, pastTo: logical.to }
+        : {};
 
       price.setData(clean.map(point));
       line.setData(lineData(clean));
@@ -766,7 +810,13 @@ export default function ChartPane({
       countRef.current = clean.length;
 
       if (!span || typeof span.from !== 'number' || typeof span.to !== 'number') return;
-      const now = ts.getVisibleRange();
+      if ('futureFrom' in future || 'pastFrom' in past) {
+        // getVisibleRange 会把未来区裁到最后一根 K 线的时间戳，这里直接按逻辑位置恢复。
+        placeViewRef.current({ fromTime: span.from, toTime: span.to, margin, ...future, ...past }, clean);
+        return;
+      }
+      let now: ReturnType<typeof ts.getVisibleRange> = null;
+      try { now = ts.getVisibleRange(); } catch { /* 数据更新后视口暂时完全落在数据外 */ }
       /**
        * 库自己把窗口稳住了（看得见的第一根、最后一根一根没变）：一个像素都别动。
        *
@@ -776,7 +826,7 @@ export default function ChartPane({
        * 现在只在库真把窗口挪了（实测某些数据形状下会挪一整页）时，按时间放回去。
        */
       if (now && now.from === span.from && now.to === span.to) return;
-      placeViewRef.current({ fromTime: span.from, toTime: span.to, margin }, clean);
+      placeViewRef.current({ fromTime: span.from, toTime: span.to, margin, ...future }, clean);
     };
 
     try {
@@ -906,18 +956,40 @@ export default function ChartPane({
       window.clearTimeout(saveTimer);
       saveTimer = window.setTimeout(() => {
         // 存时间，不存下标：下次拉到的根数和这次不一样
-        const vr = ts.getVisibleRange();
-        if (vr) {
-          try { localStorage.setItem(viewKey, JSON.stringify({ fromTime: vr.from, toTime: vr.to })); } catch { /* 存不了就算了 */ }
+        const lastIndex = countRef.current - 1;
+        let vr: ReturnType<typeof ts.getVisibleRange> = null;
+        if (r.from <= lastIndex && r.to >= 0) {
+          try { vr = ts.getVisibleRange(); } catch { /* 整段在行情数据外时没有时间范围 */ }
         }
+        const saved: {
+          fromTime?: number;
+          toTime?: number;
+          margin: number;
+          futureFrom?: number;
+          futureTo?: number;
+          pastFrom?: number;
+          pastTo?: number;
+        } = { margin: Math.max(0, r.to - lastIndex) };
+        if (vr) {
+          saved.fromTime = vr.from as number;
+          saved.toTime = vr.to as number;
+        }
+        if (r.from > lastIndex) {
+          // 整段在未来空白区，没有不同的 K 线时间戳可用于恢复。
+          saved.futureFrom = r.from - lastIndex;
+          saved.futureTo = r.to - lastIndex;
+        }
+        if (r.from < 0) {
+          // 超出最早 K 线时，以最早时间为锚，保留两侧空白。
+          saved.fromTime = firstTimeRef.current ?? 0;
+          saved.toTime = firstTimeRef.current ?? 0;
+          saved.pastFrom = r.from;
+          saved.pastTo = r.to;
+        }
+        try { localStorage.setItem(viewKey, JSON.stringify(saved)); } catch { /* 存不了就算了 */ }
         // 提示跟着可视范围走：缩到有成交的那一段，那句「成交稀疏」就该自己消失
         refreshSparse();
       }, 400);
-
-      /**
-       * 左边界不用管了：timeScale 里开了 fixLeftEdge，库自己就夹住，
-       * 拖到第一根就停，不会再出现「往左一滑、画面弹回来又窜出去」。
-       */
 
       // 贴到最左边了：到头说明这时候才有意义
       setAtEdge(r.from < 1.5);
@@ -1003,6 +1075,7 @@ export default function ChartPane({
       width: 1 | 2;
       style: LineStyle;
       title: string;
+      axisLabelVisible?: boolean;
     }
 
     const items: Item[] = [];
@@ -1077,9 +1150,7 @@ export default function ChartPane({
       });
     }
 
-    // 档位按离现价远近排，近的排在前面。
-    // 线上写的是**模型概率**：触及概率区分度强（AUC 0.73~0.77），守住概率校准好但排序弱
-    // （AUC 0.59~0.61），所以两个都标、都不加「胜率」这种词。
+    // 档位按离现价远近排，近的排在前面。线上只留触及和守住概率，避免长文字挡住 K 线。
     // 一律画实线：这版算法算出来的强度分没有上限（1.x 到 3.x 都常见），
     // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
     // 主次靠远近距离分：最近的两条加粗，其余正常。
@@ -1090,45 +1161,23 @@ export default function ChartPane({
     const byNear = [...pool].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
     const pctOf = (v: number | null) => (v === null ? '—' : Math.round(v * 100) + '%');
     byNear.forEach((z, i) => {
-      /**
-       * 历史位（这次没重算出来、但还记得的）画淡、画细、带「历史」两字。
-       * 以前这类位直接从图上消失，人回头想找「刚才那条支撑」就找不到了。
-       */
       const dim = z.history === true;
+      const color = z.zone_type === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)';
       items.push({
         price: z.center,
         rank: 3 + i * 0.01,
-        color: z.zone_type === 'support'
-          ? (dim ? 'rgba(46,211,160,0.35)' : 'rgba(46,211,160,0.8)')
-          : (dim ? 'rgba(255,95,109,0.35)' : 'rgba(255,95,109,0.8)'),
+        color,
         width: dim ? 1 : (i < 2 ? 2 : 1),
         style: dim ? LineStyle.Dashed : LineStyle.Solid,
-        // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
-        title: narrow
-          // 手机上短写：字只是重复下面卡片里的数，短一点 K 线才看得见
-          ? (z.zone_type === 'support' ? '支 ' : '阻 ') + fmtPrice(z.center, priceRound)
-            + ' ' + pctOf(z.p_touch) + '/' + pctOf(z.p_hold) + (dim ? ' 旧' : '')
-          : (z.zone_type === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(z.center, priceRound)
-            + ' · 触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold)
-            + ' · 测试 ' + z.n_events + ' 次'
-            + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : '')
-            + (z.from_tf ? ' · ' + z.from_tf : '')
-            + (dim ? ' · 历史' : ''),
+        title: dim ? '' : '触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold),
+        // 历史位保留同色参考线，不显示轴上价格标签或线上的文字。
+        axisLabelVisible: !dim,
       });
     });
 
     items.sort((a, b) => a.rank - b.rank);
 
-    /**
-     * 一条线一份标注，一条都不省。
-     *
-     * 以前这里按「离现价远近」抢位子：只有最近的四条写价，其余既没有轴标签也没有标题；
-     * 再叠加一层按可视价格跨度算的拥挤判定，价位挨得近的那些档位连线中间的字都没了。
-     * 用户看到的就是「图上只标了几条支撑阻力」。
-     *
-     * 现在每条都带轴标签和标题。挨在一起的档位，右侧轴上的价签会互相挡住两块，
-     * 但线中间那个标题还在，实时价格那个标签也始终压在上面 —— 标全是优先的。
-     */
+    /** 当前位显示简短概率标注；历史位仅保留同色参考线。 */
     for (const it of items) {
       // 算不出坐标的价位（NaN、字段缺失）画上去也不会显示，还会把轴上的价签顶掉
       if (!Number.isFinite(it.price)) continue;
@@ -1138,7 +1187,7 @@ export default function ChartPane({
           color: it.color,
           lineWidth: it.width,
           lineStyle: it.style,
-          axisLabelVisible: true,
+          axisLabelVisible: it.axisLabelVisible ?? true,
           title: it.title,
         }));
       } catch (err) {

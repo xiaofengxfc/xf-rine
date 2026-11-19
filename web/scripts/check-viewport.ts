@@ -71,6 +71,17 @@ check('右边界越界时贴住最后一根', viewportRange(bars(1000), { fromTi
 
 // ---- 7. 空位是小数（拖动中常常跨半根）时取整 ----
 check('空位取整', viewportRange(bars(1000), { fromTime: t(900), toTime: t(999), margin: 2.4 }), { from: 900, to: 1001 });
+check('未来空白区不设人为上限', viewportRange(bars(1000), { fromTime: t(900), toTime: t(999), margin: 2400 }), { from: 900, to: 3399 });
+check(
+  '整段在未来空白区时按最新 K 线相对位置恢复',
+  viewportRange(bars(1000), { fromTime: t(999), toTime: t(999), margin: 150, futureFrom: 1500, futureTo: 1650 }, 8),
+  { from: 2499, to: 2649 },
+);
+check(
+  '超出最早 K 线时保持左右空白和行情时间锚点',
+  viewportRange(bars(2000, BASE - 1000 * STEP), { fromTime: t(0), toTime: t(100), margin: 0, pastFrom: -100, pastTo: 100 }),
+  { from: 900, to: 1100 },
+);
 check('负的空位当 0', viewportRange(bars(1000), { fromTime: t(900), toTime: t(999), margin: -3 }), { from: 900, to: 999 });
 
 if (failed > 0) {

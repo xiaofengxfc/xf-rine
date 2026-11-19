@@ -3,9 +3,8 @@
  *
  * 单独拎出来是因为这里有两个容易写错、写错了又很像「图自己抽了一下」的地方：
  *
- *   - 停在最新一屏时，右边界之外还有几根空位（timeScale 的 rightOffset，默认 6 根）。
- *     getVisibleRange() 会把右边界夹在最后一根 K 线上，照它换算等于把空位吃掉 ——
- *     每补一页历史，画面就往左挪几根。
+ *   - 视口按时间恢复，不按下标：左侧补历史后逻辑序号会整体变化。
+ *   - 右侧 margin 由调用方传入，避免把视口恢复和图表默认留白绑死。
  *   - 补历史是往数组前面插，所有下标一起往后挪。所以窗口只能按时间找回来，
  *     记下标的做法换个根数就全对不上了。
  */
@@ -19,6 +18,12 @@ export interface ViewSpan {
   toTime: number;
   /** 右边界之外还留几根空位。停在新一屏时就是 rightOffset */
   margin: number;
+  /** 整个可视区在最新 K 线之后时，按最新 K 线计算的逻辑坐标 */
+  futureFrom?: number;
+  futureTo?: number;
+  /** 可视区超出最早 K 线左侧时，相对时间锚点的逻辑位置 */
+  pastFrom?: number;
+  pastTo?: number;
 }
 
 export interface LogicalRange {
@@ -28,8 +33,6 @@ export interface LogicalRange {
 
 /** 少于一屏的两根说明那一段已经不在手上了，放回去只会把画面扔到别处 */
 const MIN_BARS = 2;
-/** 右侧空位最多留这么多根。超过就是记录坏了，不是用户要的 */
-const MAX_MARGIN = 1000;
 
 /**
  * 按时间把一段视口换算成新的逻辑区间。
@@ -42,13 +45,24 @@ const MAX_MARGIN = 1000;
  */
 export function viewportRange(bars: Bar[], span: ViewSpan, minBars = MIN_BARS): LogicalRange | null {
   if (bars.length === 0) return null;
+  if (Number.isFinite(span.futureFrom) && Number.isFinite(span.futureTo)) {
+    const from = bars.length - 1 + span.futureFrom!;
+    const to = bars.length - 1 + span.futureTo!;
+    if (from <= to && to - from >= Math.max(MIN_BARS, minBars)) return { from, to };
+  }
   const from = firstIndexAtOrAfter(bars, span.fromTime);
+  if (Number.isFinite(span.pastFrom) && Number.isFinite(span.pastTo)) {
+    const pastFrom = from + span.pastFrom!;
+    const pastTo = from + span.pastTo!;
+    if (pastFrom <= pastTo && pastTo - pastFrom >= Math.max(MIN_BARS, minBars)) {
+      return { from: pastFrom, to: pastTo };
+    }
+  }
   const to = firstIndexAtOrAfter(bars, span.toTime);
   if (to - from < Math.max(MIN_BARS, minBars)) return null;
   // 右边那一根就是最后一根（或者落在它之后）时，把右侧空位原样留着
   const atEdge = to >= bars.length - 1;
-  // 上限挡的是写坏的记录：margin 可能是几个月前的旧版本写进去的怪数，
-  // 原样用会把画面甩到最后一根之后很远的一片空白里
-  const margin = Math.min(MAX_MARGIN, Math.max(0, Math.round(span.margin)));
+  // 不限制正向空位：视口可能是用户主动拖到很远的未来区。
+  const margin = Number.isFinite(span.margin) ? Math.max(0, Math.round(span.margin)) : 0;
   return { from, to: atEdge ? bars.length - 1 + margin : to };
 }

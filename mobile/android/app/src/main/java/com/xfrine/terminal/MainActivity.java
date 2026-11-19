@@ -4,8 +4,11 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.hardware.display.DisplayManager;
+import android.view.Display;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowManager;
 
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -53,6 +56,7 @@ public class MainActivity extends BridgeActivity {
         // Keep the native toolbar disabled on Android versions that ignore postSplashScreenTheme.
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
+        preferHighRefreshRate();
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         getWindow().setNavigationBarColor(Color.TRANSPARENT);
         if (getBridge() != null && getBridge().getWebView() != null) {
@@ -60,6 +64,32 @@ public class MainActivity extends BridgeActivity {
             getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
         }
         watchInsets();
+    }
+
+    /**
+     * 请求前台窗口优先使用 120Hz，让 WebView 动画和图表手势跟随高刷屏刷新。
+     * 只有 60Hz 的设备会使用系统可用的刷新率，不影响行情数据更新频率。
+     */
+    private void preferHighRefreshRate() {
+        Window window = getWindow();
+        // 选择最接近 120Hz 的可用档位；60Hz 设备自然回退到 60Hz。
+        DisplayManager displayManager = getSystemService(DisplayManager.class);
+        Display display = displayManager == null ? null : displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+        Display.Mode closest = null;
+        if (display != null) {
+            for (Display.Mode mode : display.getSupportedModes()) {
+                if (closest == null
+                    || Math.abs(mode.getRefreshRate() - 120f) < Math.abs(closest.getRefreshRate() - 120f)
+                    || (Math.abs(mode.getRefreshRate() - 120f) == Math.abs(closest.getRefreshRate() - 120f)
+                        && mode.getRefreshRate() > closest.getRefreshRate())) {
+                    closest = mode;
+                }
+            }
+        }
+        float preferredRate = closest == null ? 120f : closest.getRefreshRate();
+        WindowManager.LayoutParams attributes = window.getAttributes();
+        attributes.preferredRefreshRate = preferredRate;
+        window.setAttributes(attributes);
     }
 
     /**
@@ -82,6 +112,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        preferHighRefreshRate();
         pushes = 0;
         pusher.removeCallbacks(pushTask);
         pusher.post(pushTask);
