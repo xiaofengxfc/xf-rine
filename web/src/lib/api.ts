@@ -67,6 +67,8 @@ export interface ContractInfo {
   name: string;
   multiplier: number;
   sizeMin: number;
+  /** 下单张数步进（旧 Worker 未返回时由最小量回退推算） */
+  sizeStep?: number;
   sizeMax: number;
   priceRound: number;
   leverageMin?: number;
@@ -144,6 +146,8 @@ export interface Zone {
    * 页面把它画淡一点：让人还看得见刚才那条支撑，而不是凭空消失。
    */
   history?: boolean;
+  /** 这条位来自邻居周期（例如「4 小时」）。只有高周期共振位带这个字段 */
+  from_tf?: string;
   /** 共振周期数（1 = 只有本周期）/ 具体是哪几个周期 */
   tf_count: number;
   tfs: string;

@@ -3,3 +3,4 @@ packages:
   - web
   - desktop
   - mobile
+  - worker

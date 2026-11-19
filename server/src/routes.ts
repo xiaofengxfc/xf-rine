@@ -8,9 +8,10 @@ import { exchange, resetExchangeCache } from './exchange/index.js';
 import type {
   XContract, XPosition, XOrder, XTrigger, XTicker, XCandle, XOrderSpec, XAccount,
 } from './exchange/types.js';
+import { isSizeOnStep } from './exchange/size.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
 import type { Bar } from './bar.js';
-import type { Direction, Zone } from './sr/types.js';
+import type { Direction, MtfGroup, Zone } from './sr/types.js';
 import { stabilizeZones, zoneKey } from './sr/memory.js';
 import { BackupError, applyBackupFiles, collectBackup, decryptBackup, encryptBackup, sanitizeLocal } from './backup.js';
 import * as sr from './sr/client.js';
@@ -432,7 +433,8 @@ router.get('/contracts/:name', wrap(async (req, res) => {
     tradable: tradable === null ? true : tradable.has(c.name),
     name: c.name,
     multiplier: Number(c.quanto_multiplier),
-    sizeMin: c.order_size_min,
+    sizeMin: Number(c.order_size_min) > 0 ? c.order_size_min : (c.size_step ?? 1),
+    sizeStep: c.size_step ?? 1,
     sizeMax: c.order_size_max,
     priceRound: Number(c.order_price_round),
     leverageMin: Number(c.leverage_min),
@@ -716,6 +718,45 @@ router.get('/candles', wrap(async (req, res) => {
 
 // ---------- 档位 ----------
 
+/** 高周期共振位最多画几条：再多就把本周期那几条压住了 */
+const MTF_EXTRA_MAX = 4;
+
+/**
+ * 邻居周期（30m / 1h / 4h）算出来的位。
+ *
+ * 引擎在主周期上只聚出它自己那几个簇，周线级别的那条支撑压根不会出现 ——
+ * 「该有的位没有」多半是这一类。这些位其实一直在算，只是以前只用来给本周期的位
+ * 打一个「共振」标记，图上一条都没画。这里挑几个不和本周期重位的画出来，带上周期名。
+ *
+ * 和本周期已有的位差不到半个 ATR 就不画：那是同一个位置，画两遍只会把图压乱。
+ */
+function mtfExtras(groups: MtfGroup[], current: Zone[], live: number, atr: number): Zone[] {
+  if (!(live > 0) || groups.length === 0) return [];
+  const unit = atr > 0 ? atr : Math.max(live * 0.003, 1e-9);
+  const out: Zone[] = [];
+  for (const g of groups) {
+    for (const raw of g.zones ?? []) {
+      const role: Zone['zone_type'] = raw.high < live ? 'support'
+        : raw.low > live ? 'resistance'
+          : raw.center <= live ? 'support' : 'resistance';
+      const z: Zone = {
+        ...raw,
+        zone_type: role,
+        zone_label: (g.tf_label || g.tf) + (role === 'support' ? ' 支撑' : ' 压力'),
+        distance_pct: Number((((raw.center - live) / live) * 100).toFixed(4)),
+        distance_atr: Number(((raw.center - live) / unit).toFixed(4)),
+        from_tf: g.tf_label || g.tf,
+      };
+      if (current.some((c) => Math.abs(c.center - z.center) < unit * 0.5)) continue;
+      if (out.some((o) => Math.abs(o.center - z.center) < unit * 0.5)) continue;
+      out.push(z);
+    }
+  }
+  // 离现价最近的几条优先：远处的位对当下这一单没有意义
+  out.sort((a, b) => Math.abs(a.center - live) - Math.abs(b.center - live));
+  return out.slice(0, MTF_EXTRA_MAX);
+}
+
 /** 某一侧离现价最近的那个位 */
 function nearestOf(zones: Zone[], role: 'support' | 'resistance'): Zone | null {
   const pool = zones.filter((z) => z.zone_type === role);
@@ -815,6 +856,8 @@ router.get('/levels', wrap(async (req, res) => {
       zones,
       // 之前出现过、这次没重算出来的位：页面画淡一点，别让它凭空消失
       historyZones: set.history,
+      // 邻居周期算出来的位：本周期看不出来的周线级别支撑就在这里
+      mtfZones: mtfExtras(r.mtf_zones, zones, r.current_price, r.engine.atr),
       nearestSupport: nearestOf(zones, 'support'),
       nearestResistance: nearestOf(zones, 'resistance'),
       summary: r.summary,
@@ -852,6 +895,7 @@ router.get('/levels', wrap(async (req, res) => {
     atr: r.engine.atr,
     zones,
     historyZones: set.history,
+    mtfZones: mtfExtras(r.mtf_zones, zones, live || r.current_price, r.engine.atr),
     nearestSupport: nearestOf(zones, 'support'),
     nearestResistance: nearestOf(zones, 'resistance'),
     summary: r.summary,
@@ -1928,7 +1972,7 @@ async function prepareOrder(spec: PlaceSpec): Promise<PreparedOrder> {
   const c = await tradeContract(contract);
 
   if (spec.autoSize) {
-    if (Math.round(Number(spec.size)) !== 0) throw new GateError(400, 'BAD_INPUT', '整边平仓不能指定张数');
+    if (Number(spec.size) !== 0) throw new GateError(400, 'BAD_INPUT', '整边平仓不能指定张数');
     return {
       info: c,
       payload: {
@@ -1941,12 +1985,17 @@ async function prepareOrder(spec: PlaceSpec): Promise<PreparedOrder> {
     };
   }
 
-  const sizeRaw = Math.round(Number(spec.size));
-  if (!Number.isFinite(sizeRaw) || sizeRaw === 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
-  const minSize = Number(c.order_size_min ?? 0);
+  const requestedSize = Math.abs(Number(spec.size));
+  if (!Number.isFinite(requestedSize) || requestedSize === 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
+  const sizeStep = Number(c.size_step) > 0 ? Number(c.size_step) : 1;
+  const minSize = Number(c.order_size_min) > 0 ? Number(c.order_size_min) : sizeStep;
   const maxSize = Number(c.order_size_max ?? 0);
-  if (Math.abs(sizeRaw) < minSize) throw new GateError(400, 'SIZE_MIN', `最小下单 ${c.order_size_min} 张`);
-  if (maxSize > 0 && Math.abs(sizeRaw) > maxSize) throw new GateError(400, 'SIZE_MAX', `最大下单 ${c.order_size_max} 张`);
+  if (requestedSize < minSize) throw new GateError(400, 'SIZE_MIN', `最小下单 ${minSize} 张`);
+  if (maxSize > 0 && requestedSize > maxSize) throw new GateError(400, 'SIZE_MAX', `最大下单 ${maxSize} 张`);
+  if (!isSizeOnStep(requestedSize, sizeStep)) {
+    throw new GateError(400, 'SIZE_STEP', `张数必须按 ${sizeStep} 张递增`);
+  }
+  const sizeRaw = Number((Math.round(requestedSize / sizeStep) * sizeStep).toFixed(12));
 
   let price = Number(spec.price ?? 0);
   const isMarket = !Number.isFinite(price) || price <= 0;
@@ -2136,7 +2185,7 @@ router.post('/order/:id/amend', wrap(async (req, res) => {
   const left = Math.abs(Number(o.left ?? origSize));
   const side: Direction = origSize > 0 ? 'long' : 'short';
 
-  const rawSize = body.size === undefined || body.size === null || body.size === '' ? left : Math.round(Math.abs(Number(body.size)));
+  const rawSize = body.size === undefined || body.size === null || body.size === '' ? left : Math.abs(Number(body.size));
   if (!Number.isFinite(rawSize) || rawSize <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
   if (rawSize > left) {
     throw new GateError(400, 'AMEND_SIZE_MAX', `这张单只剩 ${left} 张没成交，改单只能改到 ${left} 张以内。想加大请重新下单`);
@@ -2400,7 +2449,7 @@ router.post('/add-position', wrap(async (req, res) => {
   }
   const contract = String(contractRaw);
   const dir = direction as Direction;
-  const qty = Math.round(Math.abs(Number(size)));
+  const qty = Math.abs(Number(size));
   if (!Number.isFinite(qty) || qty <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
 
   const sides = await readSides(contract);
@@ -2437,7 +2486,7 @@ router.post('/reverse-position', wrap(async (req, res) => {
   if (!mine) {
     throw new GateError(400, 'NO_POSITION', `当前没有${dir === 'long' ? '多' : '空'}头持仓，没有可反的仓`);
   }
-  const qty = Math.round(Math.abs(Number(size ?? mine.size)));
+  const qty = Math.abs(Number(size ?? mine.size));
   if (!Number.isFinite(qty) || qty <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
   if (qty > mine.size) {
     throw new GateError(400, 'REVERSE_SIZE_MAX', `反向张数不能超过当前持仓的 ${mine.size} 张。想加大请反手之后再点加仓`);
@@ -2628,6 +2677,7 @@ const aiDeps: RunnerDeps = {
     return {
       multiplier: Number(c.quanto_multiplier),
       sizeMin: Number(c.order_size_min),
+      sizeStep: Number(c.size_step) > 0 ? Number(c.size_step) : 1,
       sizeMax: Number(c.order_size_max),
       leverageMax: Number(c.leverage_max),
       takerFee: Number(c.taker_fee_rate),

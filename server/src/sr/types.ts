@@ -53,6 +53,11 @@ export interface Zone {
    * 只影响页面怎么画（画淡一点），不参与任何数值含义。
    */
   history?: boolean;
+  /**
+   * 本地加的字段：这条位来自邻居周期（例如「4 小时」），不是本周期算出来的。
+   * 用于给图上标注写清出处，不参与任何数值含义。
+   */
+  from_tf?: string;
 }
 
 export interface AnalysisSummary {

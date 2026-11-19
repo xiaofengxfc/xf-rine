@@ -29,10 +29,13 @@ export interface XContract {
   quanto_multiplier: string;
   /** 最小下单张数 */
   order_size_min: number;
+  /** 下单张数步进；整数量为 1，小数合约按交易所精度设置 */
+  size_step?: number;
   order_size_max: number;
+  enable_decimal?: boolean;
   /**
-   * 下单数量的精度（小数位）。
-   * Gate 是整数张，用不到；Bitget 的下单接口收的是币数量，必须按它的位数写：
+   * 下单数量的币数量精度（小数位）。
+   * Gate 原生张数不使用；Bitget 的下单接口收的是币数量，必须按它的位数写：
    * 多写一位会被拒，少写一位会冒出 0.00030000000000000003 这种尾巴。
    */
   size_place?: number;

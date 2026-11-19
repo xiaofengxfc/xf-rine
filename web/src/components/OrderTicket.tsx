@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, jsend, type Account, type ContractInfo } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { protectionRows, wrongSide } from '../lib/protection.ts';
-import { percentSizing } from '../lib/sizing.ts';
+import { floorToSizeStep, isOnSizeStep, percentSizing } from '../lib/sizing.ts';
 import { pnlFromCost } from '../lib/position.ts';
 
 /** 仓位比例的几个档。做日内的人只在这几个数之间选，比让他填一个百分比快 */
@@ -81,11 +81,13 @@ export default function OrderTicket({
   const last = contract?.price ?? 0;
   const mark = contract?.markPrice ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
-  // Gate 有些合约把 order_size_min 报成 0（意思是没单独要求），
-  // 但张数只能是正整数，照抄 0 会让「最小」按钮填个 0 进去，校验也拦不住。
-  const sizeMin = Math.max(1, Math.ceil(contract?.sizeMin ?? 1));
+  // 最小量和增量按交易所原值展示，不能把合法的小数张数向上取成整数。
+  const sizeStep = contract?.sizeStep && contract.sizeStep > 0 ? contract.sizeStep : 1;
+  const sizeMin = contract?.sizeMin && contract.sizeMin > 0 ? contract.sizeMin : sizeStep;
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
-  const sizeMax = Math.floor(contract?.sizeMax ?? 0);
+  const sizeMax = contract?.sizeMax && contract.sizeMax > 0
+    ? floorToSizeStep(contract.sizeMax, sizeStep)
+    : 0;
   /** N 张折成多少个币：一个币的数量常常要到小数点后好几位，别四舍五入成一串 0 */
   const qtyOf = (n: number): string => {
     const v = n * mult;
@@ -140,8 +142,38 @@ export default function OrderTicket({
     leverage: lev,
     feeRate,
     sizeMin,
+    sizeStep,
     sizeMax,
-  }), [avail, posPct, priceUsed, mult, lev, feeRate, sizeMin, sizeMax]);
+  }), [avail, posPct, priceUsed, mult, lev, feeRate, sizeMin, sizeStep, sizeMax]);
+
+  /**
+   * 某一档百分比能开多少张。
+   *
+   * 四个 chip 上都要把这个数写出来：余额不够时按比例算出来是 0 张，
+   * 输入框里没变化，点起来就像按钮坏了。有了这行字，一眼能看出是「余额不够」
+   * 而不是「点了没反应」。
+   */
+  const pctPreview = useCallback((p: number) => percentSizing({
+    available: avail,
+    pct: p,
+    price: priceUsed,
+    multiplier: mult,
+    leverage: lev,
+    feeRate,
+    sizeMin,
+    sizeStep,
+    sizeMax,
+  }), [avail, priceUsed, mult, lev, feeRate, sizeMin, sizeStep, sizeMax]);
+
+  const chipTitle = useCallback((p: number): string => {
+    const r = pctPreview(p);
+    const margin = fmtUsd(avail * (p / 100));
+    if (avail <= 0) return '可用余额是 0，先入金或者把别的仓平掉';
+    if (r.size <= 0) {
+      return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）低于最低成交量 ${sizeMin} 张`;
+    }
+    return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）可开 ${r.size} 张，约 ${fmtUsd(r.usedMargin)} USDT 保证金`;
+  }, [pctPreview, avail, lev, sizeMin]);
 
   // 没自己改过张数，就让比例说了算（换价、换杠杆、换比例都跟着变）
   useEffect(() => {
@@ -149,7 +181,7 @@ export default function OrderTicket({
     setSizeStr(sizing.size > 0 ? String(sizing.size) : '');
   }, [sizing.size, sizeTouched]);
 
-  const size = Math.round(Number(sizeStr) || 0);
+  const size = Number(sizeStr) || 0;
   const notional = size * mult * priceUsed;
   const margin = lev > 0 ? notional / lev : 0;
   const need = margin + notional * feeRate;
@@ -209,8 +241,10 @@ export default function OrderTicket({
      * 提示成「张数至少 1」会把人引到另一个框去改。
      */
     if (priceMode === 'limit' && !(priceUsed > 0)) return '限价还没填：先填一个价格再下单';
+    if (!Number.isFinite(size) || size <= 0) return '张数不合法';
     if (size < sizeMin) return `张数至少 ${sizeMin}`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
+    if (!isOnSizeStep(size, sizeStep)) return `张数必须按 ${sizeStep} 张递增`;
     if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
       return side === 'long' ? '止损要在现价下方' : '止损要在现价上方';
     }
@@ -229,10 +263,10 @@ export default function OrderTicket({
       return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连 ${sizeMin} 张都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
     }
     if (sizing.clamped === 'min') {
-      return `${posPct}% 的可用余额算不到 ${sizeMin} 张，已经提到最小下单量 ${sizeMin} 张。`;
+      return `${posPct}% 的可用余额预算低于最低成交量 ${sizeMin} 张；不会自动超出所选比例。`;
     }
     if (sizing.clamped === 'max') {
-      return `按 ${posPct}% 能开 ${Math.floor(sizing.raw)} 张，但合约上限是 ${sizeMax} 张，已经夹回去。`;
+      return `按 ${posPct}% 能开 ${floorToSizeStep(sizing.raw, sizeStep)} 张，但合约上限是 ${sizeMax} 张，已经夹回去。`;
     }
     return '';
   })();
@@ -335,12 +369,19 @@ export default function OrderTicket({
           <div className="size-wrap">
             <input
               className="input"
-              inputMode="numeric"
+              inputMode={sizeStep < 1 ? 'decimal' : 'numeric'}
+              aria-label="下单张数"
               placeholder={`最小 ${sizeMin}`}
               // 桌面端悬停时浏览器也会弹一句，和下面那张卡片说的是同一件事
               title={`最低 ${sizeMin} 张 = ${qtyOf(sizeMin)} 币`}
               value={sizeStr}
-              onChange={(e) => { setSizeStr(e.target.value.replace(/[^0-9]/g, '')); setSizeTouched(true); setPending(false); }}
+              onChange={(e) => {
+                const cleaned = e.target.value.replace(/[^0-9.]/g, '');
+                const [whole = '', ...fraction] = cleaned.split('.');
+                setSizeStr(fraction.length > 0 ? `${whole}.${fraction.join('')}` : whole);
+                setSizeTouched(true);
+                setPending(false);
+              }}
             />
             {/**
               * 最低下单量。
@@ -360,6 +401,18 @@ export default function OrderTicket({
               )}
             </div>
           </div>
+          {/**
+           * 常显的一行。
+           *
+           * 浮层只在悬停/聚焦时出来，手机上一松手就没了 —— 「最低多少」这件事
+           * 不能只存在一瞬间。这一行一直在输入框下面，写的是这个合约交易所
+           * 真正给的最低成交数量，以及它折成多少个币。
+           */}
+          <div className="size-min-line">
+            最低 <b>{sizeMin}</b> 张 = {qtyOf(sizeMin)} 币 · 步进 {sizeStep}
+            {priceUsed > 0 && mult > 0 && <>（名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT）</>}
+            {sizeMax > 0 && <span className="dim"> · 最多 {sizeMax} 张</span>}
+          </div>
         </div>
 
         <div className="row4" style={{ marginBottom: 10 }}>
@@ -368,7 +421,15 @@ export default function OrderTicket({
               key={p}
               className="chip"
               style={posPct === p ? { background: 'var(--accent)', color: '#0b0e13', borderColor: 'var(--accent)' } : undefined}
-              title={`用可用余额的 ${p}% 作保证金：` + fmtUsd(avail * (p / 100)) + ' USDT × ' + lev + 'x 杠杆'}
+              /**
+               * chip 上直接写「这一档能开多少张」。
+               *
+               * 以前点了只有输入框里的数字变，而余额不够时那个数字是 0 ——
+               * 看着就像「点了没反应」。现在每一档都把它算出来的张数写在自己身上，
+               * 算不出一张的那几档直接置灰，省得人反复点。
+               */
+              title={chipTitle(p)}
+              disabled={avail <= 0}
               onClick={() => { onPosPctChange(p); setSizeTouched(false); setPending(false); }}
             >
               {p}%

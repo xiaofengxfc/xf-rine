@@ -24,6 +24,8 @@ export interface SizingInput {
   /** 吃单手续费率：交易所按「保证金 + 手续费 ≤ 可用」放行 */
   feeRate: number;
   sizeMin: number;
+  /** 下单量的最小增量（支持小数张数的合约可小于 1） */
+  sizeStep?: number;
   /** 0 表示合约没给上限 */
   sizeMax: number;
 }
@@ -33,7 +35,7 @@ export interface SizingResult {
   margin: number;
   /** 按比例算出来、取整之前的张数 */
   raw: number;
-  /** 真能下的张数（整数，已经夹逼过） */
+  /** 真能下的张数（已按交易所增量取整并夹逼） */
   size: number;
   /** 可用余额全押能开多少张（保证金 + 手续费口径） */
   affordable: number;
@@ -43,42 +45,63 @@ export interface SizingResult {
   usedMargin: number;
   /** 这一单的吃单手续费 */
   fee: number;
-  /** 被谁夹住了：'' 正常，'afford' 余额不够一手，'max' 撞合约上限，'min' 提到最小一手 */
+  /** 被谁夹住了：'' 正常，'afford' 余额不够一手，'max' 撞合约上限，'min' 本档预算低于最低成交量 */
   clamped: '' | 'afford' | 'max' | 'min';
+}
+
+/** 小数步进支持科学计数法输入，并限制到交易所下单精度。 */
+export function sizeDecimals(step: number): number {
+  if (!(step > 0) || !Number.isFinite(step)) return 0;
+  const text = step.toFixed(12).replace(/0+$/, '').replace(/\.$/, '');
+  return Math.min(12, text.includes('.') ? text.length - text.indexOf('.') - 1 : 0);
+}
+
+/** 按交易所步进向下取整，避免二进制浮点尾数把张数推高。 */
+export function floorToSizeStep(value: number, step: number): number {
+  if (!(value > 0) || !Number.isFinite(value)) return 0;
+  const unit = step > 0 && Number.isFinite(step) ? step : 1;
+  const ratio = value / unit;
+  // 仅补偿 IEEE-754 在精确步进边界上的误差，不把真实小于边界的数量抬高。
+  const count = Math.floor(ratio + Math.max(1e-12, Number.EPSILON * Math.max(1, Math.abs(ratio)) * 8));
+  return Number((count * unit).toFixed(sizeDecimals(unit)));
+}
+
+export function isOnSizeStep(value: number, step: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  const unit = step > 0 && Number.isFinite(step) ? step : 1;
+  const nearest = Math.round(value / unit) * unit;
+  const tolerance = Math.max(1e-12, Number.EPSILON * Math.max(1, Math.abs(value)) * 8);
+  return Math.abs(value - nearest) <= tolerance;
 }
 
 export function percentSizing(i: SizingInput): SizingResult {
   const pct = Math.min(100, Math.max(0, i.pct));
   const feeRate = Math.max(0, i.feeRate);
   const avail = Math.max(0, i.available);
+  const step = i.sizeStep && i.sizeStep > 0 ? i.sizeStep : 1;
   const notionalPer = i.multiplier > 0 && i.price > 0 ? i.multiplier * i.price : 0;
   // 每张要占的钱：保证金 + 手续费。用这个分母，按比例算出来的张数才不会刚好被手续费顶爆
   const perSize = notionalPer > 0 && i.leverage > 0
     ? notionalPer / i.leverage + notionalPer * feeRate
     : 0;
   const margin = avail * (pct / 100);
-  const affordable = perSize > 0 ? Math.floor(avail / perSize) : 0;
+  const affordable = perSize > 0 ? floorToSizeStep(avail / perSize, step) : 0;
   const raw = perSize > 0 ? margin / perSize : 0;
 
-  let size = Math.floor(Math.max(0, raw));
+  let size = floorToSizeStep(Math.max(0, raw), step);
   let clamped: SizingResult['clamped'] = '';
   if (size > affordable) {
     size = affordable;
     clamped = 'afford';
   }
   if (i.sizeMax > 0 && size > i.sizeMax) {
-    size = i.sizeMax;
+    size = floorToSizeStep(i.sizeMax, step);
     clamped = 'max';
   }
   if (i.sizeMin > 0 && size < i.sizeMin) {
-    if (affordable >= i.sizeMin) {
-      // 余额够一手，但按这个比例算不到一手：给到最小一手，并说明是被最小下单量顶上去的
-      size = i.sizeMin;
-      clamped = 'min';
-    } else {
-      size = 0;
-      clamped = 'afford';
-    }
+    // 所选百分比是余额上限，不能为了满足最低成交量而静默突破这一比例。
+    size = 0;
+    clamped = affordable >= i.sizeMin ? 'min' : 'afford';
   }
 
   const notional = size * notionalPer;

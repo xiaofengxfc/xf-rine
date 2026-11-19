@@ -16,6 +16,14 @@ import type { WebSocketServer } from 'ws';
  * 加第二家交易所不该顺手把已经跑通的那家重写一遍。
  */
 
+function gateSizeStep(c: XContract): XContract {
+  const minText = String(c.order_size_min ?? '');
+  const decimalPlaces = /\.(\d+)/.exec(minText)?.[1]?.length ?? 0;
+  const decimalsEnabled = c.enable_decimal === true || String(c.enable_decimal) === 'true';
+  const places = decimalsEnabled ? Math.max(1, decimalPlaces) : 0;
+  return { ...c, size_step: 10 ** -Math.min(12, places) };
+}
+
 export class GateExchange implements Exchange {
   readonly id = 'gate' as const;
   readonly label = 'Gate';
@@ -32,16 +40,17 @@ export class GateExchange implements Exchange {
     requireGateKeys();
   }
 
-  contracts(timeoutMs?: number, attemptMs?: number): Promise<XContract[]> {
-    return gatePublic<XContract[]>('/futures/usdt/contracts', {}, timeoutMs, attemptMs);
+  async contracts(timeoutMs?: number, attemptMs?: number): Promise<XContract[]> {
+    const rows = await gatePublic<XContract[]>('/futures/usdt/contracts', {}, timeoutMs, attemptMs);
+    return rows.map(gateSizeStep);
   }
 
-  tradeContract(name: string): Promise<XContract> {
-    return gatePublicTrade<XContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
+  async tradeContract(name: string): Promise<XContract> {
+    return gateSizeStep(await gatePublicTrade<XContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`));
   }
 
-  publicContract(name: string): Promise<XContract> {
-    return gatePublic<XContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`);
+  async publicContract(name: string): Promise<XContract> {
+    return gateSizeStep(await gatePublic<XContract>(`/futures/usdt/contracts/${encodeURIComponent(name)}`));
   }
 
   async candles(name: string, interval: string, limit: number, to?: number): Promise<XCandle[]> {
@@ -62,7 +71,7 @@ export class GateExchange implements Exchange {
     if (config.env !== 'testnet') return null;
     try {
       const res = await netFetch(restBaseUrl() + '/api/v4/futures/usdt/contracts', {
-        headers: { Accept: 'application/json' },
+        headers: { Accept: 'application/json', 'X-Gate-Size-Decimal': '1' },
       });
       if (!res.ok) return null;
       const list = (await res.json()) as { name?: string; status?: string }[];
@@ -106,7 +115,8 @@ export class GateExchange implements Exchange {
   async placeOrder(spec: XOrderSpec): Promise<XOrder> {
     return gatePrivate<XOrder>('POST', '/futures/usdt/orders', {}, {
       contract: spec.contract,
-      size: spec.size,
+      // Gate 要用十进制文本接收小数张数，避免 JSON 浮点表示带来的精度损失。
+      size: String(spec.size),
       price: spec.price,
       tif: spec.tif,
       reduce_only: spec.reduce_only,

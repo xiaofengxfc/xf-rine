@@ -239,6 +239,20 @@ export default function ChartPane({
   const [sparse, setSparse] = useState<{ count: number; flat: number } | null>(null);
 
   /**
+   * 窄屏（手机竖屏）。
+   *
+   * 档位那条标注是**沿横线铺开**画的：宽屏上「支撑 61,985.2 · 触及 71% · 守住 63% ·
+   * 测试 2 次 · 共振 3」占半行正好，到手机上就成了几条整屏彩色横杠，把 K 线全盖住。
+   * 手机上只留「方向 + 价格 + 两个概率」，其余细节下面档位卡里本来就有。
+   */
+  const [narrow, setNarrow] = useState(() => (typeof window === 'undefined' ? false : window.innerWidth < 760));
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 760);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  /**
    * 数一下视口里有多少根平价 K 线。
    *
    * 冷门币这个比例能到 100%，图上一整片都是灰线 —— 不说明的话就是一种「K 线残缺」。
@@ -1069,7 +1083,11 @@ export default function ChartPane({
     // 一律画实线：这版算法算出来的强度分没有上限（1.x 到 3.x 都常见），
     // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
     // 主次靠远近距离分：最近的两条加粗，其余正常。
-    const byNear = [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
+    // 窄屏只画最近的 4 条：再多就是一屏横杠，K 线看不成了
+    const pool = narrow
+      ? [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last)).slice(0, 4)
+      : zones;
+    const byNear = [...pool].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
     const pctOf = (v: number | null) => (v === null ? '—' : Math.round(v * 100) + '%');
     byNear.forEach((z, i) => {
       /**
@@ -1086,11 +1104,16 @@ export default function ChartPane({
         width: dim ? 1 : (i < 2 ? 2 : 1),
         style: dim ? LineStyle.Dashed : LineStyle.Solid,
         // 价格按合约的最小变动价写：冷门币一跳 0.00001，toFixed(1) 会把它写成 0.0
-        title: (z.zone_type === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(z.center, priceRound)
-          + ' · 触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold)
-          + ' · 测试 ' + z.n_events + ' 次'
-          + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : '')
-          + (dim ? ' · 历史' : ''),
+        title: narrow
+          // 手机上短写：字只是重复下面卡片里的数，短一点 K 线才看得见
+          ? (z.zone_type === 'support' ? '支 ' : '阻 ') + fmtPrice(z.center, priceRound)
+            + ' ' + pctOf(z.p_touch) + '/' + pctOf(z.p_hold) + (dim ? ' 旧' : '')
+          : (z.zone_type === 'support' ? '支撑 ' : '阻力 ') + fmtPrice(z.center, priceRound)
+            + ' · 触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold)
+            + ' · 测试 ' + z.n_events + ' 次'
+            + (z.tf_count > 1 ? ' · 共振 ' + z.tf_count : '')
+            + (z.from_tf ? ' · ' + z.from_tf : '')
+            + (dim ? ' · 历史' : ''),
       });
     });
 
@@ -1129,7 +1152,8 @@ export default function ChartPane({
     // 标注就一直不回来。drawMode 同理：换画法要换一条序列挂。
     // 读的是上面那些闭包变量，签名保证内容变了才会重跑。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [levelSig, priceRound, drawMode, storageKey]);
+    // narrow 也在依赖里：转屏 / 分屏之后标注要按新宽度重画一遍
+  }, [levelSig, priceRound, drawMode, storageKey, narrow]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。

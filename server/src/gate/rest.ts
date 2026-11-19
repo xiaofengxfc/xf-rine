@@ -48,7 +48,7 @@ async function request<T>(
   const base = baseOverride ?? (isPrivate ? restBaseUrl() : publicBaseUrl());
   const url = base + fullPath + (query ? `?${query}` : '');
 
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', 'X-Gate-Size-Decimal': '1' };
   if (bodyStr) headers['Content-Type'] = 'application/json';
   if (config.key && config.secret) {
     const ts = Math.floor(Date.now() / 1000).toString();

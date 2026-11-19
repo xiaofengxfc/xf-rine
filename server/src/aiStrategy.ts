@@ -1,3 +1,4 @@
+import { ceilSizeToStep, floorSizeToStep } from './exchange/size.js';
 /**
  * AI 交易的策略配置，和它前面那道确定性风控闸门。
  *
@@ -351,6 +352,7 @@ export function dayLossPct(cfg: StrategyConfig, total: number): number {
 export interface GateContract {
   multiplier: number;
   sizeMin: number;
+  sizeStep?: number;
   sizeMax: number;
   leverageMax: number;
   takerFee: number;
@@ -525,7 +527,8 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
 
   const riskBudget = equity * (input.risk.riskPct / 100);
   const riskPerContract = out.stopDistance * mult;
-  const sizeByRisk = riskPerContract > 0 ? Math.floor(riskBudget / riskPerContract) : 0;
+  const sizeStep = input.info.sizeStep && input.info.sizeStep > 0 ? input.info.sizeStep : 1;
+  const sizeByRisk = riskPerContract > 0 ? floorSizeToStep(riskBudget / riskPerContract, sizeStep) : 0;
 
   // 保证金口径：一手占用 = 名义价值 / 杠杆。这里用现价估，实际以交易所算的为准
   const lev = Math.max(1, Math.min(cfg.leverage, input.info.leverageMax || cfg.leverage));
@@ -534,13 +537,13 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
   }
   const marginPerContract = (last * mult) / lev;
   const marginBudget = available * (input.risk.maxMarginPct / 100);
-  const sizeByMargin = marginPerContract > 0 ? Math.floor(marginBudget / marginPerContract) : 0;
+  const sizeByMargin = marginPerContract > 0 ? floorSizeToStep(marginBudget / marginPerContract, sizeStep) : 0;
 
   let size = Math.min(sizeByRisk, sizeByMargin);
-  if (input.info.sizeMax > 0) size = Math.min(size, Math.floor(input.info.sizeMax));
+  if (input.info.sizeMax > 0) size = Math.min(size, floorSizeToStep(input.info.sizeMax, sizeStep));
   out.binding = sizeByRisk <= sizeByMargin ? '单笔风险' : '可用保证金';
 
-  const minSize = Math.max(1, Math.ceil(input.info.sizeMin || 1));
+  const minSize = ceilSizeToStep(input.info.sizeMin > 0 ? input.info.sizeMin : sizeStep, sizeStep);
   add(
     '张数',
     size >= minSize,

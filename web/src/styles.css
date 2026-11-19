@@ -349,6 +349,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius);
 }
 
 .chart-tools {
@@ -631,6 +633,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
  * 写在上面的提示不会被挡住。放大镜式的固定小字会被输入法顶掉，这里不用那种做法。
  */
 .size-wrap { position: relative; }
+
+/*
+ * 常显的那一行「最低 N 张 = X 币」。
+ * 浮层（.size-tip）只在悬停/聚焦时出现，手机上一松手就没了，所以这条要一直在。
+ */
+.size-min-line {
+  margin-top: 5px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.size-min-line b { color: var(--text-1); font-weight: 600; }
 .size-tip {
   position: absolute;
   left: 0;
@@ -1382,8 +1396,17 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 .gate {
   min-height: 100dvh;
   display: flex;
-  align-items: center;
+  /*
+   * 用 flex-start 而不是 center。
+   *
+   * 手机键盘弹起来时视口只剩一半高，居中排的话卡片上半截会被推到屏幕外，
+   * 「电脑地址」那个框正好被键盘盖住 —— 看着像点了没反应。
+   * 顶对齐 + 允许滚动，键盘出来也能滚到输入框。
+   */
+  align-items: flex-start;
   justify-content: center;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: calc(24px + var(--inset-top)) calc(16px + var(--inset-right)) calc(24px + var(--inset-bottom))
     calc(16px + var(--inset-left));
   background: radial-gradient(120% 90% at 50% 0%, var(--bg-2) 0%, var(--bg-1) 55%, var(--bg-0) 100%);
@@ -1391,6 +1414,8 @@ button.x:disabled:hover { background: none; color: var(--text-2); }
 .gate-card {
   width: 100%;
   max-width: 420px;
+  /* 顶对齐之后给自己留出上边距，别贴着状态栏 */
+  margin: auto 0;
   padding: 22px 20px 20px;
   border: 1px solid var(--line);
   border-radius: 12px;

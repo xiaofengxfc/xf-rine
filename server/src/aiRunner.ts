@@ -45,6 +45,7 @@ const TICK_MS = 30_000;
 export interface ContractMeta {
   multiplier: number;
   sizeMin: number;
+  sizeStep?: number;
   sizeMax: number;
   leverageMax: number;
   takerFee: number;

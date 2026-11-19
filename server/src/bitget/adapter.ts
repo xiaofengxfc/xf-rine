@@ -6,6 +6,7 @@ import type {
   XOrderSpec, XTriggerSpec, MarketHub,
 } from '../exchange/types.js';
 import { BitgetMarketHub } from './market.js';
+import { ceilSizeToStep, floorSizeToStep } from '../exchange/size.js';
 import type { WebSocketServer } from 'ws';
 
 /**
@@ -85,6 +86,8 @@ function toContract(raw: RawContract, last = 0, mark = 0): XContract {
   const pricePlace = num(raw.pricePlace);
   const step = num(raw.priceEndStep, 1);
   const round = step / 10 ** pricePlace;
+  const volumePlace = Math.min(12, Math.max(0, Math.round(num(raw.volumePlace))));
+  const sizeStep = mult > 0 ? Math.pow(10, -volumePlace) / mult : 1;
   const minSize = mult > 0 ? num(raw.minTradeNum) / mult : 0;
   const maxQty = num(raw.maxOrderQty) || num(raw.maxMarketOrderQty);
   const maxSize = mult > 0 ? maxQty / mult : 0;
@@ -93,11 +96,11 @@ function toContract(raw: RawContract, last = 0, mark = 0): XContract {
     name: nameOf(String(raw.symbol ?? '')),
     quanto_multiplier: String(mult),
     // 换成「张」：页面上的张数和 Gate 那边是同一个意思
-    order_size_min: Math.max(1, Math.ceil(minSize)),
-    order_size_max: maxSize > 0 ? Math.floor(maxSize) : 0,
-    // 换成「张」之后，币数量的小数位就落在乘数上，两者相加才是张的小数位
-    size_place: Math.min(12, Math.max(0, Math.round(num(raw.volumePlace)))
-      + Math.max(0, Math.round(-Math.log10(mult || 1)))),
+    order_size_min: minSize > 0 ? ceilSizeToStep(minSize, sizeStep) : sizeStep,
+    order_size_max: maxSize > 0 ? floorSizeToStep(maxSize, sizeStep) : 0,
+    size_step: sizeStep,
+    // 下单接口的 size 是币数量，精度直接用交易所返回的 volumePlace。
+    size_place: volumePlace,
     order_price_round: String(round),
     mark_price_round: String(round),
     leverage_min: String(num(raw.minLever, 1)),
