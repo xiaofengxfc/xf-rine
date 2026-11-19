@@ -375,6 +375,11 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .seg button:hover { color: var(--text-0); }
 .seg button.on { background: var(--bg-4); color: var(--text-0); }
+.candle-style-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.candle-style-options button { min-height: 34px; padding: 6px 9px; color: var(--text-1); background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 12px; cursor: pointer; }
+.candle-style-options button:hover { color: var(--text-0); border-color: var(--line-2, var(--line)); }
+.candle-style-options button.on { color: var(--accent); border-color: var(--accent); background: var(--bg-3); }
+.candle-style-options button:last-child { grid-column: 1 / -1; }
 
 .tool-divider { width: 1px; height: 18px; background: var(--line); flex: none; }
 

@@ -3,6 +3,7 @@ import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 import { detectBrowserIp } from '../lib/ip.ts';
 import { isNative, apiBase, clearTarget } from '../lib/endpoint.ts';
 import { setTheme, useTheme } from '../lib/theme.ts';
+import { CANDLE_STYLES, setCandleStyle, useCandleStyle } from '../lib/chartStyle.ts';
 
 type FeedbackKind = 'bug' | 'idea' | 'other';
 
@@ -133,6 +134,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
   const [ipBusy, setIpBusy] = useState(false);
   /** 窄屏顶栏藏了主题开关，这一页是手机上唯一的入口，所以深色浅色都放全 */
   const theme = useTheme();
+  const candleStyle = useCandleStyle();
 
   // ---- 反馈 ----
   const [fbKind, setFbKind] = useState<FeedbackKind>('bug');
@@ -592,9 +594,18 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
                 <div>交易所：{diag.exchangeLabel ?? config?.exchangeLabel ?? 'Gate'} · 环境：{diag.envLabel} · <code>{diag.restBaseUrl}</code></div>
                 <div>私有接口：{diag.privateOk ? <span className="up">正常</span> : <span className="down">{diag.privateError}</span>}</div>
                 {diag.account && (
-                  <div style={{ marginTop: 4 }}>
-                    总权益 {Number(diag.account.total ?? 0).toFixed(2)} · 可用 {Number(diag.account.available ?? 0).toFixed(2)} USDT
-                  </div>
+                  <>
+                    <div style={{ marginTop: 4 }}>
+                      总权益 {Number(diag.account.total ?? 0).toFixed(2)} · 可用 {Number(diag.account.available ?? 0).toFixed(2)} USDT
+                    </div>
+                    {ex === 'bitget' && env === 'testnet'
+                      && Number(diag.account.total ?? 0) === 0
+                      && Number(diag.account.available ?? 0) === 0 && (
+                        <div className="hint" style={{ marginTop: 5 }}>
+                          接口正常但模拟账户余额为 0：请在 Bitget 模拟交易中领取/划入模拟 USDT，并确认资金在 U 本位合约账户；模拟资金与实盘、现货账户分开。
+                        </div>
+                      )}
+                  </>
                 )}
               </div>
             )}
@@ -606,8 +617,12 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
           页面拿到的永远只有尾号四位。
           {ex === 'bitget' ? (
             <>
-              到 Bitget「API 管理」建密钥时勾选 <b>合约交易 · 读写</b>，并把创建时设的口令
-              （Passphrase）一起填上 —— <b>KEY / SECRET / PASSPHRASE 三样缺一不可</b>。
+              {env === 'testnet' ? (
+                <>模拟盘必须在 Bitget「模拟交易」环境创建 <b>Demo API Key</b>，并填在此模拟盘密钥栏；实盘密钥不能代替 Demo Key。程序会自动使用模拟盘请求标记。遇到 40014 时，检查是否开启了<b>合约仓位读取</b>权限。 </>
+              ) : (
+                <>实盘请填 Bitget 实盘 API Key；遇到 40014 时，检查是否开启了<b>合约仓位读取</b>权限。 </>
+              )}
+              创建密钥时勾选 <b>合约交易 · 读写</b>，并把创建时设的口令（Passphrase）一起填上 —— <b>KEY / SECRET / PASSPHRASE 三样缺一不可</b>。
               <b>不要开提现权限</b>。
             </>
           ) : (
@@ -863,6 +878,23 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
               <div className="hint" style={{ marginTop: 10 }}>
                 点了立刻生效，不用重启。浅色下 K 线的底色、网格、坐标轴会一起换，
                 涨跌色和画线颜色保持不变。
+              </div>
+
+              <div className="field" style={{ marginTop: 18 }}>
+                <label>K 线样式</label>
+                <div className="candle-style-options">
+                  {CANDLE_STYLES.map((style) => (
+                    <button
+                      key={style.id}
+                      className={candleStyle === style.id ? 'on' : ''}
+                      aria-pressed={candleStyle === style.id}
+                      onClick={() => setCandleStyle(style.id)}
+                    >
+                      {style.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="hint">切换后图表立即更新，选择会保存在当前设备。</div>
               </div>
             </>
           )}

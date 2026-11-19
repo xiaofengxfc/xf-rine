@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
+  BarSeries,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
@@ -23,6 +24,7 @@ import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
+import { useCandleStyle } from '../lib/chartStyle.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
@@ -173,6 +175,7 @@ export default function ChartPane({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const barRef = useRef<ISeriesApi<'Bar'> | null>(null);
   /** 收盘价折线：成交稀疏的合约用这条，比一排小方块看着清楚 */
   const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
@@ -294,8 +297,9 @@ export default function ChartPane({
 
   /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
   const [mode, setMode] = useState<ChartMode>(readMode);
+  const candleStyle = useCandleStyle();
   const flatShare = sparse ? sparse.flat / Math.max(1, sparse.count) : 0;
-  const drawMode: 'candle' | 'line' = mode === 'auto'
+  const drawMode: 'candle' | 'line' = candleStyle === 'american' ? 'candle' : mode === 'auto'
     ? (sparse !== null && flatShare >= SPARSE_SHARE ? 'line' : 'candle')
     : mode;
 
@@ -378,13 +382,28 @@ export default function ChartPane({
     const price = chart.addSeries(CandlestickSeries, {
       upColor: UP,
       downColor: DOWN,
-      borderVisible: false,
+      borderVisible: true,
+      borderUpColor: UP,
+      borderDownColor: DOWN,
       wickUpColor: UP,
       wickDownColor: DOWN,
       priceLineVisible: true,
       priceLineColor: c.priceLine,
       priceLineStyle: LineStyle.Dotted,
       lastValueVisible: true,
+    });
+
+    // 美国线与 K 线共享同一份 OHLC 数据；K 线序列保留为绘图管理器的锚点。
+    const bar = chart.addSeries(BarSeries, {
+      upColor: UP,
+      downColor: DOWN,
+      openVisible: true,
+      thinBars: true,
+      priceLineVisible: false,
+      priceLineColor: c.priceLine,
+      priceLineStyle: LineStyle.Dotted,
+      lastValueVisible: false,
+      visible: false,
     });
 
     /**
@@ -413,7 +432,7 @@ export default function ChartPane({
 
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point) { setLegend(null); return; }
-      const d = param.seriesData.get(price) as { open: number; high: number; low: number; close: number } | undefined;
+      const d = (param.seriesData.get(price) ?? param.seriesData.get(bar)) as { open: number; high: number; low: number; close: number } | undefined;
       const frame = param.seriesData.get(line) as { value: number } | undefined;
       const v = param.seriesData.get(vol) as { value: number } | undefined;
       // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
@@ -579,6 +598,7 @@ export default function ChartPane({
 
     chartRef.current = chart;
     priceRef.current = price;
+    barRef.current = bar;
     lineRef.current = line;
     volRef.current = vol;
     dmRef.current = dm;
@@ -601,6 +621,7 @@ export default function ChartPane({
       chart.remove();
       chartRef.current = null;
       priceRef.current = null;
+      barRef.current = null;
       lineRef.current = null;
       volRef.current = null;
       dmRef.current = null;
@@ -643,6 +664,7 @@ export default function ChartPane({
     });
     priceRef.current?.applyOptions({ priceLineColor: c.priceLine });
     lineRef.current?.applyOptions({ color: c.line });
+    barRef.current?.applyOptions({ priceLineColor: c.priceLine });
     // 依赖里带 storageKey：切周期会重建整张图，新图也得贴成当前这套
   }, [theme, storageKey]);
 
@@ -657,18 +679,50 @@ export default function ChartPane({
    * 摆在前面的话，贴的是马上要被销毁的旧图。
    */
   useEffect(() => {
-    priceRef.current?.applyOptions({ visible: drawMode === 'candle' });
+    const price = priceRef.current;
+    const bar = barRef.current;
+    if (!price || !bar) return;
+    const transparent = 'rgba(0, 0, 0, 0)';
+    const american = drawMode === 'candle' && candleStyle === 'american';
+    const upFilled = candleStyle === 'filled' || candleStyle === 'down-hollow';
+    const downFilled = candleStyle === 'filled' || candleStyle === 'up-hollow';
+    const upColor = american ? transparent : upFilled ? UP : transparent;
+    const downColor = american ? transparent : downFilled ? DOWN : transparent;
+    const upEdge = american ? transparent : UP;
+    const downEdge = american ? transparent : DOWN;
+    price.applyOptions({
+      visible: drawMode === 'candle',
+      upColor,
+      downColor,
+      borderVisible: true,
+      borderUpColor: upEdge,
+      borderDownColor: downEdge,
+      wickUpColor: upEdge,
+      wickDownColor: downEdge,
+      priceLineVisible: drawMode === 'candle' && !american,
+      lastValueVisible: drawMode === 'candle' && !american,
+    });
+    bar.applyOptions({
+      visible: american,
+      upColor: UP,
+      downColor: DOWN,
+      openVisible: true,
+      thinBars: true,
+      priceLineVisible: american,
+      lastValueVisible: american,
+    });
     lineRef.current?.applyOptions({ visible: drawMode === 'line' });
-  }, [drawMode, storageKey]);
+  }, [candleStyle, drawMode, storageKey]);
 
   // ---- K 线数据 ----
   useEffect(() => {
     const chart = chartRef.current;
     const price = priceRef.current;
+    const bar = barRef.current;
     const vol = volRef.current;
     const dm = dmRef.current;
     const line = lineRef.current;
-    if (!chart || !price || !vol || !line || !dm) return;
+    if (!chart || !price || !bar || !vol || !line || !dm) return;
     if (bars.length === 0) return;
 
     /**
@@ -689,10 +743,16 @@ export default function ChartPane({
     const point = (b: PaintedBar) => (b.flat
       ? {
         time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-        color: colorsRef.current.flat, borderColor: colorsRef.current.flat, wickColor: colorsRef.current.flat,
+        color: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
+        borderColor: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
+        wickColor: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
       }
       : { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close });
     const writePrice = (b: PaintedBar) => price.update(point(b));
+    const barPoint = (b: PaintedBar) => b.flat
+      ? { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close, color: colorsRef.current.flat }
+      : { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close };
+    const writeBar = (b: PaintedBar) => bar.update(barPoint(b));
     /** 折线只用收盘价：稀疏合约看着就是价格的台阶，比一排小方块清楚 */
     const writeLine = (b: PaintedBar) => line.update({ time: b.time as UTCTimestamp, value: b.close });
     const lineData = (list: PaintedBar[]) => list.map((b) => ({ time: b.time as UTCTimestamp, value: b.close }));
@@ -709,6 +769,7 @@ export default function ChartPane({
     const fullLoad = () => {
       const clean = painted();
       price.setData(clean.map(point));
+      bar.setData(clean.map(barPoint));
       line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
@@ -817,6 +878,7 @@ export default function ChartPane({
         : {};
 
       price.setData(clean.map(point));
+      bar.setData(clean.map(barPoint));
       line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
@@ -908,6 +970,7 @@ export default function ChartPane({
         return;
       }
 
+
       // 拿到的是一份比图上更旧的快照（REST 有缓存，可能落后于 WebSocket 推来的那根），
       // 增量写不进去，整段重画 —— 但仍然不碰视口。
       const newest = cleanBars[cleanBars.length - 1]!;
@@ -942,6 +1005,7 @@ export default function ChartPane({
         const b = cleanBars[i]!;
         if (applied != null && b.time < applied) continue;
         writePrice(b);
+        writeBar(b);
         writeLine(b);
         writeVol(b);
         lastTimeRef.current = b.time;
@@ -1069,13 +1133,16 @@ export default function ChartPane({
      * 整批标注就一起消失，用户看到的就是「支撑阻力有时候不见了」。
      * 手动画线是 primitive，不受这条规则管，所以只有这批标注会没。
      */
-    const owner = drawMode === 'line' ? lineRef.current : priceRef.current;
+    const owner = drawMode === 'line'
+      ? lineRef.current
+      : candleStyle === 'american' ? barRef.current : priceRef.current;
     if (!owner) return;
 
     // 两条序列都清一遍：换画法时上一批挂在另一条上，只清看得见那条会留下孤儿，
     // 下次切回来它们跟着一起显出来 —— 同一档在图上画了两遍
-    const both: (ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>)[] = [];
+    const both: (ISeriesApi<'Candlestick'> | ISeriesApi<'Bar'> | ISeriesApi<'Line'>)[] = [];
     if (priceRef.current) both.push(priceRef.current);
+    if (barRef.current) both.push(barRef.current);
     if (lineRef.current) both.push(lineRef.current);
     for (const s of both) {
       for (const line of levelLinesRef.current) s.removePriceLine(line);
@@ -1223,7 +1290,7 @@ export default function ChartPane({
     // 读的是上面那些闭包变量，签名保证内容变了才会重跑。
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // narrow 也在依赖里：转屏 / 分屏之后标注要按新宽度重画一遍
-  }, [levelSig, priceRound, drawMode, storageKey, narrow]);
+  }, [levelSig, priceRound, candleStyle, drawMode, storageKey, narrow]);
 
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
@@ -1258,6 +1325,7 @@ export default function ChartPane({
       return { ...info, priceRange: { minValue: mid - floor / 2, maxValue: mid + floor / 2 } };
     };
     priceRef.current?.applyOptions({ autoscaleInfoProvider: provider });
+    barRef.current?.applyOptions({ autoscaleInfoProvider: provider });
     lineRef.current?.applyOptions({ autoscaleInfoProvider: provider });
     // 同上：重建后的图表要重新贴，不然稀疏币切周期又变成满屏竖条
   }, [priceRound, storageKey]);

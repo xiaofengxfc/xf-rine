@@ -45,6 +45,16 @@ function encodeQuery(params: Record<string, string | number | boolean | undefine
   };
 }
 
+/** Make Bitget's permission error actionable without hiding its original message. */
+function bitgetErrorDetail(code: unknown, message: unknown, path: string): string {
+  const detail = String(message ?? '交易所没有说明原因');
+  if (String(code) !== '40014') return detail;
+  const envHint = config.env === 'testnet'
+    ? '模拟盘请使用在 Bitget 模拟交易环境创建的 Demo API Key，并填入本程序设置页的「模拟盘」密钥栏；'
+    : '请确认使用的是本程序设置页「实盘」对应的 API Key；';
+  return `${detail}（请求接口：${path}）。${envHint}同时确认 API Key 已开启合约仓位读取权限（需要交易时再开启写入权限）。`;
+}
+
 interface Options {
   /** 私有接口要签名、走「下单环境」那个地址 */
   isPrivate?: boolean;
@@ -129,7 +139,7 @@ async function request<T>(
 
     if (!res.ok) {
       const label = json?.code ? String(json.code) : `HTTP_${res.status}`;
-      const detail = String(json?.msg ?? json?.message ?? text.slice(0, 300));
+      const detail = bitgetErrorDetail(json?.code ?? label, json?.msg ?? json?.message ?? text.slice(0, 300), path);
       throw new GateError(res.status, label, detail, 'Bitget');
     }
     if (!json || typeof json !== 'object') {
@@ -137,7 +147,7 @@ async function request<T>(
     }
     // 业务错误也是 200，只能看 code
     if (json.code !== '00000') {
-      throw new GateError(400, String(json.code ?? 'UNKNOWN'), String(json.msg ?? '交易所没有说明原因'), 'Bitget');
+      throw new GateError(400, String(json.code ?? 'UNKNOWN'), bitgetErrorDetail(json.code, json.msg, path), 'Bitget');
     }
     return json.data as T;
   } finally {

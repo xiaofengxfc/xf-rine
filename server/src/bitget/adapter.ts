@@ -55,6 +55,7 @@ interface RawContract {
 
 type RawPosition = Record<string, unknown>;
 type RawOrder = Record<string, unknown>;
+type RawAccount = Record<string, unknown>;
 
 /** 页面上显示的合约名用 Gate 那套写法：BTCUSDT → BTC_USDT */
 export function nameOf(symbol: string): string {
@@ -72,6 +73,29 @@ export function symbolOf(name: string): string {
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function firstAccountNumber(...values: unknown[]): number {
+  for (const value of values) {
+    if (value == null || (typeof value === 'string' && value.trim() === '')) continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+export function bitgetAccountSnapshot(account: RawAccount): XAccount {
+  // UTA v3 nests per-coin balances under assets; the legacy v2 response has these
+  // values at the root. Prefer the UTA USDT valuation to avoid reporting a margin-only
+  // accountEquity as the total account balance.
+  const assets = Array.isArray(account.assets) ? account.assets as RawAccount[] : [];
+  const usdt = assets.find((asset) => String(asset.coin ?? asset.marginCoin ?? '').toUpperCase() === 'USDT');
+  return {
+    total: firstAccountNumber(account.usdtEquity, usdt?.equity, usdt?.balance, account.accountEquity, account.equity),
+    available: firstAccountNumber(usdt?.available, account.unionAvailable, account.available),
+    unrealised_pnl: firstAccountNumber(account.usdtUnrealisedPnl, account.unrealisedPnl, account.unrealizedPL),
+    currency: 'USDT',
+  };
 }
 
 /** 按小数位取整，顺手避免 0.00030000000000000003 这种尾巴被交易所拒 */
@@ -363,26 +387,26 @@ export class BitgetExchange implements Exchange {
 
   async account(): Promise<XAccount> {
     this.requireKeys();
-    const a = await bgPrivate<Record<string, unknown>>(
+    // UTA balances live on the v3 account-assets endpoint. The legacy v2 mix account
+    // endpoint can succeed but report zero after the account is switched to UTA.
+    const a = await bgPrivate<RawAccount>('GET', '/api/v3/account/assets');
+    // Keep using the legacy futures snapshot only for position/margin mode metadata;
+    // it is not authoritative for balances and should not block UTA balance reads.
+    const futures = await bgPrivate<RawAccount>(
       'GET', '/api/v2/mix/account/account',
       { symbol: 'BTCUSDT', productType: PRODUCT, marginCoin: 'USDT' },
-    );
-    const mode = String(a?.posMode ?? '');
+    ).catch(() => null);
+    const mode = String(futures?.posMode ?? '');
     if (mode === 'one_way_mode' || mode === 'hedge_mode') {
       this.posMode = mode;
       this.posModeAt = Date.now();
     }
-    const mm = String(a?.marginMode ?? '');
+    const mm = String(futures?.marginMode ?? '');
     if (mm === 'crossed' || mm === 'isolated') {
       // 账户默认模式：单个合约还不知道时用它兜底
       if (!this.marginModes.has('__default__')) this.marginModes.set('__default__', mm);
     }
-    return {
-      total: num(a?.accountEquity),
-      available: num(a?.available),
-      unrealised_pnl: num(a?.unrealizedPL),
-      currency: 'USDT',
-    };
+    return bitgetAccountSnapshot(a);
   }
 
   private async currentPosMode(): Promise<'one_way_mode' | 'hedge_mode'> {
