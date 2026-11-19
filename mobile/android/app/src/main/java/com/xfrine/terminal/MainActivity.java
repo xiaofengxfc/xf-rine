@@ -40,12 +40,18 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // The launcher uses a splash theme. Switch to the actual shell theme before the WebView
+        // is created so a native ActionBar cannot cover the mobile page header.
+        setTheme(R.style.AppTheme_NoActionBar);
+
         // 在 super 之前注册：Capacitor 在 onCreate 里建桥，晚一步就找不到了
         registerPlugin(SystemBarsPlugin.class);
 
         // 先铺满，再由页面用 CSS 变量让位
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         super.onCreate(savedInstanceState);
+        // Keep the native toolbar disabled on Android versions that ignore postSplashScreenTheme.
+        if (getSupportActionBar() != null) getSupportActionBar().hide();
 
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         getWindow().setNavigationBarColor(Color.TRANSPARENT);
@@ -109,9 +115,11 @@ public class MainActivity extends BridgeActivity {
         );
         float density = getResources().getDisplayMetrics().density;
         if (density <= 0) density = 1f;
+        Insets gestures = insets.getInsets(WindowInsetsCompat.Type.systemGestures());
+        float safeBottom = Math.max(bars.bottom, gestures.bottom) / density;
         String js = "document.documentElement.style.setProperty('--safe-area-inset-top','" + (bars.top / density) + "px');"
             + "document.documentElement.style.setProperty('--safe-area-inset-right','" + (bars.right / density) + "px');"
-            + "document.documentElement.style.setProperty('--safe-area-inset-bottom','" + (bars.bottom / density) + "px');"
+            + "document.documentElement.style.setProperty('--safe-area-inset-bottom','" + safeBottom + "px');"
             + "document.documentElement.style.setProperty('--safe-area-inset-left','" + (bars.left / density) + "px');";
         if (getBridge() == null || getBridge().getWebView() == null) return;
         getBridge().getWebView().post(() -> {
@@ -154,9 +162,10 @@ public class MainActivity extends BridgeActivity {
                 Insets bars = insets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
                 );
+                Insets gestures = insets.getInsets(WindowInsetsCompat.Type.systemGestures());
                 out.put("top", bars.top / density);
                 out.put("right", bars.right / density);
-                out.put("bottom", bars.bottom / density);
+                out.put("bottom", Math.max(bars.bottom, gestures.bottom) / density);
                 out.put("left", bars.left / density);
             }
             call.resolve(out);
