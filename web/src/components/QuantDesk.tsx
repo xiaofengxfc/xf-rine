@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend } from '../lib/api.ts';
+import { apiUrl, authHeaders } from '../lib/endpoint.ts';
 import ContractPicker from './ContractPicker.tsx';
 import type {
   QuantCatalog, QuantCondition, QuantSpec, QuantVerdict,
@@ -83,6 +84,7 @@ export default function QuantDesk({ canRun, onToast }: Props) {
   const [spec, setSpec] = useState<QuantSpec>(() => starterSpec(null));
   const [result, setResult] = useState<QuantBacktestResult | null>(null);
   const [busy, setBusy] = useState<Busy>('');
+  const [backtestProgress, setBacktestProgress] = useState<Extract<QuantEvent, { type: 'backtest-progress' }> | null>(null);
   /** 当前在库里对应的那条策略（保存过之后才有 id） */
   const [savedId, setSavedId] = useState('');
   /** 策略库列表，「打开已有策略」用它 */
@@ -212,21 +214,39 @@ export default function QuantDesk({ canRun, onToast }: Props) {
     if (kind === 'rule' && spec.entry.length === 0) { onToast('err', '先加一条入场条件'); return; }
     if (kind === 'prompt' && !prompt.trim()) { onToast('err', '提示词是空的', '写一段要模型照着判断的指令'); return; }
     setBusy('backtest');
+    setBacktestProgress({ type: 'backtest-progress', stage: 'data', message: '准备回测' });
     try {
-      // 提示词策略要问很多次模型，超时给足；规则策略几百毫秒就完
+      // 提示词策略要问很多次模型，超时给足；规则策略搜索过程会流式汇报候选进度
       const timeout = kind === 'prompt' ? 900_000 : 300_000;
-      const r = await jsend<QuantBacktestResult>('POST', '/api/quant/backtest', {
-        contract, interval: tf, capital, spec, kind, prompt,
-      }, undefined, AbortSignal.timeout(timeout));
-      setResult(r);
+      const signal = AbortSignal.timeout(timeout);
+      const res = await fetch(apiUrl('/api/quant/backtest/stream'), {
+        method: 'POST',
+        headers: { Accept: 'application/x-ndjson', 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ contract, interval: tf, capital, spec, kind, prompt }),
+        signal,
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const outcome: { result: QuantBacktestResult | null; error: string } = { result: null, error: '' };
+      await readEvents(res, (ev) => {
+        if (ev.type === 'backtest-progress') setBacktestProgress(ev);
+        if (ev.type === 'backtest-result') outcome.result = ev.result;
+        if (ev.type === 'backtest-error') outcome.error = ev.message;
+      }, signal);
+      if (outcome.error) throw new Error(outcome.error);
+      if (!outcome.result) throw new Error('回测进度流已结束，但没有收到结果');
+      setResult(outcome.result);
+      const completed = outcome.result;
       onToast('ok',
-        r.mode === 'search' ? '搜索完成' : r.mode === 'prompt' ? '提示词回测完成' : '回测完成',
-        r.mode === 'search'
-          ? r.candidates + ' 组候选'
-          : (r.stats?.trades ?? 0) + ' 笔交易');
+        completed.mode === 'search' ? '搜索完成' : completed.mode === 'prompt' ? '提示词回测完成' : '回测完成',
+        completed.mode === 'search'
+          ? completed.candidates + ' 组候选'
+          : (completed.stats?.trades ?? 0) + ' 笔交易');
     } catch (e) {
       onToast('err', '回测失败', (e as Error).message);
-    } finally { setBusy(''); }
+    } finally {
+      setBusy('');
+      setBacktestProgress(null);
+    }
   }, [contract, tf, capital, spec, kind, prompt, onToast]);
 
   useEffect(() => {
@@ -610,6 +630,22 @@ export default function QuantDesk({ canRun, onToast }: Props) {
               </div>
             </div>
 
+            {busy === 'backtest' && backtestProgress && (
+              <div className="quant-backtest-progress" role="status" aria-live="polite">
+                <div className="quant-backtest-progress-track">
+                  <div
+                    className="quant-backtest-progress-fill"
+                    style={{ width: backtestProgress.total && backtestProgress.total > 0
+                      ? `${Math.max(4, Math.min(100, (backtestProgress.done ?? 0) / backtestProgress.total * 100))}%`
+                      : '28%' }}
+                  />
+                </div>
+                <span>{backtestProgress.message}</span>
+                {backtestProgress.done !== undefined && backtestProgress.total !== undefined && (
+                  <b>{backtestProgress.done}/{backtestProgress.total}</b>
+                )}
+              </div>
+            )}
             <div className="quant-actions">
               <button className="btn quant-btn-primary" disabled={busy !== '' || researching} onClick={() => void runBacktest()}>
                 {busy === 'backtest' ? '回测中…' : Object.keys(spec.ranges).length ? '搜索参数并回测' : '回测'}

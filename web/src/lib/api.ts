@@ -725,7 +725,10 @@ export type QuantEvent =
   /** saved：达标的方案已经自动存进策略库，页面可以直接载入编辑器 */
   | { type: 'done'; verdict: string; report: unknown; saved?: { id: string; name: string; spec: QuantSpec } | null }
   | { type: 'note'; message: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'backtest-progress'; stage: string; message: string; done?: number; total?: number }
+  | { type: 'backtest-result'; result: QuantBacktestResult }
+  | { type: 'backtest-error'; message: string };
 
 export interface QuantTradeRow {
   side: string; entryTime: number; exitTime: number;

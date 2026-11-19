@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "check:sizing": "tsx scripts/check-sizing.ts",
+    "check:level-lines": "tsx scripts/check-level-lines.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

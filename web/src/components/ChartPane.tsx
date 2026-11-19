@@ -13,11 +13,12 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { DrawingManager, defaultStyleFor, type DrawingKind } from 'lightweight-charts-drawing';
+import { DrawingManager, defaultStyleFor, type DrawingKind, type DrawingLabel } from 'lightweight-charts-drawing';
 import type { Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
+import { chartZoneLineStyle } from '../lib/chartLevelStyle.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
@@ -44,6 +45,20 @@ function readMode(): ChartMode {
     const v = localStorage.getItem(MODE_KEY);
     return v === 'candle' || v === 'line' ? v : 'auto';
   } catch { return 'auto'; }
+}
+
+/** Position-tool labels are localized and identify their long/short side. */
+function formatPositionLabel(label: DrawingLabel): string | undefined {
+  if (label.kind !== 'long-position' && label.kind !== 'short-position') return undefined;
+  const side = label.kind === 'long-position' ? '多单' : '空单';
+  const text = label.text
+    .replace(/^Target:/, '止盈:')
+    .replace(/^Stop:/, '止损:')
+    .replace(/^Open PnL:/, '持仓盈亏:')
+    .replace(/^Closed PnL:/, '已平盈亏:')
+    .replace(/Qty:/g, '数量:')
+    .replace(/Risk\/reward ratio:/g, '盈亏比:');
+  return side + ' · ' + text;
 }
 
 /** 默认在最新 K 线后留出少量空白，供拖动浏览未来区域。 */
@@ -437,6 +452,7 @@ export default function ChartPane({
       clampToPane: true,
       bars: snapBars,
       timeInfo: () => ({ timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intraday: true }),
+      formatLabel: formatPositionLabel,
     });
 
     let saveTimer: number | undefined;
@@ -457,6 +473,8 @@ export default function ChartPane({
       }, 250);
     };
     const unsubs = [
+      // change catches edits to anchors, position levels and label settings; add/remove alone missed some updates.
+      dm.on('change', persist),
       dm.on('add', persist),
       dm.on('remove', persist),
       dm.on('gestureEnd', persist),
@@ -1159,19 +1177,22 @@ export default function ChartPane({
       ? [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last)).slice(0, 4)
       : zones;
     const byNear = [...pool].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
-    const pctOf = (v: number | null) => (v === null ? '—' : Math.round(v * 100) + '%');
     byNear.forEach((z, i) => {
-      const dim = z.history === true;
-      const color = z.zone_type === 'support' ? 'rgba(46,211,160,0.8)' : 'rgba(255,95,109,0.8)';
+      const appearance = chartZoneLineStyle({
+        type: z.zone_type,
+        history: z.history === true,
+        pTouch: z.p_touch,
+        pHold: z.p_hold,
+      });
       items.push({
         price: z.center,
         rank: 3 + i * 0.01,
-        color,
-        width: dim ? 1 : (i < 2 ? 2 : 1),
-        style: dim ? LineStyle.Dashed : LineStyle.Solid,
-        title: dim ? '' : '触及 ' + pctOf(z.p_touch) + ' · 守住 ' + pctOf(z.p_hold),
-        // 历史位保留同色参考线，不显示轴上价格标签或线上的文字。
-        axisLabelVisible: !dim,
+        color: appearance.color,
+        width: appearance.width,
+        style: LineStyle.Solid,
+        title: appearance.title,
+        // 历史位与当前位同色、同粗、实线，只隐藏历史位文字和轴价格标签。
+        axisLabelVisible: appearance.axisLabelVisible,
       });
     });
 

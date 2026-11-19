@@ -103,10 +103,14 @@ export async function buildZoneTimeline(
   warmup: number,
   analyze: (window: Candle[]) => Promise<ZonePoint[]>,
   lookback = 300,
+  onProgress?: (progress: { completed: number; total: number }) => void,
 ): Promise<ZoneTimeline> {
   const step = Math.max(1, Math.floor(every));
+  const start = Math.max(warmup, 1);
+  const total = Math.max(0, Math.ceil((candles.length - start) / step));
   const slices: ZoneSlice[] = [];
-  for (let i = Math.max(warmup, 1); i < candles.length; i += step) {
+  let completed = 0;
+  for (let i = start; i < candles.length; i += step) {
     // 只喂 i 及之前的 K 线：这一段是「当时能看到的全部」，喂多了就是未来函数
     const from = Math.max(0, i - lookback + 1);
     const window = candles.slice(from, i + 1);
@@ -118,6 +122,8 @@ export async function buildZoneTimeline(
       zones = [];
     }
     slices.push({ fromIndex: i, toIndex: Math.min(candles.length - 1, i + step - 1), zones });
+    completed += 1;
+    onProgress?.({ completed, total });
   }
   return { slices, every: step };
 }

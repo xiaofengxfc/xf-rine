@@ -6,7 +6,9 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "check:bitget": "tsx scripts/check-bitget.ts"
+    "check:bitget": "tsx scripts/check-bitget.ts",
+    "check:bitget-mapping": "tsx scripts/check-bitget-mapping.ts",
+    "check:config-keys": "tsx scripts/check-config-keys.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

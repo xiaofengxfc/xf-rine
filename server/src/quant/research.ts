@@ -15,7 +15,7 @@
 
 import type { Candle, Condition } from './backtest.js';
 import { conditionHolds, IndicatorCache } from './backtest.js';
-import { searchParameters, type Candidate, type SearchOptions } from './search.js';
+import { searchParametersWithProgress, type Candidate, type SearchOptions } from './search.js';
 import { judge, DEFAULT_CRITERIA, type Criteria, type Verdict } from './criteria.js';
 import { proposeHypothesis, toSpec, validateSemantics, type Hypothesis, type RoundSummary } from './ai.js';
 
@@ -141,10 +141,19 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
     const spec = toSpec(asked.hypothesis, opts.contract + ' ' + opts.interval + ' #' + i);
     let candidates: Candidate[] = [];
     try {
-      candidates = searchParameters(spec, opts.candles, opts.market, {
-        ...opts.search,
-        minTrades: criteria.minTrades,
-      });
+      candidates = await searchParametersWithProgress(
+        spec,
+        opts.candles,
+        opts.market,
+        { ...opts.search, minTrades: criteria.minTrades },
+        ({ completed, total }) => {
+          const stride = Math.max(1, Math.floor(total / 100));
+          if (completed === 1 || completed === total || completed % stride === 0) {
+            opts.onStage?.('search', `第 ${i} 轮：参数搜索 ${completed}/${total}`);
+          }
+        },
+        opts.isCancelled,
+      );
     } catch (e) {
       notes.push('第 ' + i + ' 轮回测失败：' + (e as Error).message);
     }

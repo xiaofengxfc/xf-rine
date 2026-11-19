@@ -20,6 +20,7 @@ import { sanitizeHypothesis, FALLBACK_HYPOTHESIS, validateSemantics } from '../s
 import { buildAnonContext, assertAnonymous, parseVerdict } from '../src/quant/promptStrategy.js';
 import { randomBaselineSignals } from '../src/quant/promptBacktest.js';
 import { buildZoneTimeline, zoneSeries, nearestZone } from '../src/quant/zones.js';
+import { searchParameters, searchParametersWithProgress } from '../src/quant/search.js';
 
 let fails = 0;
 let passes = 0;
@@ -545,6 +546,26 @@ console.log('\\n[14] 提示词上下文带上关键位，且仍然匿名');
   ok('关键位价格也归一化了（不出现 6 万量级）', !/6[0-9]{4}/.test(ctx.text), ctx.text.match(/[0-9]{5}/)?.[0] ?? '');
   ok('仍然没有币种名', !/BTC|USDT/i.test(ctx.text));
 }
+console.log('\n[15] 参数搜索的异步进度与同步结果一致');
+{
+  const candles = Array.from({ length: 240 }, (_, i) => {
+    const close = 100 + Math.sin(i / 4) * 4 + Math.sin(i / 13) * 2;
+    return bar(1700000000 + i * 3600, close, close + 1, close - 1, close);
+  });
+  const spec: StrategySpec = {
+    name: 'progress-check', side: 'long', params: { period: 3 },
+    ranges: { period: [2, 6, 2] },
+    entry: [{ left: { name: 'close' }, op: '>', right: { name: 'highest', periodKey: 'period' } }],
+    stop: { kind: 'pct', value: 0.02 }, target: { kind: 'rr', value: 2 }, maxPositions: 1,
+  };
+  const base = { ...OPTS, multiplier: 1 };
+  const sync = searchParameters(spec, candles, base, { minTrades: 1 });
+  const progress: { completed: number; total: number }[] = [];
+  const asyncResult = await searchParametersWithProgress(spec, candles, base, { minTrades: 1 }, (p) => progress.push(p));
+  eq('异步候选与同步候选一致', asyncResult, sync);
+  eq('每组参数各报告一次进度', progress, [1, 2, 3].map((completed) => ({ completed, total: 3 })));
+}
+
 const total = passes + fails;
 console.log('\n通过 ' + passes + ' 项，失败 ' + fails + ' 项（共 ' + total + '）');
 if (fails > 0) process.exitCode = 1;

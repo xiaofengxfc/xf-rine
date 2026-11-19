@@ -89,6 +89,7 @@ export interface Config {
  */
 let activeExchange: ExchangeId =
   ((process.env.EXCHANGE ?? 'gate').trim().toLowerCase() === 'bitget' ? 'bitget' : 'gate') as ExchangeId;
+let activeEnv: GateEnv = (process.env.GATE_ENV ?? 'live').trim().toLowerCase() === 'testnet' ? 'testnet' : 'live';
 
 /**
  * 每个环境、每家交易所各一套密钥，切来切去不用重填。
@@ -104,29 +105,41 @@ export function keySlot(env: GateEnv, ex?: ExchangeId): { key: string; secret: s
   };
 }
 
+/** 读取指定交易所和环境的密钥；Gate 旧版单环境变量继续兼容。 */
+function credentialValues(env: GateEnv, ex: ExchangeId): { key: string; secret: string; passphrase: string } {
+  const slot = keySlot(env, ex);
+  return {
+    key: (process.env[slot.key] ?? (ex === 'gate' && env === activeEnv ? process.env.GATE_KEY : undefined) ?? '').trim(),
+    secret: (process.env[slot.secret] ?? (ex === 'gate' && env === activeEnv ? process.env.GATE_SECRET : undefined) ?? '').trim(),
+    passphrase: ex === 'bitget' ? (process.env[slot.passphrase] ?? '').trim() : '',
+  };
+}
+
 /** 读指定环境的密钥。不传就读当前环境。 */
 export function readKey(env: GateEnv = config.env): string {
-  const slot = keySlot(env);
-  // GATE_KEY / GATE_SECRET 是老版本的单环境写法，留着兜底，老 .env 不用改
-  const legacy = activeExchange === 'gate' ? process.env.GATE_KEY : undefined;
-  return (process.env[slot.key] ?? legacy ?? '').trim();
+  return credentialValues(env, activeExchange).key;
 }
 
 function readSecret(env: GateEnv): string {
-  const slot = keySlot(env);
-  const legacy = activeExchange === 'gate' ? process.env.GATE_SECRET : undefined;
-  return (process.env[slot.secret] ?? legacy ?? '').trim();
+  return credentialValues(env, activeExchange).secret;
 }
 
 /** Bitget 的 passphrase。Gate 没有这一项，读到空字符串 */
 function readPassphrase(env: GateEnv): string {
-  if (activeExchange !== 'bitget') return '';
-  return (process.env[keySlot(env).passphrase] ?? '').trim();
+  return credentialValues(env, activeExchange).passphrase;
 }
 
-function maskKey(k: string): { configured: boolean; hint: string } {
-  if (!k) return { configured: false, hint: '' };
-  return { configured: true, hint: k.length <= 8 ? '••••' : `${'•'.repeat(4)}${k.slice(-4)}` };
+function maskKey(k: string, configured = Boolean(k)): { configured: boolean; hint: string } {
+  return {
+    configured,
+    hint: k ? (k.length <= 8 ? '••••' : `${'•'.repeat(4)}${k.slice(-4)}`) : '',
+  };
+}
+
+function keyHintForExchange(env: GateEnv, ex: ExchangeId): { configured: boolean; hint: string } {
+  const values = credentialValues(env, ex);
+  const complete = Boolean(values.key && values.secret && (ex === 'gate' || values.passphrase));
+  return maskKey(values.key, complete);
 }
 
 export const AI_DEFAULT_BASE = 'https://api.openai.com/v1';
@@ -134,8 +147,9 @@ export const AI_DEFAULT_MODEL = 'gpt-4o-mini';
 
 function readConfig(): Config {
   const env: GateEnv = (process.env.GATE_ENV ?? 'live').trim().toLowerCase() === 'testnet' ? 'testnet' : 'live';
-  // 先落定这一轮用哪家：下面读密钥、拼地址都靠它
+  // 先落定本轮交易所和环境：密钥读取、旧版 Gate 密钥回退都依赖它们
   activeExchange = ((process.env.EXCHANGE ?? 'gate').trim().toLowerCase() === 'bitget' ? 'bitget' : 'gate') as ExchangeId;
+  activeEnv = env;
   return {
     exchange: activeExchange,
     env,
@@ -222,14 +236,14 @@ export function probeUrl(): string {
   return restBaseUrl() + '/api/v4/futures/usdt/contracts/BTC_USDT';
 }
 
-/** 页面只能看到尾号，密钥永不出网 */
+/** 页面只能看到尾号；configured 只在交易所要求的凭据齐全时为 true。 */
 export function keyHint(): { configured: boolean; hint: string } {
-  return maskKey(config.key);
+  return maskKey(config.key, Boolean(config.key && config.secret && (config.exchange === 'gate' || config.passphrase)));
 }
 
-/** 两个环境各自的配置状态，设置页要一次看到两套 */
-export function keyHintFor(env: GateEnv): { configured: boolean; hint: string } {
-  return maskKey(readKey(env));
+/** 两个环境各自的配置状态，设置页要一次看到两套。可选交易所用于纯逻辑检查。 */
+export function keyHintFor(env: GateEnv, ex: ExchangeId = activeExchange): { configured: boolean; hint: string } {
+  return keyHintForExchange(env, ex);
 }
 
 /**
@@ -296,7 +310,7 @@ export function remoteAccess(): { enabled: boolean; host: string; urls: string[]
 }
 
 /**
- * 设置页写入密钥。只写 GATE_KEY / GATE_SECRET / LIVE_TRADING，其它行原样保留。
+ * 设置页写入密钥。只更新调用方传入的交易所/环境槽位、AI 和下单开关，其它行原样保留。
  */
 export function writeEnv(patch: Record<string, string>): void {
   // 第一次运行的时候用户目录里什么都还没有，writeFileSync 不会替我们建目录

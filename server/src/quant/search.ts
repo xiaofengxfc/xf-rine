@@ -181,17 +181,25 @@ export function expandGrid(
 
 const pct = (v: number): number => Math.round(v * 100) / 100;
 
-export function searchParameters(
+export interface SearchBase {
+  multiplier: number; feeRate: number; slippagePct: number; capital: number;
+  riskPerTrade: number; leverage: number; fundingRatePer8h: number;
+  /** 外部指标（关键位）。要在训练/验证/盲测三段里都生效，所以原样透传 */
+  virtual?: BacktestOpts['virtual'];
+}
+
+export interface SearchProgress {
+  completed: number;
+  total: number;
+}
+
+function* searchParameterSteps(
   spec: StrategySpec,
   candles: Candle[],
-  base: {
-    multiplier: number; feeRate: number; slippagePct: number; capital: number;
-    riskPerTrade: number; leverage: number; fundingRatePer8h: number;
-    /** 外部指标（关键位）。要在训练/验证/盲测三段里都生效，所以原样透传 */
-    virtual?: BacktestOpts['virtual'];
-  },
-  opts: SearchOptions = {},
-): Candidate[] {
+  base: SearchBase,
+  opts: SearchOptions,
+  isCancelled?: () => boolean,
+): Generator<SearchProgress, Candidate[], void> {
   const method = opts.method ?? 'grid';
   const maxTrials = opts.maxTrials ?? 200;
   const multipliers = opts.costMultipliers ?? [1, 1.5, 2, 3];
@@ -206,14 +214,19 @@ export function searchParameters(
   const split = splitCandles(candles, maxWarmup);
   const out: Candidate[] = [];
 
-  for (const params of combos) {
+  for (let index = 0; index < combos.length; index++) {
+    if (isCancelled?.()) break;
+    const params = combos[index]!;
     const s: StrategySpec = { ...spec, params };
     const runOpts = { ...base, multiplier: base.multiplier };
 
     const train = backtest(s, split.train, runOpts);
     const validate = backtest(s, split.validate, runOpts);
     const blind = backtest(s, split.blind, runOpts);
-    if (blind.stats.trades === 0) continue;
+    if (blind.stats.trades === 0) {
+      yield { completed: index + 1, total: combos.length };
+      continue;
+    }
 
     // 成本压力只在盲测段上跑：这一段没参与过选择，翻倍的代价在这里才算数
     const costExpectancy: Record<string, number> = {};
@@ -266,8 +279,40 @@ export function searchParameters(
       insufficientSample: insufficient,
       blindResult: blind,
     });
+    yield { completed: index + 1, total: combos.length };
   }
 
   out.sort((a, b) => b.score - a.score);
   return out;
+}
+
+export function searchParameters(
+  spec: StrategySpec,
+  candles: Candle[],
+  base: SearchBase,
+  opts: SearchOptions = {},
+): Candidate[] {
+  const steps = searchParameterSteps(spec, candles, base, opts);
+  while (true) {
+    const next = steps.next();
+    if (next.done) return next.value;
+  }
+}
+
+/** Async counterpart used by progress-streaming routes; yields between trials. */
+export async function searchParametersWithProgress(
+  spec: StrategySpec,
+  candles: Candle[],
+  base: SearchBase,
+  opts: SearchOptions = {},
+  onProgress?: (progress: SearchProgress) => void,
+  isCancelled?: () => boolean,
+): Promise<Candidate[]> {
+  const steps = searchParameterSteps(spec, candles, base, opts, isCancelled);
+  while (true) {
+    const next = steps.next();
+    if (next.done) return next.value;
+    onProgress?.(next.value);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }

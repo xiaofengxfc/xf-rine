@@ -17,7 +17,7 @@ import { config, exchangeLabel } from '../config.js';
 import { getSeries } from './data.js';
 import { backtest, type BacktestResult, type StrategySpec, type Candle } from './backtest.js';
 import { runPromptSignals, expandSignals, randomBaselineSignals } from './promptBacktest.js';
-import { searchParameters } from './search.js';
+import { searchParametersWithProgress } from './search.js';
 import { judge, DEFAULT_CRITERIA, type Verdict } from './criteria.js';
 import { listStrategies, saveStrategy, deleteStrategy, recordRun, getStrategy, renameStrategy } from './library.js';
 import { research, verdictLine, type ResearchReport } from './research.js';
@@ -239,7 +239,7 @@ export function mountQuant(router: Router, deps: {
 
     if (hasRanges) {
       // 有范围时用搜索选出来的最优参数再跑一次整段，拿到完整的回测结果再记账
-      const candidates = searchParameters(spec, series.candles, { ...market, virtual }, { minTrades: DEFAULT_CRITERIA.minTrades });
+      const candidates = await searchParametersWithProgress(spec, series.candles, { ...market, virtual }, { minTrades: DEFAULT_CRITERIA.minTrades });
       const eligible = candidates.filter((c) => !c.insufficientSample);
       const best = eligible[0] ?? candidates[0];
       if (!best || !best.blindResult) {
@@ -311,6 +311,7 @@ export function mountQuant(router: Router, deps: {
     res.setHeader('Cache-Control', 'no-store');
     // 关掉 Nagle：小包要立刻发出去，否则"第 1 轮开始"那行会在缓冲里躺着
     res.socket?.setNoDelay(true);
+    res.flushHeaders();
 
     const send = (obj: unknown) => {
       res.write(JSON.stringify(obj) + String.fromCharCode(10));
@@ -442,6 +443,164 @@ export function mountQuant(router: Router, deps: {
   }));
 
   /**
+   * 流式回测：和普通回测使用同一套计算，但把数据、关键位、候选搜索和模型调用
+   * 的进度用 NDJSON 发给前端，避免长任务只显示一个不会动的「回测中」。
+   */
+  router.post('/quant/backtest/stream', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
+      const interval = String(body.interval ?? '1h').trim();
+      const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
+      const spec = body.spec as StrategySpec | undefined;
+
+      res.status(200);
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.socket?.setNoDelay(true);
+      res.flushHeaders();
+      const send = (event: unknown) => {
+        if (!res.writableEnded) res.write(JSON.stringify(event) + String.fromCharCode(10));
+      };
+
+      send({ type: 'backtest-progress', stage: 'data', message: '拉 ' + contract + ' ' + interval + ' 的历史 K 线' });
+      const series = await getSeries(contract, interval, MAX_BARS);
+      if (series.candles.length < 300) {
+        send({ type: 'backtest-error', message: series.candles.length === 0
+          ? '没有拿到 ' + contract + ' 的 ' + interval + ' K 线 —— 合约名或周期可能不正确'
+          : '只拿到 ' + series.candles.length + ' 根 K 线，太短，跑不出可信的回测' });
+        res.end();
+        return;
+      }
+      send({ type: 'backtest-progress', stage: 'data', message: '已拿到 ' + series.candles.length + ' 根 K 线' });
+      const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));
+      const market = marketOf(meta, body);
+
+      if (kind === 'prompt') {
+        const prompt = String(body.prompt ?? '').trim();
+        if (!prompt) {
+          send({ type: 'backtest-error', message: '提示词是空的' });
+          res.end();
+          return;
+        }
+        if (!config.ai.apiKey) {
+          send({ type: 'backtest-error', message: '还没有配置 AI 密钥（设置页 → AI）' });
+          res.end();
+          return;
+        }
+        const p = await runPromptBacktest({
+          contract, interval, prompt, candles: series.candles, market,
+          lookback: Math.max(10, Math.min(200, Number(body.lookback) || PROMPT_DEFAULTS.lookback)),
+          onStage: (stage, message) => send({ type: 'backtest-progress', stage, message }),
+          onProgress: (done, total) => {
+            const stride = Math.max(1, Math.floor(total / 100));
+            if (done === 1 || done === total || done % stride === 0) send({
+              type: 'backtest-progress', stage: 'model', message: '逐根询问模型 ' + done + '/' + total, done, total,
+            });
+          },
+        });
+        send({ type: 'backtest-result', result: {
+          mode: 'prompt',
+          bars: series.candles.length,
+          days: Math.round((series.span.to - series.span.from) / 86400),
+          gaps: series.gaps,
+          stats: p.result.stats,
+          equity: downsample(p.result.equity, 400),
+          trades: p.result.trades.slice(-50).map((t) => ({
+            side: t.side, entryTime: t.entryTime, exitTime: t.exitTime,
+            entryPrice: t.entryPrice, exitPrice: t.exitPrice,
+            net: Math.round(t.net * 100) / 100, reason: t.reason,
+          })),
+          verdict: p.verdict,
+          promptRun: p.stats,
+          baseline: p.baseline,
+        }});
+        res.end();
+        return;
+      }
+
+      if (!spec || !Array.isArray(spec.entry) || spec.entry.length === 0) {
+        send({ type: 'backtest-error', message: '策略里至少要有一条入场条件' });
+        res.end();
+        return;
+      }
+      send({ type: 'backtest-progress', stage: 'zones', message: '计算历史支撑阻力时间线' });
+      const { virtual } = await zoneVirtual(contract, interval, series.candles, (done, total) => {
+        if (done === 1 || done === total || done % Math.max(1, Math.floor(total / 10)) === 0) {
+          send({ type: 'backtest-progress', stage: 'zones', message: '支撑阻力 ' + done + '/' + total, done, total });
+        }
+      });
+      const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
+      if (hasRanges) {
+        const maxTrials = Math.min(400, Math.max(20, Number(body.maxTrials) || 200));
+        const candidates = await searchParametersWithProgress(spec, series.candles, { ...market, virtual }, {
+          method: body.method === 'random' ? 'random' : 'grid',
+          maxTrials,
+          minTrades: DEFAULT_CRITERIA.minTrades,
+        }, ({ completed, total }) => send({
+          type: 'backtest-progress', stage: 'search', message: '参数搜索 ' + completed + '/' + total,
+          done: completed, total,
+        }));
+        const eligible = candidates.filter((c) => !c.insufficientSample);
+        const best = eligible[0] ?? candidates[0] ?? null;
+        send({ type: 'backtest-result', result: {
+          mode: 'search',
+          bars: series.candles.length,
+          days: Math.round((series.span.to - series.span.from) / 86400),
+          gaps: series.gaps,
+          candidates: candidates.length,
+          enoughSample: eligible.length,
+          best,
+          verdict: best && eligible.length ? judge({
+            blindExpectancyPct: best.blindExpectancyPct,
+            blindTrades: best.blindTrades,
+            blindMaxDrawdownPct: best.blindMaxDrawdownPct,
+            blindPayoff: best.blindPayoff,
+            blindWinRate: best.blindWinRate,
+            decay: best.decay,
+            costExpectancy: best.costExpectancy,
+          }) : null,
+        }});
+        res.end();
+        return;
+      }
+
+      send({ type: 'backtest-progress', stage: 'backtest', message: '运行策略并生成权益曲线' });
+      const result = backtest(spec, series.candles, { ...market, virtual });
+      send({ type: 'backtest-result', result: {
+        mode: 'single',
+        bars: series.candles.length,
+        days: Math.round((series.span.to - series.span.from) / 86400),
+        gaps: series.gaps,
+        stats: result.stats,
+        equity: downsample(result.equity, 400),
+        trades: result.trades.slice(-50).map((t) => ({
+          side: t.side, entryTime: t.entryTime, exitTime: t.exitTime,
+          entryPrice: t.entryPrice, exitPrice: t.exitPrice,
+          net: Math.round(t.net * 100) / 100, reason: t.reason,
+        })),
+        verdict: judge({
+          blindExpectancyPct: result.stats.expectancyPct,
+          blindTrades: result.stats.trades,
+          blindMaxDrawdownPct: result.stats.maxDrawdownPct,
+          blindPayoff: result.stats.payoff,
+          blindWinRate: result.stats.winRate,
+          decay: 0,
+          costExpectancy: { '2': 0 },
+        }),
+      }});
+      res.end();
+    } catch (e) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'INTERNAL', detail: (e as Error).message });
+      } else {
+        if (!res.writableEnded) res.write(JSON.stringify({ type: 'backtest-error', message: (e as Error).message }) + String.fromCharCode(10));
+        res.end();
+      }
+    }
+  });
+
+  /**
    * 手写策略直接回测。不经过模型 —— 编辑器里改完一行条件就按一下，看它到底行不行。
    * 和 AI 研究用的是同一个引擎、同一个判定，所以两边的数不会打架。
    */
@@ -529,7 +688,7 @@ export function mountQuant(router: Router, deps: {
     // 有参数范围就搜索，没有就拿 params 直接跑一次
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
     if (hasRanges) {
-      const candidates = searchParameters(spec, series.candles, { ...market, virtual }, {
+      const candidates = await searchParametersWithProgress(spec, series.candles, { ...market, virtual }, {
         method: body.method === 'random' ? 'random' : 'grid',
         maxTrials: Math.min(400, Math.max(20, Number(body.maxTrials) || 200)),
         minTrades: DEFAULT_CRITERIA.minTrades,
@@ -655,6 +814,8 @@ async function runPromptBacktest(input: {
   candles: Candle[];
   market: ReturnType<typeof marketOf>;
   lookback: number;
+  onStage?: (stage: string, message: string) => void;
+  onProgress?: (done: number, total: number) => void;
 }): Promise<{
   result: BacktestResult;
   stats: { calls: number; flatFallbacks: number; leaks: number };
@@ -667,7 +828,12 @@ async function runPromptBacktest(input: {
 
   // 关键位也要有：模型看得到「上方最近的阻力在哪」和看得到价格一样重要。
   // 这段计算是本地引擎调用（热态 70ms 一次），跟逐根问模型的耗时比可以忽略
-  const { timeline } = await zoneVirtual(input.contract, input.interval, input.candles);
+  input.onStage?.('zones', '计算提示词需要的支撑阻力时间线');
+  const { timeline } = await zoneVirtual(input.contract, input.interval, input.candles, (done, total) => {
+    if (done === 1 || done === total || done % Math.max(1, Math.floor(total / 10)) === 0) {
+      input.onStage?.('zones', '支撑阻力 ' + done + '/' + total);
+    }
+  });
 
   const asked = await runPromptSignals(input.candles, {
     prompt: input.prompt,
@@ -675,6 +841,7 @@ async function runPromptBacktest(input: {
     lookback: input.lookback,
     forbidden,
     zonesByTime: zonesByTime(timeline, input.candles),
+    onProgress: input.onProgress,
     ask: async (system, user) => {
       // 温度交给 chatJson 那层的默认（0.2）；提示词策略要的是稳定，不是创意
       const r = await chatJson({ system, user, maxTokens: 300, timeoutMs: 60_000 });
@@ -749,12 +916,20 @@ async function analyzeWindow(contract: string, interval: string, window: Candle[
  * 引擎不可用时返回空对象，条件里的 zoneSupport/zoneResistance 会一直是 NaN，
  * 于是引用它们的条件恒不成立 —— 回测跑得出来但一笔不做，比直接报错更容易看懂。
  */
-async function zoneVirtual(contract: string, interval: string, candles: Candle[]): Promise<{
+async function zoneVirtual(
+  contract: string,
+  interval: string,
+  candles: Candle[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<{
   virtual: Record<string, (i: number, c: Candle) => number>;
   timeline: ZoneTimeline;
 }> {
   try {
-    const timeline = await buildZoneTimeline(candles, ZONE_EVERY, 60, (w) => analyzeWindow(contract, interval, w));
+    const timeline = await buildZoneTimeline(
+      candles, ZONE_EVERY, 60, (w) => analyzeWindow(contract, interval, w), 300,
+      onProgress ? ({ completed, total }) => onProgress(completed, total) : undefined,
+    );
     if (timeline.slices.length === 0) return { virtual: {}, timeline };
     const series = zoneSeries(timeline, candles);
     return {

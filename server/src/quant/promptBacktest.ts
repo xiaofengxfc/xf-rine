@@ -50,6 +50,7 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
   let calls = 0;
   let flatFallbacks = 0;
   let leaks = 0;
+  let completed = 0;
   let cancelled = false;
 
   /**
@@ -76,6 +77,8 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
       assertAnonymous(ctx.text + String.fromCharCode(10) + opts.prompt, opts.forbidden);
     } catch {
       leaks += 1;
+      completed += 1;
+      opts.onProgress?.(completed, total);
       continue;
     }
 
@@ -87,6 +90,8 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
       flatFallbacks += 1;
       signals.push({ index: idx, side: 'flat', raw: '', confidence: null });
       calls += 1;
+      completed += 1;
+      opts.onProgress?.(completed, total);
       continue;
     }
 
@@ -94,7 +99,8 @@ export async function runPromptSignals(candles: Candle[], opts: PromptRunOpts): 
     if (v.side === 'flat' && !/flat/i.test(raw)) flatFallbacks += 1;
     signals.push({ index: idx, side: v.side, raw: raw.slice(0, 300), confidence: v.confidence });
     calls += 1;
-    opts.onProgress?.(calls, total);
+    completed += 1;
+    opts.onProgress?.(completed, total);
   }
 
   return { signals, calls, flatFallbacks, leaks, cancelled };

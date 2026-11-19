@@ -18,7 +18,7 @@ import type { WebSocketServer } from 'ws';
  *      1 张 = sizeMultiplier 个币，所以往外发要乘、往里收要除。
  *   2. **方向**。单向持仓（one_way_mode）下 side 就是买/卖，平仓靠 reduceOnly=YES；
  *      双向持仓（hedge_mode）下 side 表示"哪一边"、tradeSide 表示开/平，
- *      而且平仓时 side 要反过来写（平多用 sell + close）。两种都按账户实际模式翻。
+ *      平仓仍使用持仓方向的 side（平多 buy + close，平空 sell + close）。两种都按账户实际模式翻。
  *   3. **止盈止损**。Bitget 用 planType=pos_profit / pos_loss 的持仓止盈止损单，
  *      比 Gate 那套 price_orders + auto_size 干净，翻回来还是那副形状。
  */
@@ -78,6 +78,23 @@ function num(v: unknown, fallback = 0): number {
 function fixed(value: number, place: number): string {
   const p = Math.min(12, Math.max(0, Math.round(place)));
   return (Math.round(value * 10 ** p) / 10 ** p).toFixed(p);
+}
+
+/** Bitget v2 hedge mode side denotes the position side; tradeSide selects open/close. */
+export function bitgetOrderSide(
+  posMode: 'one_way_mode' | 'hedge_mode',
+  direction: 'long' | 'short',
+  reduce: boolean,
+): 'buy' | 'sell' {
+  if (posMode === 'hedge_mode') return direction === 'long' ? 'buy' : 'sell';
+  if (reduce) return direction === 'long' ? 'sell' : 'buy';
+  return direction === 'long' ? 'buy' : 'sell';
+}
+
+/** XOrder.size is signed by the Bitget v2 side field in both position modes. */
+export function signedBitgetOrderSize(side: 'buy' | 'sell', sizeCoin: number, multiplier: number): number {
+  const size = multiplier > 0 ? sizeCoin / multiplier : sizeCoin;
+  return side === 'sell' ? -size : size;
 }
 
 /** 合约表里的原始条目 → 项目内部的合约形状 */
@@ -425,9 +442,9 @@ export class BitgetExchange implements Exchange {
     const filled = num(raw.baseVolume ?? raw.cumExecQty);
     const side = String(raw.side ?? '').toLowerCase();
     const tradeSide = String(raw.tradeSide ?? '').toLowerCase();
-    // 双向持仓下平台用 side 表示"哪一边"，平仓时方向要反过来读
-    const effective = tradeSide === 'close' ? (side === 'buy' ? 'sell' : 'buy') : side;
-    const signed = (effective === 'sell' ? -1 : 1) * (mult > 0 ? sizeCoin / mult : sizeCoin);
+    // v2 双向模式平仓仍用持仓方向的 side；tradeSide=close 才表示平仓。
+    // 单向模式 side 则是实际买卖方向。两种情况都直接按 side 的正负映射。
+    const signed = signedBitgetOrderSize(side === 'sell' ? 'sell' : 'buy', sizeCoin, mult);
     const left = Math.max(0, sizeCoin - filled);
     const state = stateOf(raw);
     return {
@@ -528,15 +545,11 @@ export class BitgetExchange implements Exchange {
     };
 
     if (posMode === 'hedge_mode') {
-      // 双向持仓：side 写"哪一边"，平仓时反过来（平多 = 卖）
-      side = reduce
-        ? (dir === 'long' ? 'sell' : 'buy')
-        : (dir === 'long' ? 'buy' : 'sell');
+      // 双向持仓：side 表示持仓方向；开/平由 tradeSide 决定，不能把 close 的 side 反转。
+      side = bitgetOrderSide(posMode, dir, reduce);
       body.tradeSide = reduce ? 'close' : 'open';
     } else {
-      side = reduce
-        ? (dir === 'long' ? 'sell' : 'buy')
-        : (dir === 'long' ? 'buy' : 'sell');
+      side = bitgetOrderSide(posMode, dir, reduce);
       if (reduce) body.reduceOnly = 'YES';
     }
     body.side = side;
@@ -563,7 +576,8 @@ export class BitgetExchange implements Exchange {
     const guess: XOrder = {
       id,
       contract: name,
-      size: String(dir === 'long' ? contracts : -contracts),
+      // 明细查询失败时按实际下单 side 回退；单向平仓的买卖方向与持仓方向相反。
+      size: String((side === 'sell' ? -1 : 1) * contracts),
       left: String(contracts),
       price: isMarket ? '0' : String(price),
       fill_price: '0',
