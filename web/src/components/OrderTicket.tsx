@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, jsend, type Account, type ContractInfo } from '../lib/api.ts';
+import { jsend, type Account, type ContractInfo } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { crossCollateralCoversDropToZero, estimateLiquidationPrice } from '../lib/liquidation.ts';
 import { protectionRows, wrongSide } from '../lib/protection.ts';
@@ -301,23 +301,6 @@ export default function OrderTicket({
     if (!token) { onToast('err', '交易没解锁', '先点右上角的「解锁交易」'); return; }
     setBusy(true);
     try {
-      try {
-        await jsend('POST', '/api/leverage', { contract: contract.name, leverage: lev, mode: marginMode }, token);
-      } catch (e) {
-        /**
-         * 密钥没有「合约交易」写权限时会先卡在设杠杆这一步。
-         * 这时候再往下打一次下单，只会多一条一模一样的报错 ——
-         * 以前页面连着弹「设置杠杆失败（继续下单）」和「下单失败」，
-         * 两句都是交易所的英文原文，看不出到底该改什么。这里直接说清原因就收手。
-         */
-        if (e instanceof ApiError && e.label === 'KEY_NO_WRITE') {
-          onToast('err', '这把密钥不能交易', (e as Error).message);
-          return;
-        }
-        // 别的原因（比如这一边已经有仓，杠杆改不了）不阻断下单
-        onToast('err', '设置杠杆失败（继续下单）', (e as Error).message);
-      }
-
       type Attach =
         | { status: 'attached'; created: { kind: string }[] }
         /** 止损止盈只挂上了一边，另一边被交易所拒了 */

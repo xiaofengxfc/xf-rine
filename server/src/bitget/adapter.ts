@@ -75,14 +75,25 @@ export function bitgetLeveragePayloads(
   cross: boolean,
   posMode: 'one_way_mode' | 'hedge_mode',
 ): Record<string, unknown>[] {
+  if (!cross && posMode === 'hedge_mode') {
+    // UTA isolated hedge mode sets both sides together. Sending `leverage` with
+    // `posSide` omits the fields this endpoint requires and returns 25200.
+    return [{
+      category: PRODUCT,
+      symbol: symbolOf(name),
+      marginMode: 'isolated',
+      longLeverage: String(leverage),
+      shortLeverage: String(leverage),
+    }];
+  }
+
   const base = {
     category: PRODUCT,
     symbol: symbolOf(name),
     leverage: String(leverage),
     marginMode: bitgetMarginMode(cross),
   };
-  if (cross || posMode === 'one_way_mode') return [base];
-  return [{ ...base, posSide: 'long' }, { ...base, posSide: 'short' }];
+  return [base];
 }
 
 function num(v: unknown, fallback = 0): number {
