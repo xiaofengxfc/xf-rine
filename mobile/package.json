@@ -7,7 +7,7 @@
     "bundle": "node tools/bundle-server.mjs",
     "sync": "cap sync android",
     "open": "cap open android",
-    "assets": "capacitor-assets generate --android",
+    "assets": "capacitor-assets generate --android && node tools/generate-icons.mjs",
     "apk": "node tools/bundle-server.mjs && cap sync android && node tools/prepare-android.mjs && node tools/gradle.mjs assembleRelease"
   },
   "dependencies": {
