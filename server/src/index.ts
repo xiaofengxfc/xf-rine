@@ -33,6 +33,11 @@ app.use(express.json({ limit: '256kb' }));
  * 别的源一律不给头，写操作直接 403。
  */
 app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    // Account, position and PnL snapshots change independently of the page URL.
+    // Browsers and embedded WebViews must revalidate each live API poll.
+    res.setHeader('Cache-Control', 'no-store');
+  }
   const origin = String(req.header('origin') ?? '');
   const allowed = allowedOrigin(origin, String(req.header('host') ?? ''));
   if (allowed) {

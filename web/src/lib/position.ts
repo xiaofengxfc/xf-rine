@@ -13,6 +13,14 @@ export function multiplierOf(p: Position, fallback = 0): number {
   return 0;
 }
 
+/** Sum the exchange-reported floating PnL across all currently open positions. */
+export function sumUnrealisedPnl(positions: readonly Position[]): number {
+  return positions.reduce((total, position) => {
+    const pnl = position.unrealisedPnl;
+    return total + (Number.isFinite(pnl) ? pnl : 0);
+  }, 0);
+}
+
 /**
  * 从「成本 / 张数 / 乘数 / 方向」直接算到某个价位平掉的盈亏（USDT）。
  *

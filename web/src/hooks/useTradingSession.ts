@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jget, jsend, setNotArmedHandler } from '../lib/api.ts';
-import type { Account, AppConfig, OpenOrder, Position, PriceOrder, PrivateState } from '../lib/api.ts';
+import type { Account, AppConfig, DailyPnl, OpenOrder, Position, PriceOrder, PrivateState } from '../lib/api.ts';
 
 type Toast = (kind: 'ok' | 'err', title: string, detail?: string) => void;
 
@@ -14,6 +14,8 @@ interface Options {
 export function useTradingSession({ config, onToast, onResyncTail, onEnvironmentChange }: Options) {
   const [account, setAccount] = useState<Account | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [dailyRealisedPnl, setDailyRealisedPnl] = useState<number | null>(null);
+  const [dailyPnlError, setDailyPnlError] = useState<string | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<OpenOrder[]>([]);
   const [priceOrders, setPriceOrders] = useState<PriceOrder[]>([]);
@@ -26,15 +28,37 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
   const tokenRef = useRef<string | null>(null);
   tokenRef.current = token;
   const privateSeqRef = useRef(0);
+  const privateLoadingRef = useRef(false);
+  const dailyPnlLoadingRef = useRef(false);
+
+  useEffect(() => {
+    privateSeqRef.current += 1;
+    privateLoadingRef.current = false;
+    setAccount(null);
+    setAccountError(null);
+    setPositions([]);
+    setOrders([]);
+    setPriceOrders([]);
+    setDailyRealisedPnl(null);
+    setDailyPnlError(null);
+    setPrivateAt(0);
+    setPrivateErr(null);
+  }, [config?.exchange, config?.env, config?.keys.configured]);
 
   const loadPrivate = useCallback(async () => {
     if (!config) return;
+    if (privateLoadingRef.current) return;
     if (!config.keys.configured) {
       setAccount(null);
+      setPositions([]);
+      setDailyRealisedPnl(null);
+      setDailyPnlError(null);
+      setPrivateAt(0);
       setAccountError(`当前${config.envLabel}未配置 API Key`);
       return;
     }
 
+    privateLoadingRef.current = true;
     const seq = ++privateSeqRef.current;
     try {
       const currentToken = tokenRef.current;
@@ -52,6 +76,7 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
       if (state.orders) setOrders(state.orders);
       if (state.priceOrders) setPriceOrders(state.priceOrders);
       if (currentToken) setArmCheck({ token: currentToken, ok: state.armed === true });
+      if (state.account || state.positions) setPrivateAt(Date.now());
 
       const labels = { account: '账户', positions: '持仓', orders: '委托', priceOrders: '保护单' };
       const errors = Object.entries(state.errors ?? {}).map(([key, detail]) =>
@@ -59,7 +84,6 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
       );
       if (errors.length) setPrivateErr(errors.join(' · '));
       else {
-        setPrivateAt(Date.now());
         setPrivateErr(null);
       }
     } catch (error) {
@@ -75,14 +99,59 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
         if (seq !== privateSeqRef.current) return;
         setAccountError((accountFailure as Error).message || message);
       }
+    } finally {
+      if (seq === privateSeqRef.current) privateLoadingRef.current = false;
     }
   }, [config?.envLabel, config?.keys.configured]);
+
+  const loadDailyPnl = useCallback(async () => {
+    if (!config) return;
+    if (dailyPnlLoadingRef.current) return;
+    if (!config.keys.configured) {
+      setDailyRealisedPnl(null);
+      setDailyPnlError(null);
+      return;
+    }
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    dailyPnlLoadingRef.current = true;
+    try {
+      const result = await jget<DailyPnl>(`/api/daily-pnl?dayStart=${dayStart.getTime()}`);
+      setDailyRealisedPnl(result.realisedPnl);
+      setDailyPnlError(null);
+    } catch (error) {
+      setDailyRealisedPnl(null);
+      setDailyPnlError((error as Error).message || '读取失败');
+    } finally {
+      dailyPnlLoadingRef.current = false;
+    }
+  }, [config?.keys.configured]);
 
   useEffect(() => {
     void loadPrivate();
     const timer = window.setInterval(() => void loadPrivate(), 3_000);
     return () => window.clearInterval(timer);
   }, [loadPrivate]);
+
+  useEffect(() => {
+    void loadDailyPnl();
+    const poll = window.setInterval(() => void loadDailyPnl(), 5_000);
+    let midnight = 0;
+    const scheduleMidnightRefresh = () => {
+      const nextMidnight = new Date();
+      nextMidnight.setDate(nextMidnight.getDate() + 1);
+      nextMidnight.setHours(0, 0, 0, 0);
+      midnight = window.setTimeout(() => {
+        void loadDailyPnl();
+        scheduleMidnightRefresh();
+      }, nextMidnight.getTime() - Date.now());
+    };
+    scheduleMidnightRefresh();
+    return () => {
+      window.clearInterval(poll);
+      window.clearTimeout(midnight);
+    };
+  }, [loadDailyPnl]);
 
   useEffect(() => {
     if (!privateErr) return;
@@ -94,6 +163,7 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
     const wake = () => {
       if (document.visibilityState !== 'visible') return;
       void loadPrivate();
+      void loadDailyPnl();
       void onResyncTail();
     };
     document.addEventListener('visibilitychange', wake);
@@ -102,7 +172,7 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
       document.removeEventListener('visibilitychange', wake);
       window.removeEventListener('focus', wake);
     };
-  }, [loadPrivate, onResyncTail]);
+  }, [loadDailyPnl, loadPrivate, onResyncTail]);
 
   const lockTrading = useCallback((title?: string, detail?: string) => {
     setArmed(false);
@@ -166,6 +236,8 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
   return {
     account,
     accountError,
+    dailyRealisedPnl,
+    dailyPnlError,
     positions,
     orders,
     priceOrders,
@@ -174,6 +246,7 @@ export function useTradingSession({ config, onToast, onResyncTail, onEnvironment
     armed,
     token,
     loadPrivate,
+    loadDailyPnl,
     toggleArm,
   };
 }

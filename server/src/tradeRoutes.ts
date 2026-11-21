@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { config, envLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -20,6 +20,62 @@ interface TradeRouteDeps {
 export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
   const { wrap, requireArm, requireLocal, armTokens, armValid, translate, tradeContract } = deps;
   type GateContract = XContract;
+  const dailyPnlCacheTtlMs = 3_000;
+  let dailyPnlCache: {
+    key: string;
+    at: number;
+    value: number | null;
+    error: unknown;
+    pending: Promise<number> | null;
+  } | null = null;
+
+  async function cachedDailyRealisedPnl(fromMs: number): Promise<number> {
+    const accountScope = createHash('sha256').update(config.key).digest('hex');
+    const key = `${exchange().id}:${config.env}:${accountScope}:${fromMs}`;
+    const now = Date.now();
+    if (dailyPnlCache?.key === key) {
+      if (dailyPnlCache.pending) return dailyPnlCache.pending;
+      if (now - dailyPnlCache.at < dailyPnlCacheTtlMs) {
+        if (dailyPnlCache.error) throw dailyPnlCache.error;
+        if (dailyPnlCache.value !== null) return dailyPnlCache.value;
+      }
+    }
+
+    const entry = {
+      key,
+      at: 0,
+      value: null as number | null,
+      error: null as unknown,
+      pending: null as Promise<number> | null,
+    };
+    const pending = exchange().dailyRealisedPnl(fromMs, Date.now());
+    entry.pending = pending;
+    dailyPnlCache = entry;
+    try {
+      entry.value = await pending;
+      entry.at = Date.now();
+      return entry.value;
+    } catch (error) {
+      entry.error = error;
+      entry.at = Date.now();
+      throw error;
+    } finally {
+      entry.pending = null;
+    }
+  }
+
+  function localDayStart(req: Request): number {
+    const raw = Array.isArray(req.query.dayStart) ? req.query.dayStart[0] : req.query.dayStart;
+    const requested = Number(raw);
+    const now = Date.now();
+    if (Number.isFinite(requested) && requested <= now && requested >= now - 36 * 60 * 60_000) {
+      return requested;
+    }
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return start.getTime();
+  }
+
   const notionalOf = (sizeContracts: number, price: number, multiplier: number): number =>
     Math.abs(sizeContracts) * multiplier * price;
   // ---------- 账户与持仓 ----------
@@ -272,6 +328,13 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
       ...(Object.keys(errors).length > 0 ? { errors } : {}),
       armed: armValid(req),
     });
+  }));
+
+  router.get('/daily-pnl', wrap(async (req, res) => {
+    const fromMs = localDayStart(req);
+    const toMs = Date.now();
+    const realisedPnl = await cachedDailyRealisedPnl(fromMs);
+    res.json({ realisedPnl, fromMs, toMs, currency: 'USDT' });
   }));
 
   // ---------- 平仓、反手之前要清掉的东西 ----------

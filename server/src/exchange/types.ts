@@ -235,6 +235,8 @@ export interface Exchange {
   tradableNames(): Promise<Set<string> | null>;
 
   account(): Promise<XAccount>;
+  /** Gross realized trading PnL for [fromMs, toMs), excluding fees and funding. */
+  dailyRealisedPnl(fromMs: number, toMs: number): Promise<number>;
   positions(contract?: string): Promise<XPosition[]>;
   openOrders(contract?: string): Promise<XOrder[]>;
   order(id: string): Promise<XOrder | null>;

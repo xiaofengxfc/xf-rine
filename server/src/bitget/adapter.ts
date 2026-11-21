@@ -7,6 +7,7 @@ import type {
 } from '../exchange/types.js';
 import { BitgetMarketHub } from './market.js';
 import { ceilSizeToStep, floorSizeToStep } from '../exchange/size.js';
+import { sumBitgetRealisedPnl } from '../exchange/pnl.js';
 import type { WebSocketServer } from 'ws';
 
 /**
@@ -51,6 +52,7 @@ interface RawContract {
 type RawPosition = Record<string, unknown>;
 type RawOrder = Record<string, unknown>;
 type RawAccount = Record<string, unknown>;
+type RawFill = Record<string, unknown>;
 
 /** 页面上显示的合约名用 Gate 那套写法：BTCUSDT → BTC_USDT */
 export function nameOf(symbol: string): string {
@@ -566,6 +568,35 @@ export class BitgetExchange implements Exchange {
       }
     }
     return bitgetAccountSnapshot(assets);
+  }
+
+  async dailyRealisedPnl(fromMs: number, toMs: number): Promise<number> {
+    if (!(toMs > fromMs)) return 0;
+    const limit = 100;
+    let cursor = '';
+    let total = 0;
+
+    while (true) {
+      const page = await bgPrivate<{ list?: RawFill[]; cursor?: string | number }>(
+        'GET', '/api/v3/trade/fills', {
+          category: PRODUCT,
+          startTime: fromMs,
+          endTime: toMs,
+          limit,
+          cursor,
+        },
+      );
+      const fills = Array.isArray(page?.list) ? page.list : [];
+      total += sumBitgetRealisedPnl(fills.map((fill) => ({
+        tradeSide: fill.tradeSide,
+        createdTime: fill.createdTime,
+        execPnl: fill.execPnl,
+      })), fromMs, toMs);
+
+      const next = String(page?.cursor ?? '');
+      if (!next || next === cursor || fills.length === 0) return total;
+      cursor = next;
+    }
   }
 
   private async currentPosMode(): Promise<'one_way_mode' | 'hedge_mode'> {

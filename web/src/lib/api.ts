@@ -40,7 +40,12 @@ export function jget<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() };
   // 兜一个超时：没有它，一个卡住的请求会让面板一直停在上一帧，看着像「数据不动了」
   const signal = init?.signal ?? AbortSignal.timeout(20_000);
-  return fetch(apiUrl(url), { ...init, signal, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } })
+  return fetch(apiUrl(url), {
+    ...init,
+    cache: 'no-store',
+    signal,
+    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
+  })
     .then(parse<T>);
 }
 
@@ -287,6 +292,7 @@ export interface CloseResult {
 }
 
 export interface Account { total: number; available: number; unrealisedPnl: number; currency: string }
+export interface DailyPnl { realisedPnl: number; fromMs: number; toMs: number; currency: string }
 
 /** 服务端出网用的代理。Node 不读系统代理，服务端自己读一次注册表 */
 export interface ProxyStatus {

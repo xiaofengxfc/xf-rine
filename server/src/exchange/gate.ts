@@ -2,6 +2,7 @@ import { gatePublic, gatePublicTrade, gatePrivate, requireKeys as requireGateKey
 import { MarketHub } from '../gate/market.js';
 import { config, keyHint as cfgKeyHint, keyHintFor as cfgKeyHintFor, restBaseUrl } from '../config.js';
 import { netFetch } from '../net.js';
+import { sumGateRealisedPnl } from './pnl.js';
 import type {
   Exchange, XContract, XPosition, XOrder, XTrigger, XAccount, XTicker, XCandle,
   XOrderSpec, XTriggerSpec,
@@ -89,6 +90,32 @@ export class GateExchange implements Exchange {
       unrealised_pnl: Number(a.unrealised_pnl ?? 0),
       currency: a.currency ?? 'USDT',
     };
+  }
+
+  async dailyRealisedPnl(fromMs: number, toMs: number): Promise<number> {
+    if (!(toMs > fromMs)) return 0;
+    const from = Math.floor(fromMs / 1000);
+    const to = Math.ceil(toMs / 1000);
+    const limit = 100;
+    let offset = 0;
+    let total = 0;
+
+    while (true) {
+      const records = await gatePrivate<{
+        change?: string;
+        time?: number;
+        type?: string;
+      }[]>('GET', '/futures/usdt/account_book', {
+        type: 'pnl',
+        _from: from,
+        to,
+        limit,
+        offset,
+      });
+      total += sumGateRealisedPnl(records ?? [], fromMs, toMs);
+      if (!records || records.length < limit) return total;
+      offset += records.length;
+    }
   }
 
   async positions(contract?: string): Promise<XPosition[]> {

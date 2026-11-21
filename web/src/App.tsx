@@ -5,6 +5,7 @@ import {
   type LocalDirInfo,
 } from './lib/api.ts';
 import { fmtPrice, guessPriceRound } from './lib/format.ts';
+import { sumUnrealisedPnl } from './lib/position.ts';
 import ChartPane, { type PricePick } from './components/ChartPane.tsx';
 import ContractRail from './components/ContractRail.tsx';
 import TopBar from './components/TopBar.tsx';
@@ -231,6 +232,8 @@ export default function App() {
   const {
     account,
     accountError,
+    dailyRealisedPnl,
+    dailyPnlError,
     positions,
     orders,
     priceOrders,
@@ -430,6 +433,11 @@ export default function App() {
     return m;
   }, [tickers]);
 
+  const currentPositionPnl = useMemo(
+    () => sumUnrealisedPnl(positions),
+    [positions],
+  );
+
   /** 图上的已盈亏按这个价算，和持仓卡、和交易所同一个价 */
   const markPrice = ticker && ticker.mark > 0 ? ticker.mark : info?.markPrice ?? 0;
 
@@ -585,6 +593,9 @@ export default function App() {
             armed={armed}
             token={token}
             account={account}
+            dailyRealisedPnl={dailyRealisedPnl}
+            dailyPnlError={dailyPnlError}
+            currentPnl={privateAt > 0 ? currentPositionPnl : null}
             accountError={accountError}
             privateError={privateErr}
             liveTrading={config?.liveTrading ?? false}

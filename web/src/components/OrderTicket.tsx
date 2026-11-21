@@ -14,6 +14,9 @@ interface Props {
   armed: boolean;
   token: string | null;
   account: Account | null;
+  dailyRealisedPnl: number | null;
+  dailyPnlError?: string | null;
+  currentPnl: number | null;
   accountError?: string | null;
   privateError?: string | null;
   liveTrading: boolean;
@@ -53,7 +56,8 @@ interface Props {
 }
 
 export default function OrderTicket({
-  contract, armed, token, account, accountError = null, privateError = null, liveTrading, keysConfigured, env,
+  contract, armed, token, account, dailyRealisedPnl, dailyPnlError = null, currentPnl,
+  accountError = null, privateError = null, liveTrading, keysConfigured, env,
   posPct, onPosPctChange, onToast, onRefresh, onQueueProtect,
   limitStr, onLimitChange, stopStr, onStopChange, targetStr, onTargetChange,
   priceMode, onPriceModeChange, onResetPrices,
@@ -360,7 +364,19 @@ export default function OrderTicket({
         <div className="ticket-account" aria-live="polite">
           <div><span>总权益</span><b className="num">{account ? `${fmtUsd(account.total)} ${account.currency || 'USDT'}` : '—'}</b></div>
           <div><span>可用余额</span><b className="num">{account ? `${fmtUsd(account.available)} ${account.currency || 'USDT'}` : '—'}</b></div>
-          <span className={accountError ? 'down' : account ? 'up' : 'dim'} title={accountError ?? undefined}>
+          <div title={dailyPnlError ?? '今日范围，盈利与亏损合并累计，不含手续费和资金费'}>
+            <span>已实现盈亏</span>
+            <b className={`num ${dailyRealisedPnl === null ? '' : dailyRealisedPnl >= 0 ? 'up' : 'down'}`}>
+              {dailyPnlError ? '读取失败' : dailyRealisedPnl === null ? '—' : `${fmtMoney(dailyRealisedPnl)} ${account?.currency || 'USDT'}`}
+            </b>
+          </div>
+          <div className="ticket-account-current" title="当前所有仍持仓仓位的浮动盈亏总和">
+            <span>当前浮动盈亏</span>
+            <b className={`num ${currentPnl === null ? '' : currentPnl >= 0 ? 'up' : 'down'}`}>
+              {currentPnl === null ? '—' : `${fmtMoney(currentPnl)} ${account?.currency || 'USDT'}`}
+            </b>
+          </div>
+          <span className={`ticket-account-status ${accountError ? 'down' : account ? 'up' : 'dim'}`} title={accountError ?? undefined}>
             {accountError ? '读取失败' : account ? '实时' : '读取中'}
           </span>
         </div>
