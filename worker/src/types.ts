@@ -44,7 +44,7 @@ export interface Account { total: number; available: number; unrealisedPnl: numb
 export interface Position {
   contract: string; size: number; direction: Direction; leverage: number;
   entryPrice: number; markPrice: number; liqPrice: number; unrealisedPnl: number;
-  value: number; mode: string; multiplier?: number;
+  value: number; mode: string; marginMode?: 'isolated' | 'cross'; multiplier?: number;
 }
 
 export interface OpenOrder {

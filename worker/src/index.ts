@@ -257,12 +257,32 @@ export default {
 
       // ---------- 账户与交易 ----------
       if (path === '/api/private-state') {
-        const [account, positions, orders, priceOrders] = await Promise.all([
+        // 账户、持仓、委托和保护单权限相互独立；某一项失败时保留其他成功数据。
+        const [accountResult, positionsResult, ordersResult, priceOrdersResult] = await Promise.allSettled([
           c.account(), c.positions(), c.orders(), c.triggers(),
         ]);
+        const describe = (result: PromiseRejectedResult): string => {
+          const error = result.reason;
+          return error instanceof ApiError
+            ? `${error.label}: ${error.detail}`
+            : error instanceof Error ? error.message : String(error);
+        };
+        const errors = {
+          ...(accountResult.status === 'rejected' ? { account: describe(accountResult) } : {}),
+          ...(positionsResult.status === 'rejected' ? { positions: describe(positionsResult) } : {}),
+          ...(ordersResult.status === 'rejected' ? { orders: describe(ordersResult) } : {}),
+          ...(priceOrdersResult.status === 'rejected' ? { priceOrders: describe(priceOrdersResult) } : {}),
+        };
         const token = req.headers.get('x-arm-token') ?? '';
         const armed = token ? Boolean((await armFetch(env, '/verify?token=' + encodeURIComponent(token))).ok) : false;
-        return withCors(json({ account, positions, orders, priceOrders, armed }));
+        return withCors(json({
+          ...(accountResult.status === 'fulfilled' ? { account: accountResult.value } : {}),
+          ...(positionsResult.status === 'fulfilled' ? { positions: positionsResult.value } : {}),
+          ...(ordersResult.status === 'fulfilled' ? { orders: ordersResult.value } : {}),
+          ...(priceOrdersResult.status === 'fulfilled' ? { priceOrders: priceOrdersResult.value } : {}),
+          ...(Object.keys(errors).length > 0 ? { errors } : {}),
+          armed,
+        }));
       }
 
       if (path === '/api/trade/arm' && req.method === 'POST') {

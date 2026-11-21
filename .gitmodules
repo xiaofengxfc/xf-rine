@@ -1,0 +1,3 @@
+[submodule "quant/.vendor/QuantDinger"]
+	path = quant/.vendor/QuantDinger
+	url = https://github.com/OpenByteInc/QuantDinger.git

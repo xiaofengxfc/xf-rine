@@ -203,13 +203,15 @@ export function gateClient(cfg: GateConfig): Client {
         .map((p): Position => {
           const size = num(p.size);
           const mode = String(p.mode ?? 'single');
+          const leverage = num(p.leverage);
           // 双向模式下多空各一条持仓，方向看 mode；单仓看张数正负
           const direction: Direction = mode === 'dual_short' ? 'short' : mode === 'dual_long' ? 'long' : size < 0 ? 'short' : 'long';
           return {
             contract: String(p.contract),
             size: Math.abs(size),
             direction,
-            leverage: num(p.leverage) || 1,
+            leverage,
+            marginMode: leverage > 0 ? 'isolated' : 'cross',
             entryPrice: num(p.entry_price),
             markPrice: num(p.mark_price),
             liqPrice: num(p.liq_price),

@@ -268,11 +268,16 @@ export function bitgetClient(cfg: BitgetConfig): Client {
         const hold = String(p.holdSide ?? '').toLowerCase();
         const hedge = String(p.posMode ?? '') === 'hedge_mode';
         const short = hold === 'short' || (hold !== 'long' && coin < 0);
+        const leverage = num(p.leverage);
+        const rawMarginMode = String(p.marginMode ?? '').toLowerCase();
         out.push({
           contract: name,
           size: Math.abs(coin) / mult,
           direction: short ? 'short' : 'long',
-          leverage: num(p.leverage) || 1,
+          leverage,
+          marginMode: rawMarginMode === 'isolated' ? 'isolated'
+            : rawMarginMode === 'crossed' || rawMarginMode === 'cross' || leverage <= 0 ? 'cross'
+              : 'isolated',
           entryPrice: num(p.openPriceAvg ?? p.openAvgPrice ?? p.averageOpenPrice),
           markPrice: num(p.markPrice),
           liqPrice: num(p.liquidationPrice),
