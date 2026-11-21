@@ -32,17 +32,28 @@ interface Props {
   onOpenSettings: () => void;
   /** 窄屏时左栏收成抽屉，用这个按钮打开 */
   onOpenRail: () => void;
+  railCollapsed: boolean;
+  onToggleRail: () => void;
 }
 
 export default function TopBar({
   ticker, local, env, exchange, view, onView, aiOn, priceRound, interval, wsAlive, armed, liveTrading, keysConfigured,
-  onToggleArm, onOpenSettings, onOpenRail,
+  onToggleArm, onOpenSettings, onOpenRail, railCollapsed, onToggleRail,
 }: Props) {
   const chg = ticker?.change24h ?? 0;
   const theme = useTheme();
   return (
     <header className="topbar">
       <button className="icon-btn rail-btn" title="选合约（左栏）" aria-label="选合约" onClick={onOpenRail}>☰</button>
+      <button
+        className="icon-btn rail-collapse-btn"
+        title={railCollapsed ? '展开币种列表' : '收起币种列表'}
+        aria-label={railCollapsed ? '展开币种列表' : '收起币种列表'}
+        aria-expanded={!railCollapsed}
+        onClick={onToggleRail}
+      >
+        {railCollapsed ? '›' : '‹'}
+      </button>
 
       <div className="brand">
         <b>巡风</b>

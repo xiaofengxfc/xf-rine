@@ -55,6 +55,7 @@ const TAIL_PAGE = 300;
 const MAX_BARS = 20000;
 
 const PREFS_KEY = 'xf-rine:prefs';
+const RAIL_COLLAPSED_KEY = 'xf-rine:rail-collapsed';
 const DEFAULT_CONTRACT = 'BTC_USDT';
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
@@ -142,6 +143,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 手机上左栏是抽屉：点顶栏的「合约」打开，选完自动收 */
   const [railOpen, setRailOpen] = useState(false);
+  /** 桌面端收起币种栏时保留用户选择 */
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try { return localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0'); } catch { /* 存不了就算了 */ }
+  }, [railCollapsed]);
   /**
    * 两个页面：日内台（看盘下单）和研究台（本地数据算关键位）。
    *
@@ -1224,7 +1232,7 @@ export default function App() {
 
   return (
     <>
-      <div ref={appRootRef} className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
+      <div ref={appRootRef} className={`app${railOpen ? ' rail-open' : ''}${railCollapsed ? ' rail-collapsed' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
         <TopBar
           exchange={config?.exchangeLabel ?? 'Gate'}
           env={config?.env ?? 'live'}
@@ -1243,6 +1251,8 @@ export default function App() {
           onToggleArm={toggleArm}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenRail={() => setRailOpen(true)}
+          railCollapsed={railCollapsed}
+          onToggleRail={() => setRailCollapsed((collapsed) => !collapsed)}
         />
 
         <ContractRail

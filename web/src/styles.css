@@ -191,6 +191,11 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   background: var(--line-soft);
 }
 
+@media (min-width: 1181px) {
+  .app.rail-collapsed { grid-template-columns: minmax(0, 1fr) 336px; }
+  .app.rail-collapsed > .rail { display: none; }
+}
+
 .topbar {
   grid-column: 1 / -1;
   display: flex;
@@ -1231,6 +1236,7 @@ body:has(.modal-bg) { overflow: hidden; }
 
 /* 只在窄屏出现的东西：默认藏起来，媒体查询里放开 */
 .rail-btn { display: none; }
+.rail-collapse-btn { display: inline-flex; flex: none; }
 /* 宽屏上「行情已连接」是带文字的小贴片，这个点只在窄屏露出来 */
 .ws-dot { display: none; }
 
@@ -1246,6 +1252,7 @@ body:has(.modal-bg) { overflow: hidden; }
     grid-template-rows: auto minmax(0, 1fr);
   }
   .rail-btn { display: inline-flex; }
+  .rail-collapse-btn { display: none; }
   .rail-close { display: inline-flex; }
 
   /* 820 这类宽度上，顶栏那一排贴片放不下。折行比裁掉「解锁交易」「设置」好得多 */
@@ -1606,7 +1613,8 @@ body:has(.modal-bg) { overflow: hidden; }
 .app.research-mode .rail-scrim,
 .app.research-mode .center,
 .app.research-mode .side,
-.app.research-mode .rail-btn { display: none; }
+.app.research-mode .rail-btn,
+.app.research-mode .rail-collapse-btn { display: none; }
 /* 研究台不看盘：顶栏那串币价/标记价/资金费会把窄屏撑爆，解锁交易在这儿也没有去处 */
 .app.research-mode .ticker-head,
 .app.research-mode .arm-btn,
@@ -1905,7 +1913,8 @@ body:has(.modal-bg) { overflow: hidden; }
 .app.ai-mode .rail-scrim,
 .app.ai-mode .center,
 .app.ai-mode .side,
-.app.ai-mode .rail-btn { display: none; }
+.app.ai-mode .rail-btn,
+.app.ai-mode .rail-collapse-btn { display: none; }
 /* AI 台不看盘：顶栏那串币价/标记价/资金费会把窄屏撑爆，解锁交易在这儿也没有去处 */
 .app.ai-mode .ticker-head,
 .app.ai-mode .arm-btn,
