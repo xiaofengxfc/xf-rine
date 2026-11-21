@@ -54,14 +54,43 @@ function readMode(): ChartMode {
 function formatPositionLabel(label: DrawingLabel): string | undefined {
   if (label.kind !== 'long-position' && label.kind !== 'short-position') return undefined;
   const side = label.kind === 'long-position' ? '多单' : '空单';
-  const text = label.text
-    .replace(/^Target:/, '止盈:')
-    .replace(/^Stop:/, '止损:')
-    .replace(/^Open PnL:/, '持仓盈亏:')
-    .replace(/^Closed PnL:/, '已平盈亏:')
-    .replace(/Qty:/g, '数量:')
-    .replace(/Risk\/reward ratio:/g, '盈亏比:');
-  return side + ' · ' + text;
+
+  if (label.id === 'position-target' || label.id === 'position-stop') {
+    const name = label.id === 'position-target' ? '止盈' : '止损';
+    const precision = label.digits > 0 ? 10 ** -Math.min(8, label.digits) : 1;
+    return `${side}${name} ${fmtPrice(label.distance, precision)} (${formatPositionPercent(label.percent)})`;
+  }
+
+  if (label.id === 'position-middle') {
+    const pnl = label.pnl == null ? '—' : compactPositionNumber(label.pnl, true);
+    const ratio = Number.isFinite(label.ratio) && label.ratio < 100
+      ? `${label.ratio.toFixed(2)}x`
+      : '>99x';
+    return `${side}盈亏 ${pnl} · 数量 ${compactPositionNumber(label.qty)} · 盈亏比 ${ratio}`;
+  }
+
+  return label.text;
+}
+
+/** Keep chart-drawing labels readable when a tiny stop creates huge values. */
+function compactPositionNumber(value: number, signed = false): string {
+  if (!Number.isFinite(value)) return '—';
+  const abs = Math.abs(value);
+  const scale = abs >= 1e9 ? 1e9 : abs >= 1e6 ? 1e6 : abs >= 1e4 ? 1e3 : 1;
+  const suffix = scale === 1e9 ? 'B' : scale === 1e6 ? 'M' : scale === 1e3 ? 'K' : '';
+  const magnitude = (value / scale).toLocaleString('en-US', {
+    maximumFractionDigits: scale === 1 ? 4 : 2,
+    minimumFractionDigits: 0,
+  });
+  const sign = signed && value > 0 ? '+' : '';
+  return `${sign}${magnitude}${suffix}`;
+}
+
+function formatPositionPercent(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  return Math.abs(value) < 10_000
+    ? `${value.toFixed(3)}%`
+    : `${compactPositionNumber(value)}%`;
 }
 
 /** 默认在最新 K 线后留出少量空白，供拖动浏览未来区域。 */

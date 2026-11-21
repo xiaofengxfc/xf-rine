@@ -1265,6 +1265,25 @@ body:has(.modal-bg) { overflow: hidden; }
     padding-top: calc(6px + var(--inset-top));
     padding-bottom: 6px;
   }
+  /* 实时价格位数和解锁文案会变，给它们固定宽度，避免顶栏在临界宽度反复换行。 */
+  .topbar .ticker-head {
+    flex: 0 0 340px;
+    width: 340px;
+    justify-content: space-between;
+    gap: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .ticker-head .sym { max-width: 82px; overflow: hidden; text-overflow: ellipsis; }
+  .ticker-head .px { width: 100px; text-align: right; }
+  .ticker-head .chg { width: 70px; text-align: right; }
+  .topbar .arm-btn { flex: 0 0 164px; width: 164px; justify-content: center; white-space: nowrap; }
+  .topbar > .market-mark-pill { flex: 0 0 116px; width: 116px; }
+  .topbar > .market-funding-pill { flex: 0 0 100px; width: 100px; }
+  .topbar > .market-interval-pill { flex: 0 0 72px; width: 72px; }
+  .topbar > .market-volume-pill { flex: 0 0 118px; width: 118px; }
+  .topbar > .market-status-pill { flex: 0 0 122px; width: 122px; }
+  .topbar > .market-readonly-pill,
+  .topbar > .market-warning-pill { flex: 0 0 90px; width: 90px; }
   /* .brand 的 height:100% 会把第一行撑到整条顶栏那么高（宽屏上是给竖分隔线用的），
      折行之后第二行就被挤出顶栏、压在图表上 —— 1024 宽正好中招：
      「解锁交易」和「设置」跑到顶栏外面去了。这一档让它跟着自己那一行走。 */
@@ -1352,7 +1371,11 @@ body:has(.modal-bg) { overflow: hidden; }
   .brand { border-right: 0; padding-right: 0; gap: 5px; }
   .brand b, .brand span { display: none; }
   .brand .env-badge { font-size: 9px; padding: 1px 5px; }
-  .ticker-head { gap: 5px; }
+  .topbar .ticker-head { flex-basis: 230px; width: 230px; }
+  .ticker-head { gap: 0; }
+  .ticker-head .sym { max-width: 55px; }
+  .ticker-head .px { width: 96px; }
+  .ticker-head .chg { width: 65px; }
   .ticker-head .sym { font-size: 14px; }
   .ticker-head .px { font-size: 14.5px; }
   .ticker-head .chg { font-size: 11px; }
@@ -1360,7 +1383,7 @@ body:has(.modal-bg) { overflow: hidden; }
   .narrow-only { display: inline-block; }
   .ws-dot { display: block; flex: none; }
   .topbar .spacer { flex: 1 1 auto; }
-  .arm-btn { padding: 5px 8px; font-size: 11px; }
+  .topbar .arm-btn { flex-basis: 80px; width: 80px; padding: 5px 6px; justify-content: center; font-size: 11px; }
   /* 窄屏隐藏主题按钮以减少顶栏换行，主题仍可在「设置 → 外观」切换。 */
   .topbar .theme-btn { display: none; }
 
@@ -2038,6 +2061,7 @@ body:has(.modal-bg) { overflow: hidden; }
 
 /* 顶栏页签上的「AI 开着」绿点 */
 .tab-dot.live { background: var(--up); }
+.tab-dot.dormant { visibility: hidden; }
 
 @media (max-width: 1100px) {
   /* 表单和决策流挤成两列会让正文只剩 300 多像素，直接摞起来 */

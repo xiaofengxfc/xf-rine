@@ -61,7 +61,7 @@ export default function TopBar({
         <button className={view === 'ai' ? 'on' : ''} onClick={() => onView('ai')}>
           AI 交易
           {/* 开着的时候点一个绿点：切到别的页面也别忘了它正在自己下单 */}
-          {aiOn && <i className="tab-dot live" />}
+          <i className={`tab-dot${aiOn ? ' live' : ' dormant'}`} aria-hidden="true" />
         </button>
         {/*
           「策略」而不是「回测研究台」：这一页最常做的事是编策略和回测，
@@ -83,14 +83,14 @@ export default function TopBar({
         </span>
       </div>
 
-      <span className="pill wide-only">标记 {ticker ? fmtPrice(ticker.mark, priceRound) : '—'}</span>
-      <span className="pill wide-only">资金费 {ticker ? fmtPct(ticker.fundingRate * 100, 4) : '—'}</span>
-      <span className="pill wide-only">周期 {interval}</span>
-      <span className="pill wide-only">24h {ticker ? (ticker.volume24hUsd / 1e6).toFixed(1) + 'M' : '—'}</span>
+      <span className="pill wide-only market-mark-pill">标记 {ticker ? fmtPrice(ticker.mark, priceRound) : '—'}</span>
+      <span className="pill wide-only market-funding-pill">资金费 {ticker ? fmtPct(ticker.fundingRate * 100, 4) : '—'}</span>
+      <span className="pill wide-only market-interval-pill">周期 {interval}</span>
+      <span className="pill wide-only market-volume-pill">24h {ticker ? (ticker.volume24hUsd / 1e6).toFixed(1) + 'M' : '—'}</span>
 
       <div className="spacer" />
 
-      <span className="pill wide-only ws-pill">
+      <span className="pill wide-only ws-pill market-status-pill">
         <i className={`status-dot ${wsAlive ? 'live' : 'off'}`} />
         {wsAlive ? '行情已连接' : '行情断开'}
       </span>
@@ -114,8 +114,8 @@ export default function TopBar({
 
       <button className="icon-btn" title="设置" onClick={onOpenSettings}>⚙</button>
 
-      {!keysConfigured && <span className="pill" style={{ color: 'var(--warn)', borderColor: 'rgba(240,180,41,0.4)' }}>未配置密钥</span>}
-      {keysConfigured && !liveTrading && <span className="pill wide-only">只读模式</span>}
+      {!keysConfigured && <span className="pill market-warning-pill" style={{ color: 'var(--warn)', borderColor: 'rgba(240,180,41,0.4)' }}>未配置密钥</span>}
+      {keysConfigured && !liveTrading && <span className="pill wide-only market-readonly-pill">只读模式</span>}
     </header>
   );
 }
