@@ -19,7 +19,7 @@ import type { Account, Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
-import { chartZoneLineStyle } from '../lib/chartLevelStyle.ts';
+import { chartZoneLineStyle, selectChartZones } from '../lib/chartLevelStyle.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
@@ -1245,19 +1245,15 @@ export default function ChartPane({
       });
     }
 
-    // 档位按离现价远近排，近的排在前面。线上只留触及和守住概率，避免长文字挡住 K 线。
+    // 当前位按离现价远近排，每侧最多两条；历史位仅在当前位不足时补位。
     // 一律画实线：这版算法算出来的强度分没有上限（1.x 到 3.x 都常见），
     // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
-    // 主次靠远近距离分：最近的两条加粗，其余正常。
-    // 窄屏只画最近的 4 条：再多就是一屏横杠，K 线看不成了
-    const pool = narrow
-      ? [...zones].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last)).slice(0, 4)
-      : zones;
-    const byNear = [...pool].sort((a, b) => Math.abs(a.center - last) - Math.abs(b.center - last));
+    const byNear = selectChartZones(zones, last);
     byNear.forEach((z, i) => {
       const appearance = chartZoneLineStyle({
         type: z.zone_type,
         history: z.history === true,
+        priceLabel: fmtPrice(z.center, priceRound),
         pTouch: z.p_touch,
         pHold: z.p_hold,
       });
