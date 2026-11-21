@@ -1,4 +1,0 @@
-# 本地的 secret 和构建缓存，不进版本库
-.dev.vars
-.wrangler/
-node_modules/
