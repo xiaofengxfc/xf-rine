@@ -448,6 +448,7 @@ export class BitgetExchange implements Exchange {
         size: String(hedge ? sizeContracts : (short ? -sizeContracts : sizeContracts)),
         mode: hedge ? (short ? 'dual_short' : 'dual_long') : 'single',
         leverage: String(num(p.leverage)),
+        margin_mode: mm,
         entry_price: String(num(p.openPriceAvg ?? p.openAvgPrice ?? p.avgPrice)),
         mark_price: String(mark),
         liq_price: String(num(p.liquidationPrice)),

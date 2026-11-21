@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, jsend, type Account, type ContractInfo } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
+import { crossCollateralCoversDropToZero, estimateLiquidationPrice } from '../lib/liquidation.ts';
 import { protectionRows, wrongSide } from '../lib/protection.ts';
 import { floorToSizeStep, isOnSizeStep, percentSizing } from '../lib/sizing.ts';
 import { pnlFromCost } from '../lib/position.ts';
@@ -13,6 +14,8 @@ interface Props {
   armed: boolean;
   token: string | null;
   account: Account | null;
+  accountError?: string | null;
+  privateError?: string | null;
   liveTrading: boolean;
   keysConfigured: boolean;
   env: 'testnet' | 'live';
@@ -50,7 +53,7 @@ interface Props {
 }
 
 export default function OrderTicket({
-  contract, armed, token, account, liveTrading, keysConfigured, env,
+  contract, armed, token, account, accountError = null, privateError = null, liveTrading, keysConfigured, env,
   posPct, onPosPctChange, onToast, onRefresh, onQueueProtect,
   limitStr, onLimitChange, stopStr, onStopChange, targetStr, onTargetChange,
   priceMode, onPriceModeChange, onResetPrices,
@@ -126,6 +129,7 @@ export default function OrderTicket({
 
   const priceUsed = priceMode === 'limit' ? Number(limitStr) || 0 : last;
   const avail = account?.available ?? 0;
+  const crossCollateral = account && account.total > 0 ? account.total : avail;
   // 交易所按「保证金 + 手续费 ≤ 可用」放行。满仓如果只算保证金，
   // 差的正好是那几块钱手续费，点满仓必然被拒。
   const feeRate = Math.max(contract?.takerFee ?? 0, 0);
@@ -222,16 +226,35 @@ export default function OrderTicket({
   const wrong = wrongSide(side, stopNum, targetNum, priceUsed, fillAtMarket ? mark : 0);
 
   const liqEstimate = useMemo(() => {
-    if (!priceUsed || lev <= 0) return 0;
-    const move = 1 / lev;
-    return side === 'long' ? priceUsed * (1 - move) : priceUsed * (1 + move);
-  }, [priceUsed, lev, side]);
+    return estimateLiquidationPrice({
+      side,
+      entryPrice: priceUsed,
+      size,
+      multiplier: mult,
+      leverage: lev,
+      marginMode,
+      collateral: crossCollateral,
+    });
+  }, [priceUsed, size, mult, lev, marginMode, crossCollateral, side]);
+  const crossSurvivesToZero = marginMode === 'cross' && crossCollateralCoversDropToZero({
+    side,
+    entryPrice: priceUsed,
+    size,
+    multiplier: mult,
+    leverage: lev,
+    marginMode,
+    collateral: crossCollateral,
+  });
 
   // 拦下的第一条原因就写在按钮上，按顺序返回
   const blocked = (() => {
     if (!contract) return '没有选中合约';
     if (contract.tradable === false) return '模拟盘没有这个合约';
     if (!keysConfigured) return '未配置 API 密钥';
+    if (!account) return accountError ? '账户余额读取失败' : '正在读取账户余额';
+    if (!(avail > 0)) return '可用余额为 0，暂不能下单';
+    if (/KEY_POSITION_PERMISSION|40014/.test(privateError ?? '')) return 'API Key 缺少合约仓位读取权限，暂不能安全下单';
+    if (/KEY_NO_WRITE/.test(privateError ?? '')) return 'API Key 缺少合约交易写入权限，无法下单';
     if (!liveTrading) return '服务端 LIVE_TRADING=false，下单被禁用';
     if (!armed) return '先点右上角解锁交易';
     /**
@@ -350,6 +373,14 @@ export default function OrderTicket({
         <span className="dim" style={{ fontSize: 10 }}>1 张 = {mult || '—'} 币</span>
       </div>
       <div className="card-body">
+        <div className="ticket-account" aria-live="polite">
+          <div><span>总权益</span><b className="num">{account ? `${fmtUsd(account.total)} ${account.currency || 'USDT'}` : '—'}</b></div>
+          <div><span>可用余额</span><b className="num">{account ? `${fmtUsd(account.available)} ${account.currency || 'USDT'}` : '—'}</b></div>
+          <span className={accountError ? 'down' : account ? 'up' : 'dim'} title={accountError ?? undefined}>
+            {accountError ? '读取失败' : account ? '实时' : '读取中'}
+          </span>
+        </div>
+        {privateError && <div className="warn-box ticket-private-error" title={privateError}>部分交易数据读取失败：{privateError}</div>}
         {contract?.tradable === false && (
           <div className="warn-box">
             模拟盘没有这个合约，下单会被交易所拒绝。测试网只上架了几十个合约 —— 换一个主流币，或者到设置页切到实盘。
@@ -576,9 +607,11 @@ export default function OrderTicket({
           <dd>{marginMode === 'isolated' ? `逐仓 ${lev}x` : `全仓 ${lev}x`}</dd>
           <dt>预估强平价</dt>
           <dd className="dim">
-            {marginMode === 'cross'
-              ? '全仓按整个余额兜底，没有固定的强平价'
-              : `≈ ${liqEstimate ? fmtPrice(liqEstimate, priceRound) : '—'}`}
+            {liqEstimate > 0
+              ? `≈ ${fmtPrice(liqEstimate, priceRound)}`
+              : crossSurvivesToZero
+                ? '无正强平价'
+                : '—'}
           </dd>
           {protectRows.map((row) => (
             <Fragment key={row.label}>

@@ -67,7 +67,7 @@ export interface ContractInfo {
   name: string;
   multiplier: number;
   sizeMin: number;
-  /** 下单张数步进（旧 Worker 未返回时由最小量回退推算） */
+  /** 下单张数步进（接口未返回时由最小量回退推算） */
   sizeStep?: number;
   sizeMax: number;
   priceRound: number;
@@ -244,6 +244,8 @@ export interface Position {
   contract: string; size: number; direction: 'long' | 'short'; leverage: number;
   entryPrice: number; markPrice: number; liqPrice: number; unrealisedPnl: number;
   value: number; mode: string;
+  /** Some exchanges return the margin mode separately from leverage. */
+  marginMode?: 'isolated' | 'cross';
   /** 合约乘数（每张多少币）。页面按它现算已盈亏，读不到就是 0 */
   multiplier?: number;
 }
@@ -315,11 +317,12 @@ export interface IpInfo {
 
 /** 账户这一坨一次取回来的快照，四个字段来自同一时刻 */
 export interface PrivateState {
-  account: Account;
-  positions: Position[];
-  orders: OpenOrder[];
-  priceOrders: PriceOrder[];
-  /** 这次请求带的解锁令牌在服务端还有效吗。页面每 3 秒照它对一次「交易已解锁」 */
+  account?: Account;
+  positions?: Position[];
+  orders?: OpenOrder[];
+  priceOrders?: PriceOrder[];
+  errors?: Partial<Record<'account' | 'positions' | 'orders' | 'priceOrders', string>>;
+  /** 这次请求带的解锁令牌在服务端还有效吗。页面每 3 秒照它落锁 */
   armed?: boolean;
 }
 
@@ -370,7 +373,7 @@ export interface AppConfig {
   ai: AiSettings;
   /** 密钥文件的实际路径。装在桌面上时不在 server/.env，设置页要说对地方 */
   envPath?: string;
-  /** 手机端要填的地址和口令。口令只在本机打开页面时才有值 */
+  /** 远程连接电脑端所需的地址和口令，仅在该服务端本机显示 */
   remote?: { enabled: boolean; urls: string[]; token: string | null };
   /**
    * 这个请求是不是从这台电脑上发出来的（服务端按回环地址判定）。

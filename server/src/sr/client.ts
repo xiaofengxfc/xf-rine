@@ -123,6 +123,28 @@ function start(): Promise<number> {
   if (stopping) return Promise.reject(new SidecarError('STOPPING', '服务端正在退出', true));
   if (port && child && !child.killed) return Promise.resolve(port);
   if (ready) return ready;
+  const embeddedUrl = (process.env.XFRINE_SIDECAR_URL ?? '').trim().replace(/\/+$/, '');
+  if (embeddedUrl) {
+    token = (process.env.XFRINE_SIDECAR_TOKEN ?? '').trim();
+    if (!token) return Promise.reject(new SidecarError('TOKEN_REQUIRED', '内嵌关键位引擎缺少访问口令', true));
+    ready = fetch(embeddedUrl + '/health', {
+      headers: { 'x-sidecar-token': token },
+      signal: AbortSignal.timeout(START_TIMEOUT_MS),
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new SidecarError('EMBEDDED_UNAVAILABLE', '内嵌关键位引擎未就绪（HTTP ' + response.status + '）', true);
+      }
+      const parsedPort = Number(new URL(embeddedUrl).port);
+      port = parsedPort > 0 ? parsedPort : 80;
+      console.log('  关键位引擎  已就绪 ' + embeddedUrl);
+      return port;
+    }).catch((error: unknown) => {
+      ready = null;
+      if (error instanceof SidecarError) throw error;
+      throw new SidecarError('EMBEDDED_UNAVAILABLE', '连接内嵌关键位引擎失败：' + (error as Error).message, true);
+    });
+    return ready;
+  }
   const now = Date.now();
   if (now < cooldownUntil) {
     return Promise.reject(new SidecarError('COOLDOWN', lastError || '关键位引擎刚才起不来，稍后再试', true));
@@ -229,7 +251,8 @@ export async function ensureReady(): Promise<number> {
 
 async function call<T>(path: string, params: Record<string, string | number | boolean | undefined>, timeoutMs: number, body?: unknown): Promise<T> {
   await ensureReady();
-  const url = new URL('http://127.0.0.1:' + port + path);
+  const embeddedUrl = (process.env.XFRINE_SIDECAR_URL ?? '').trim().replace(/\/+$/, '');
+  const url = new URL((embeddedUrl || 'http://127.0.0.1:' + port) + path);
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined) continue;
     url.searchParams.set(k, String(v));

@@ -3,12 +3,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 /**
  * 手机端。
  *
- * 手机只是一块屏幕：所有计算在电脑上做（行情、支撑阻力、下单），
- * 手机负责显示和下单，通过局域网连电脑上跑的同一个服务端。
- *
- * 这里不再挂 Node 运行时插件：把整个后端塞进 APK 的那套已经去掉了，
- * 代价是多几十兆原生库、每个算法改动都要重打包、换机换系统一堆加载失败的兼容问题 ——
- * 而手机本来也用不上「读本地数据目录」和「连交易所代理」这些只有电脑才有的东西。
+ * APK 内运行 Node 后端和 Python 支撑阻力引擎，手机可以独立看盘、测试和交易。
  *
  * 页面这一层仍然只有 web/dist 一份，和桌面端、浏览器里看到的一样。
  */
@@ -17,6 +12,10 @@ const config: CapacitorConfig = {
   appName: '巡风',
   webDir: '../web/dist',
   plugins: {
+    Nodejs: {
+      nodeDir: 'nodejs',
+      startMode: 'manual',
+    },
     /**
      * 系统栏（状态栏、手势条）。
      *

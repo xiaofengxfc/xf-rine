@@ -207,8 +207,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
     const seq = ++ipSeq.current;
     setIpBusy(true);
     try {
-      // 手机上「浏览器 IP」是手机自己的，拿它填白名单等于把交易挡在门外，
-      // 所以手机端只问服务端那一条 —— Gate 看到的是电脑的出口地址。
+      // 手机端只问服务端，返回的是当前运行这份后端的设备出口地址。
       const [browser, server] = await Promise.all([
         isNative() ? Promise.resolve(null) : detectBrowserIp(),
         jget<IpInfo>('/api/ip' + (fresh ? '?fresh=1' : ''), { cache: 'no-store' }).catch(() => null),
@@ -829,7 +828,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
                       </button>
                     </div>
                     <div className="hint" style={{ marginTop: 6 }}>
-                      手机 App 里填上面两行，同一个 Wi-Fi 才能连上。口令是这一台服务端的钥匙，
+                      手机选择连接电脑端时填上面两行，两台设备须在同一 Wi-Fi。口令是这一台服务端的钥匙，
                       谁拿到谁就能下单，别随手发出去。
                       第一次启动时 Windows 会弹防火墙，要选「允许专用网络访问」，否则手机连不进来。
                     </div>

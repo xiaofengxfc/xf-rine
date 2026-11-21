@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   jget, jsend, setNotArmedHandler,
   type Account, type AppConfig, type Bar, type ContractInfo,
@@ -36,6 +36,7 @@ interface MarketSnap {
   info: ContractInfo | null;
   bars: Bar[];
   levels: LevelsResponse | null;
+  levelsError?: string | null;
 }
 
 const EMPTY_BARS: Bar[] = [];
@@ -105,6 +106,7 @@ function savePrefs(p: Prefs): void {
 let toastSeq = 1;
 
 export default function App() {
+  const appRootRef = useRef<HTMLDivElement | null>(null);
   const prefs0 = useRef(readPrefs()).current;
   const [contract, setContract] = useState(prefs0.contract);
   const [interval, setInterval] = useState(prefs0.interval);
@@ -114,6 +116,7 @@ export default function App() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<OpenOrder[]>([]);
   const [priceOrders, setPriceOrders] = useState<PriceOrder[]>([]);
@@ -236,7 +239,7 @@ export default function App() {
    * 手一快就是「点了没反应」。切回刚看过的那个直接拿缓存顶着，再去后台刷新；
    * 只留 4 套，免得两万根 K 线攒成几百兆。
    */
-  const marketCacheRef = useRef(new Map<string, { info: ContractInfo; bars: Bar[]; levels: LevelsResponse }>());
+  const marketCacheRef = useRef(new Map<string, { info: ContractInfo; bars: Bar[]; levels: LevelsResponse | null; levelsError?: string | null }>());
   /** 已经到交易所能给的最早一根 */
   const noMoreOlderRef = useRef(false);
   /** 交易所给的历史就这么多，图上要有个说明，不然拖到头像是在卡死 */
@@ -315,11 +318,31 @@ export default function App() {
   const info = fresh ? market.info : null;
   const bars = fresh ? market.bars : EMPTY_BARS;
   const levels = fresh ? market.levels : null;
+  const levelsError = fresh ? market.levelsError : null;
 
   const push = useCallback((kind: 'ok' | 'err', title: string, detail?: string) => {
     const id = toastSeq++;
     setToasts((t) => [...t.slice(-4), { id, kind, title, detail }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'err' ? 9000 : 5000);
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    const topbar = root?.querySelector<HTMLElement>('.topbar');
+    if (!root || !topbar) return;
+
+    const updateTopbarHeight = () => {
+      root.style.setProperty('--mobile-topbar-height', `${topbar.getBoundingClientRect().height}px`);
+    };
+    updateTopbarHeight();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateTopbarHeight);
+      return () => window.removeEventListener('resize', updateTopbarHeight);
+    }
+
+    const observer = new ResizeObserver(updateTopbarHeight);
+    observer.observe(topbar);
+    return () => observer.disconnect();
   }, []);
 
   /**
@@ -615,24 +638,27 @@ export default function App() {
     }
 
     try {
-      const [c, k, lv] = await Promise.all([
+      const levelsPromise = jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`)
+        .then((levels) => ({ levels, error: null as string | null }))
+        .catch((e: unknown) => ({ levels: null, error: (e as Error).message || '关键位暂不可用' }));
+      const [c, k, levelsResult] = await Promise.all([
         jget<ContractInfo>(`/api/contracts/${name}`),
         // 首屏直接要满一页：一页一千根，剩下的交给后台补
         jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${tf}&limit=${OLDER_PAGE}`),
-        // 500 根：实测拉到 1000 根引擎给的位一个没变（它自己按整段聚类，不是按根数截），
-      // 白白多拉一趟 K 线，所以还是 500
-      jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`),
+        levelsPromise,
       ]);
+      // 独立行情后端可能暂时没有关键位引擎。失败时保留已经加载的图表数据。
+      const { levels: lv, error: levelsError } = levelsResult;
       // 期间又切过币种，这份数据已经不是当前要看的东西了
       const cache = marketCacheRef.current;
       cache.delete(key);
-      cache.set(key, { info: c, bars: k.bars, levels: lv });
+      cache.set(key, { info: c, bars: k.bars, levels: lv, levelsError });
       if (cache.size > 4) {
         const oldest = cache.keys().next().value;
         if (oldest) cache.delete(oldest);
       }
       if (seq !== marketSeqRef.current) return;
-      setMarket({ key, info: c, bars: k.bars, levels: lv });
+      setMarket({ key, info: c, bars: k.bars, levels: lv, levelsError });
     } catch (e) {
       if (seq === marketSeqRef.current) push('err', '行情加载失败', (e as Error).message);
     } finally {
@@ -669,8 +695,12 @@ export default function App() {
     const key = `${name}:${tf}`;
     try {
       const lv = await jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`);
-      setMarket((prev) => (prev.key === key ? { ...prev, levels: lv } : prev));
-    } catch { /* 静默 */ }
+      setMarket((prev) => (prev.key === key ? { ...prev, levels: lv, levelsError: null } : prev));
+    } catch (e) {
+      setMarket((prev) => (prev.key === key
+        ? { ...prev, levelsError: (e as Error).message || '关键位暂不可用' }
+        : prev));
+    }
   }, []);
 
   const loadNews = useCallback(async (name: string) => {
@@ -690,37 +720,48 @@ export default function App() {
   }, []);
 
   const loadPrivate = useCallback(async () => {
-    if (!config?.keys.configured) return;
+    if (!config) return;
+    if (!config.keys.configured) {
+      setAccount(null);
+      setAccountError(`当前${config.envLabel}未配置 API Key`);
+      return;
+    }
     const seq = ++privateSeqRef.current;
     try {
-      // 一次取全：账户、持仓、委托、触发单。分四次发的话，四份回包来自四个时刻，
-      // 持仓和它的止损单可能一个新一个旧，看起来就像「止损没挂上」。
+      // 一次取全：账户、持仓、委托、触发单。单项权限不足时，服务端仍返回其余成功字段。
       const t = tokenRef.current;
       const s = await jget<PrivateState>('/api/private-state', {
-        // 把解锁令牌一起带上：服务端据此回一句「这个令牌还算不算数」
         headers: t ? { 'x-arm-token': t } : undefined,
       });
       if (seq !== privateSeqRef.current) return;
-      /**
-       * 零张的记录不是仓。
-       *
-       * 交易所对全仓会一直保留一条 size=0 的记录（remember cross_leverage_limit 用），
-       * 服务端已经过滤过一道，这里再挡一次：这条记录一旦溜进来，图上和持仓卡里
-       * 就会出现一个「0 张 / 开仓 0.0000 / 盈亏 0.00」的假仓，还会让右键「覆盖持仓止损」
-       * 以为这一边有仓。
-       */
-      const live = s.positions.filter((p) => Math.abs(p.size) > 0);
-      setAccount(s.account); setPositions(live); setOrders(s.orders); setPriceOrders(s.priceOrders);
+      if (s.account) { setAccount(s.account); setAccountError(null); }
+      else if (s.errors?.account) setAccountError(s.errors.account);
+      if (s.positions) setPositions(s.positions.filter((p) => Math.abs(p.size) > 0));
+      if (s.orders) setOrders(s.orders);
+      if (s.priceOrders) setPriceOrders(s.priceOrders);
       if (t) setArmCheck({ token: t, ok: s.armed === true });
-      setPrivateAt(Date.now());
-      setPrivateErr(null);
+      const labels = { account: '账户', positions: '持仓', orders: '委托', priceOrders: '保护单' };
+      const errors = Object.entries(s.errors ?? {}).map(([key, detail]) =>
+        `${labels[key as keyof typeof labels] ?? key}：${detail}`,
+      );
+      if (errors.length) setPrivateErr(errors.join(' · '));
+      else { setPrivateAt(Date.now()); setPrivateErr(null); }
     } catch (e) {
-      // 服务端挂了或者交易所一直报错时，页面原来会一声不响地停在最后一份快照上 ——
-      // 仓位、均价、盈亏全是旧的，看着就像「线画错了」。现在把它记下来，界面上直说。
+      // 汇总接口或网络异常时，仍单独取账户：可读余额不应被其他私有接口故障遮住。
       if (seq !== privateSeqRef.current) return;
-      setPrivateErr((e as Error).message || '刷新失败');
+      const message = (e as Error).message || '刷新失败';
+      setPrivateErr(message);
+      try {
+        const a = await jget<Account>('/api/account');
+        if (seq !== privateSeqRef.current) return;
+        setAccount(a);
+        setAccountError(null);
+      } catch (accountFailure) {
+        if (seq !== privateSeqRef.current) return;
+        setAccountError((accountFailure as Error).message || message);
+      }
     }
-  }, [config?.keys.configured]);
+  }, [config?.envLabel, config?.keys.configured]);
 
   /**
    * 图上直接平仓。以前只有持仓卡里有这个动作，手机上要滑到图表下面很远才够得着，
@@ -976,7 +1017,7 @@ export default function App() {
 
     const connect = () => {
       if (disposed) return;
-      // 地址和口令都由 endpoint 决定：浏览器同源，手机端拼到电脑上
+      // 地址和口令都由 endpoint 决定：浏览器同源，手机端连接本机或电脑服务端
       const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
 
@@ -1183,7 +1224,7 @@ export default function App() {
 
   return (
     <>
-      <div className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
+      <div ref={appRootRef} className={`app${railOpen ? ' rail-open' : ''}${view === 'research' ? ' research-mode' : ''}${view === 'ai' ? ' ai-mode' : ''}${view === 'quant' ? ' ai-mode' : ''}`}>
         <TopBar
           exchange={config?.exchangeLabel ?? 'Gate'}
           env={config?.env ?? 'live'}
@@ -1244,6 +1285,7 @@ export default function App() {
             positions={myPositions}
             orders={myOrders}
             priceOrders={priceOrders}
+            account={account}
 
             multiplier={info?.multiplier ?? 0}
             markPrice={markPrice}
@@ -1272,6 +1314,7 @@ export default function App() {
             price={localOn ? (levels?.last ?? 0) : (ticker?.last || levels?.last || 0)}
             priceRound={priceRound}
             atr={levels?.atr ?? 0}
+            levelsError={levelsError}
 
           />
         </main>
@@ -1326,6 +1369,8 @@ export default function App() {
             armed={armed}
             token={token}
             account={account}
+            accountError={accountError}
+            privateError={privateErr}
             liveTrading={config?.liveTrading ?? false}
             env={config?.env ?? 'live'}
             keysConfigured={config?.keys.configured ?? false}
@@ -1346,6 +1391,7 @@ export default function App() {
           />
 
           <PositionsCard
+            account={account}
             positions={positions}
             orders={orders}
             priceOrders={priceOrders}

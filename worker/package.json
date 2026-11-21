@@ -2,16 +2,13 @@
   "name": "@xf-rine/worker",
   "private": true,
   "version": "1.0.0",
-  "description": "手机直连交易所用的 Cloudflare Worker（只有行情和交易）",
+  "description": "遗留 Worker 源码，部署入口已移除",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261118.1",
-    "typescript": "^5.9.3",
-    "wrangler": "^4.20.0"
+    "typescript": "^5.9.3"
   }
 }

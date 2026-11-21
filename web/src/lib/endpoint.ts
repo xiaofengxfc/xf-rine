@@ -2,9 +2,8 @@
  * 服务端在哪。
  *
  * 浏览器和桌面端：页面和接口同源，路径直接用 /api —— 不用配，也不怕换端口。
- * 手机 App：页面是 WebView 从 http://localhost 读出来的，后端在**电脑**上，
- * 不同源也不在同一台机器，所以地址要在连接时定下来，之后每个请求都拼到它前面。
- * 手机端不再自带服务端：连不上电脑时它什么都不做，也不假装有数据。
+ * 手机 App：页面是 WebView 从 http://localhost 读出来的，本机 Node 后端在 127.0.0.1:8787。
+ * 也允许连接电脑上的服务端，地址存本地后供 API 和 WebSocket 共用。
  */
 const BASE_KEY = 'xf-rine:server';
 const TOKEN_KEY = 'xf-rine:server-token';
@@ -97,9 +96,7 @@ export function wsUrl(path = '/ws'): string {
 }
 
 /**
- * 探一次服务端。
- * 手机端每次启动都先问一句 —— 连不上就直接停在填地址那一屏，
- * 而不是进到主界面看一屏空图表、再去猜是哪里出了问题。
+ * 探一次服务端，用于启动时确认本机 Node 后端或手动填写的电脑端地址可用。
  */
 export async function probeServer(base: string, token: string, timeoutMs = 6000): Promise<{ ok: boolean; error?: string }> {
   const url = normalizeBase(base) + '/api/health';

@@ -8,6 +8,7 @@ interface Props {
   price: number;
   priceRound: number;
   atr: number;
+  levelsError?: string | null;
 }
 
 /**
@@ -18,7 +19,7 @@ interface Props {
  * 触及概率 AUC 0.73~0.77，区分度强；守住概率校准好（说 75% 实际 75.4%）但区分度弱（AUC 0.59~0.61），
  * 所以「守住」的绝对值可以看，别拿它比较相邻两条位。
  */
-export default function LevelsStrip({ zones, manual, price, priceRound, atr }: Props) {
+export default function LevelsStrip({ zones, manual, price, priceRound, atr, levelsError }: Props) {
   const manualSet = new Set(manual.map((p) => p.toFixed(6)));
   // atr 还没算出来时（=0）不去重：阈值 0 会让「手动画的和算出来的刚好同一个价」画两遍
   const manualOnly = atr > 0
@@ -104,7 +105,11 @@ export default function LevelsStrip({ zones, manual, price, priceRound, atr }: P
         <div className="meta"><span>{price > 0 ? ((atr / price) * 100).toFixed(2) + '% 波动' : '—'}</span></div>
       </div>
 
-      {zones.length === 0 && <div className="empty" style={{ flex: 1 }}>这个周期还没识别出够格的价格带，换个周期看看</div>}
+      {zones.length === 0 && (
+        <div className={`empty${levelsError ? ' levels-unavailable' : ''}`} style={{ flex: 1 }} title={levelsError ?? undefined}>
+          {levelsError ? '关键位暂不可用 · ' + levelsError : '这个周期还没识别出够格的价格带，换个周期看看'}
+        </div>
+      )}
 
       {zones.map((z) => (
         // 这张卡上没有任何操作，就别用 button —— 能点、点下去却什么都不发生，比不给反馈更糟

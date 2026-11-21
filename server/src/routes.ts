@@ -289,10 +289,26 @@ export function translate(e: unknown): unknown {
    * 认两处：Gate 的 label（READ_ONLY），和它的英文原文 —— 没有 label 的接口
    * 会把 message 直接顶到 label 上（见 gate/rest.ts）。
    */
-  const readOnly = e.label === 'READ_ONLY'
-    || /does not have futures write permission/i.test(`${e.label} ${e.detail}`)
-    || (e.from === 'Bitget' && /permission|no authority|read[- ]?only|not allowed/i.test(String(e.detail)));
-  if (readOnly) {
+  // Bitget 的 40014 可能是「读持仓」权限不足，不能把它直接说成缺少写权限。
+  // /private-state 会同时读取账户、持仓、委托和保护单；把读权限错报为写权限，
+  // 会让用户误以为修好了写权限就能下单，却仍然看不到持仓。
+  const bitgetPositionPermission = e.from === 'Bitget'
+    && (e.label === '40014' || /need future pos (?:read|write) permissions/i.test(e.detail));
+  if (bitgetPositionPermission) {
+    const where = '到 Bitget「API 管理」检查当前这把密钥的合约仓位读取权限；要下单还需开启「合约交易 · 读写」';
+    return new GateError(
+      403,
+      'KEY_POSITION_PERMISSION',
+      `Bitget 拒绝了合约私有接口：当前 API Key 缺少所需的合约仓位权限。${where}。`
+      + `现在使用的是 ${exchangeLabel()} ${envLabel()} 密钥。`,
+      'Bitget',
+    );
+  }
+
+  const writePermission = e.label === 'READ_ONLY'
+    || /does not have futures write permission|futures? write permission|trade write permission|not authorized to trade|read-only api key/i
+      .test(`${e.label} ${e.detail}`);
+  if (writePermission) {
     const where = config.exchange === 'bitget'
       ? '到 Bitget 的「API 管理」里给这把钥匙勾上「合约交易 · 读写」（要下单就勾读写），保存后重下一次就行'
       : '到 Gate 的「API 管理」里把这把钥匙的权限改成「合约交易 · 读写」并保存，密钥本身不用换，改完重下一次就行';
@@ -963,8 +979,7 @@ function storeDataDir(rawInput: string): string {
  */
 router.get('/data/dir', wrap(async (_req, res) => {
   // 读目录不加 requireLocal：它只列「目录里有什么」，不动文件。
-  // 研究台和日内台现在共用这一份状态 —— 手机端只读不改，两边看到的必须是同一个目录，
-  // 否则手机上研究台有数据、切回日内台却是空的。
+  // 研究台和日内台共用同一份目录状态，切换页面时保持一致。
   const dir = readDataDir();
   if (!dir) { res.json({ dir: '', instruments: [], files: 0, count: 0, exists: false }); return; }
   try {
@@ -1643,6 +1658,9 @@ async function readPositions() {
       size,
       direction: sideOf(String(p.mode ?? ''), Number(p.size)),
       leverage: Number(p.leverage),
+      marginMode: String(p.margin_mode ?? '').toLowerCase() === 'crossed' ? 'cross'
+        : String(p.margin_mode ?? '').toLowerCase() === 'isolated' ? 'isolated'
+          : Number(p.leverage) > 0 ? 'isolated' : 'cross',
       entryPrice: Number(p.entry_price),
       markPrice: mark,
       liqPrice: Number(p.liq_price),
@@ -1772,14 +1790,29 @@ router.get('/price-orders', wrap(async (_req, res) => {
  * 合成一个接口顺带把一次刷新的延迟压到一个往返里。
  */
 router.get('/private-state', wrap(async (req, res) => {
-  const [account, positions, orders, priceOrders] = await Promise.all([
+  // 余额、持仓、委托和保护单不是同一项权限。某一类权限不足时仍返回其余可读数据，
+  // 尤其不能因「持仓读取」失败，就把成功取到的可用余额一起丢掉。
+  const [accountResult, positionsResult, ordersResult, priceOrdersResult] = await Promise.allSettled([
     readAccount(),
     readPositions(),
     readOpenOrders(),
     readTriggers(),
   ]);
+  const errors = {
+    ...(accountResult.status === 'rejected' ? { account: errText(accountResult.reason) } : {}),
+    ...(positionsResult.status === 'rejected' ? { positions: errText(positionsResult.reason) } : {}),
+    ...(ordersResult.status === 'rejected' ? { orders: errText(ordersResult.reason) } : {}),
+    ...(priceOrdersResult.status === 'rejected' ? { priceOrders: errText(priceOrdersResult.reason) } : {}),
+  };
   // armed 让页面每 3 秒对一次账：令牌没了就把「已解锁」收掉，而不是等下一次下单被拒
-  res.json({ account, positions, orders, priceOrders, armed: armValid(req) });
+  res.json({
+    ...(accountResult.status === 'fulfilled' ? { account: accountResult.value } : {}),
+    ...(positionsResult.status === 'fulfilled' ? { positions: positionsResult.value } : {}),
+    ...(ordersResult.status === 'fulfilled' ? { orders: ordersResult.value } : {}),
+    ...(priceOrdersResult.status === 'fulfilled' ? { priceOrders: priceOrdersResult.value } : {}),
+    ...(Object.keys(errors).length > 0 ? { errors } : {}),
+    armed: armValid(req),
+  });
 }));
 
 // ---------- 平仓、反手之前要清掉的东西 ----------
@@ -1792,7 +1825,10 @@ interface Cleanup {
   errors: string[];
 }
 
-const errText = (e: unknown): string => (e instanceof GateError ? `${e.label} ${e.detail}` : String(e));
+const errText = (e: unknown): string => {
+  const readable = translate(e);
+  return readable instanceof GateError ? `${readable.label} ${readable.detail}` : String(readable);
+};
 
 /**
  * 这张委托会不会动到 dir 这一边。

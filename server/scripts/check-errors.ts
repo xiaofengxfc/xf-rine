@@ -50,21 +50,34 @@ check(
   { label: 'KEY_NO_WRITE', status: 403, hasSteps: true, hasEnglish: false },
 );
 
-// ---- 3. 别的权限问题不能被误认成写权限（IP 白名单最常见）----
+// ---- 3. Bitget 40014 的读仓位权限和写交易权限要区分 ----
+check(
+  'Bitget 40014 提示仓位读取/写入权限，不误报为只有写权限',
+  shape(translate(new GateError(403, '40014', 'Incorrect permissions, need future pos read or future pos write permissions', 'Bitget'))),
+  { label: 'KEY_POSITION_PERMISSION', status: 403, hasSteps: true, hasEnglish: false },
+);
+
+check(
+  'Bitget 的普通 permission 错误不再一律误报为写权限',
+  shape(translate(new GateError(403, 'OTHER_PERMISSION', 'permission denied', 'Bitget'))),
+  { label: 'OTHER_PERMISSION', status: 403, hasSteps: false, hasEnglish: false },
+);
+
+// ---- 4. 别的权限问题不能被误认成写权限（IP 白名单最常见）----
 check(
   'IP 白名单不是写权限问题，原样保留',
   shape(translate(new GateError(403, 'IP_FORBIDDEN', 'your ip is not allowed'))),
   { label: 'IP_FORBIDDEN', status: 403, hasSteps: false, hasEnglish: false },
 );
 
-// ---- 4. 余额不够那种要按原样往上走（由 explainMargin 去解释）----
+// ---- 5. 余额不够那种要按原样往上走（由 explainMargin 去解释）----
 check(
   '保证金不够不在这里改',
   shape(translate(new GateError(400, 'MARGIN_NOT_ENOUGH', 'margin 6180.18 while available 974.21'))),
   { label: 'MARGIN_NOT_ENOUGH', status: 400, hasSteps: false, hasEnglish: false },
 );
 
-// ---- 5. 不是 Gate 的错误原样返回 ----
+// ---- 6. 不是 Gate 的错误原样返回 ----
 const plain = new Error('boom');
 check('非 GateError 原样返回', translate(plain) === plain, true);
 

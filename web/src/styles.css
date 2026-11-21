@@ -506,6 +506,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .cp-dir { color: var(--text-1); }
 .cp-pnl { font-size: 12.5px; font-weight: 600; }
 .cp-mid { display: flex; gap: 12px; color: var(--text-2); }
+.cp-liq-mobile { display: none; font-size: 10px; line-height: 1.45; }
 .cp-prot { display: flex; gap: 12px; flex-wrap: wrap; }
 .cp-prot .none { color: var(--warn); }
 
@@ -630,6 +631,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-2);
 }
 .card-body { padding: 0 11px 12px; }
+.ticket-account { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 8px; margin: 0 0 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-2); }
+.ticket-account > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ticket-account > div span { color: var(--text-2); font-size: 10px; }
+.ticket-account > div b { color: var(--text-0); font-size: 11px; white-space: nowrap; }
+.ticket-account > span { font-size: 10px; white-space: nowrap; }
+.ticket-private-error { margin-bottom: 9px; max-height: 84px; overflow: auto; }
 
 /*
  * 张数的最低下单量提示。
@@ -1347,18 +1354,16 @@ body:has(.modal-bg) { overflow: hidden; }
   .ws-dot { display: block; flex: none; }
   .topbar .spacer { flex: 1 1 auto; }
   .arm-btn { padding: 5px 8px; font-size: 11px; }
-  /* 手机上顶栏本来就刚好一行：再塞一个按钮就折行，图表白掉 30 多像素。
-     主题开关在「设置 → 外观」里，那一页一直有 */
+  /* 窄屏隐藏主题按钮以减少顶栏换行，主题仍可在「设置 → 外观」切换。 */
   .topbar .theme-btn { display: none; }
 
-  /* ---- 图表：固定高度，别把整屏占满 ---- */
+  /* ---- 图表：沿用桌面同一张图表，填满手机首屏剩余空间 ---- */
   .center {
     flex: none;
-    /* vh 在手机浏览器里是「地址栏收起来时的高度」，收起展开会跳一下；
-       认得 dvh 的用 dvh，认不得的退回 vh */
-    height: min(58vh, 480px);
-    height: min(58dvh, 480px);
-    min-height: 300px;
+    /* 顶栏高度由 ResizeObserver 读取，折行和系统栏变化时图表仍占满剩余视口。 */
+    height: calc(100vh - var(--mobile-topbar-height, 52px) - var(--inset-bottom));
+    height: calc(100dvh - var(--mobile-topbar-height, 52px) - var(--inset-bottom));
+    min-height: 360px;
   }
   .levels-strip { padding: 6px 10px 8px; }
   /* 手机上图表矮，摘要再压一档，别把 K 线挡住 */
@@ -1366,6 +1371,7 @@ body:has(.modal-bg) { overflow: hidden; }
   .cp-row { padding: 4px 7px 5px; font-size: 10px; }
   .cp-pnl { font-size: 11px; }
   .cp-mid { display: none; }
+  .cp-liq-mobile { display: block; }
   /* 这句提示会被挤成一列竖排的字，把工具栏撑成 120 高。手机上看盘不需要它 */
   .chart-tools > .dim { display: none; }
 
@@ -1412,9 +1418,8 @@ body:has(.modal-bg) { overflow: hidden; }
 }
 
 /**
- * 手机端第一屏：填服务器地址。
- * 这一屏是 App 的入口，没有它就只能看一屏空图表，
- * 所以排版按「一个表单」来做，不套交易台的网格。
+ * 手机端启动、失败和远程连接页面。
+ * 这些状态按单栏卡片排版，不套交易台的网格。
  */
 .gate {
   min-height: 100dvh;

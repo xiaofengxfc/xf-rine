@@ -49,6 +49,7 @@ public class MainActivity extends BridgeActivity {
 
         // 在 super 之前注册：Capacitor 在 onCreate 里建桥，晚一步就找不到了
         registerPlugin(SystemBarsPlugin.class);
+        registerPlugin(PythonEnginePlugin.class);
 
         // 先铺满，再由页面用 CSS 变量让位
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);

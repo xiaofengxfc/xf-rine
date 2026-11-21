@@ -12,7 +12,7 @@ interface Props {
   warning: string;
   /** 现在这张图算的是本地文件，还是交易所实时行情 */
   on: boolean;
-  /** 服务端能不能连上（手机端连不上本机目录，只能看不能选） */
+  /** 当前服务端是否允许选择本机目录 */
   canPick: boolean;
   /** 现在看的品种 / 周期 */
   symbol: string;

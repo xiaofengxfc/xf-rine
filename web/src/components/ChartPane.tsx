@@ -15,13 +15,14 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind, type DrawingLabel } from 'lightweight-charts-drawing';
-import type { Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib/api.ts';
+import type { Account, Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { chartZoneLineStyle } from '../lib/chartLevelStyle.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
+import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 import { useCandleStyle } from '../lib/chartStyle.ts';
@@ -110,6 +111,8 @@ interface Props {
   positions: Position[];
   /** 当前合约还挂着的委托，限价单在图上画一条线，成交或撤掉就消失 */
   orders: OpenOrder[];
+  /** 全仓强平估算需要账户抵押物，交易所没返回强平价时用来补算 */
+  account?: Account | null;
   /** 当前合约挂着的触发单。止损止盈从这里读，图上要写出来，也画成线 */
   priceOrders?: PriceOrder[];
 
@@ -164,7 +167,7 @@ interface Props {
 export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
-  contract, interval, bars, zones, positions, orders, priceOrders = [], multiplier, markPrice, priceRound,
+  contract, interval, bars, zones, positions, orders, account, priceOrders = [], multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, historyEndHint, backfilling, onIntervalChange, onManualLevels,
   intervals = INTERVALS as unknown as string[],
   canClose, onClosePosition, onPickPrice, hasPosition, research = false,
@@ -1111,7 +1114,10 @@ export default function ChartPane({
    * 只把真正会画出来的字段拼进来：价格、方向、保护单的价和规则、档位要显示的那几个数。
    */
   const levelSig = [
-    positions.map((p) => [p.contract, p.direction, p.entryPrice, p.size, p.liqPrice, p.leverage].join(',')).join(';'),
+    positions.map((p) => [
+      p.contract, p.direction, p.entryPrice, p.size, p.liqPrice, p.leverage, p.marginMode,
+      positionLiquidationPrice(p, account, stale ? 0 : markPrice),
+    ].join(',')).join(';'),
     pendingOrderLines(orders).map((o) => o.id + '@' + o.price + 'x' + o.size).join(';'),
     priceOrders.map((o) => o.id + '@' + o.triggerPrice + ':' + o.triggerRule + ':' + o.direction).join(';'),
     // 中心价按最小变动价取整再比：引擎给的是浮点数，差 0.0001 不该触发整批重画
@@ -1179,14 +1185,18 @@ export default function ChartPane({
 
     // 强平价：真到这儿仓位就不归你管了。交易所没报这个价就不画。
     for (const p of positions) {
-      if (!p.liqPrice || p.liqPrice <= 0) continue;
+      const liqPrice = positionLiquidationPrice(p, account, stale ? 0 : markPrice);
+      if (!(liqPrice > 0)) continue;
+      const estimated = !(p.liqPrice > 0);
       items.push({
-        price: p.liqPrice,
+        price: liqPrice,
         rank: 1.2,
         color: LIQ,
         width: 1,
         style: LineStyle.Dashed,
-        title: positions.length > 1 ? (p.direction === 'long' ? '多单强平' : '空单强平') : '强平价',
+        title: (estimated ? '预估' : '')
+          + (positions.length > 1 ? (p.direction === 'long' ? '多单强平' : '空单强平') : '强平价')
+          + (estimated ? ' ≈ ' + fmtPrice(liqPrice, priceRound) : ''),
       });
     }
 
@@ -1339,14 +1349,19 @@ export default function ChartPane({
    * 图左上角那块持仓摘要：张数、开仓、标记、强平、止盈止损、已盈亏。
    * 数字全部由 pnlOf 现算 —— 和持仓卡、和交易所是同一个口径，多空两边也一样。
    */
-  const positionViews = positions.map((p) => ({
-    p,
-    // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
-    // 看着就是个自相矛盾的数字。停更时整块退回快照自己的价。
-    live: pnlOf(p, stale ? 0 : markPrice, multiplier),
-    // 这一边挂着的止损止盈。和图上那两条虚线是同一份数据，读数不会两边不一样
-    prot: bracketOf(priceOrders, p.contract, p.direction),
-  }));
+  const positionViews = positions.map((p) => {
+    const liqPrice = positionLiquidationPrice(p, account, stale ? 0 : markPrice);
+    return {
+      p,
+      // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
+      // 看着就是个自相矛盾的数字。停更时整块退回快照自己的价。
+      live: pnlOf(p, stale ? 0 : markPrice, multiplier),
+      liqPrice,
+      estimatedLiq: !(p.liqPrice > 0) && liqPrice > 0,
+      // 这一边挂着的止损止盈。和图上那两条虚线是同一份数据，读数不会两边不一样
+      prot: bracketOf(priceOrders, p.contract, p.direction),
+    };
+  });
 
   // 仓没了就把「确认平掉」收掉，别让人对着已经不在的数字点确认
   useEffect(() => {
@@ -1466,7 +1481,7 @@ export default function ChartPane({
         )}
         {positionViews.length > 0 && (
           <div className={'chart-pos' + (stale ? ' stale' : '')}>
-            {positionViews.map(({ p, live, prot }) => {
+            {positionViews.map(({ p, live, liqPrice, estimatedLiq, prot }) => {
               const isLong = p.direction === 'long';
               const asking = closing === p.direction;
               return (
@@ -1480,10 +1495,15 @@ export default function ChartPane({
                       {live.pct !== null && <span className="dim"> ({fmtPct(live.pct, 2)})</span>}
                     </span>
                   </div>
+                  {liqPrice > 0 && (
+                    <div className="cp-liq-mobile warn">
+                      强平 {estimatedLiq ? '≈ ' : ''}{fmtPrice(liqPrice, priceRound)}
+                    </div>
+                  )}
                   <div className="cp-mid">
-                    <span>开仓 {fmtPrice(p.entryPrice, priceRound)}</span>
-                    <span>标记 {fmtPrice(live.price, priceRound)}</span>
-                    {p.liqPrice > 0 && <span className="warn">强平 {fmtPrice(p.liqPrice, priceRound)}</span>}
+                    <span className="cp-entry">开仓 {fmtPrice(p.entryPrice, priceRound)}</span>
+                    <span className="cp-mark">标记 {fmtPrice(live.price, priceRound)}</span>
+                    {liqPrice > 0 && <span className="warn">强平 {estimatedLiq ? '≈ ' : ''}{fmtPrice(liqPrice, priceRound)}</span>}
                     {/* 止损止盈：没设就直说「未设」，别让一行空白看起来像没读到 */}
                     <span className={prot.stop ? 'down' : 'dim'}>
                       止损 {prot.stop ? fmtPrice(prot.stop.triggerPrice, priceRound) : '未设'}

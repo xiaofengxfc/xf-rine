@@ -114,7 +114,7 @@ const CHART: Record<Theme, ChartColors> = {
   dark: {
     background: '#0c0e12',
     text: '#98a2b3',
-    grid: 'rgba(30,35,44,0.55)',
+    grid: 'rgba(30,35,44,0.32)',
     crosshair: 'rgba(152,162,179,0.4)',
     crosshairLabel: '#1e232d',
     border: '#1e232c',
@@ -127,7 +127,7 @@ const CHART: Record<Theme, ChartColors> = {
   light: {
     background: '#ffffff',
     text: '#4d5870',
-    grid: 'rgba(223,228,236,0.9)',
+    grid: 'rgba(223,228,236,0.58)',
     crosshair: 'rgba(77,88,112,0.45)',
     crosshairLabel: '#dfe4ec',
     border: '#dfe4ec',

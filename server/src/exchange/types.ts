@@ -66,6 +66,8 @@ export interface XPosition {
   /** single / dual_long / dual_short */
   mode: string;
   leverage: string;
+  /** Margin mode reported by exchanges that expose it (crossed / isolated). */
+  margin_mode?: string;
   entry_price: string;
   mark_price: string;
   liq_price: string;

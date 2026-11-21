@@ -223,6 +223,34 @@ class SidecarServer(ThreadingHTTPServer):
         self.token = token
 
 
+_embedded_server: SidecarServer | None = None
+_embedded_lock = threading.Lock()
+
+
+def start_embedded(token: str, port: int = 0) -> int:
+    """Start the loopback service inside an embedded Python runtime."""
+    global _embedded_server
+    token = str(token or "").strip()
+    if len(token) < 16:
+        raise ValueError("访问口令长度不足")
+
+    with _embedded_lock:
+        if _embedded_server is not None:
+            if _embedded_server.token != token:
+                raise RuntimeError("关键位引擎已使用另一访问口令启动")
+            return int(_embedded_server.server_address[1])
+
+        server = SidecarServer(("127.0.0.1", int(port)), Handler, token=token)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+        thread.start()
+        _embedded_server = server
+        state = pipeline.health()
+        print("  引擎      v3fusion · python " + sys.version.split()[0], flush=True)
+        print("  概率模型  " + ("已加载" if state["prob_ready"] else "缺失（界面不显示概率）"), flush=True)
+        print("  校准表    " + ("已加载" if state["calibrated"] else "缺失（不显示分位档）"), flush=True)
+        return int(server.server_address[1])
+
+
 def _watch_parent(server: SidecarServer) -> None:
     """
     父进程（Node）退出后跟着退。

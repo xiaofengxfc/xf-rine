@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react';
 import {
   jsend,
-  type CanceledTrades, type CloseResult, type OpenOrder, type Position, type PriceOrder,
+  type Account, type CanceledTrades, type CloseResult, type OpenOrder, type Position, type PriceOrder,
 } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtPct, fmtUsd, fmtTime } from '../lib/format.ts';
+import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { multiplierOf, pnlFromCost, pnlOf } from '../lib/position.ts';
 import {
   bracketOf as findBracket, dirLabel, protectionState, triggerKind, type Dir,
 } from '../lib/protective.ts';
 
 interface Props {
+  account?: Account | null;
   positions: Position[];
   orders: OpenOrder[];
   priceOrders: PriceOrder[];
@@ -46,7 +48,7 @@ function cleanupText(c: CanceledTrades | undefined): string {
 }
 
 export default function PositionsCard({
-  positions, orders, priceOrders, priceRound, rounds, marks, stale,
+  account, positions, orders, priceOrders, priceRound, rounds, marks, stale,
   armed, token, onToast, onRefresh,
 }: Props) {
   /**
@@ -358,6 +360,11 @@ export default function PositionsCard({
               const mark = stale ? p.markPrice : marks?.get(p.contract) ?? p.markPrice;
               const pnl = pnlOf(p, mark);
               const pnlCls = pnl.pnl >= 0 ? 'up' : 'down';
+              const exchangeLiqPrice = p.liqPrice > 0 ? p.liqPrice : 0;
+              const liqPrice = exchangeLiqPrice || positionLiquidationPrice(p, account, mark);
+              const marginLabel = p.marginMode === 'cross' || p.leverage <= 0
+                ? '全仓'
+                : `${p.leverage}x 逐仓`;
               const cur = bracketOf(p.contract, p.direction);
               const prot = protectionState(cur);
               const round = roundOf(p.contract);
@@ -365,7 +372,7 @@ export default function PositionsCard({
               return (
                 <div key={k} className={'pos ' + (isLong ? 'long' : 'short')}>
                   <div className="pos-top">
-                    <span className="nm">{p.contract.replace('_USDT', '')} <span className="dim" style={{ fontSize: 10 }}>{isLong ? '多' : '空'} · {p.leverage > 0 ? `${p.leverage}x 逐仓` : '全仓'}</span></span>
+                    <span className="nm">{p.contract.replace('_USDT', '')} <span className="dim" style={{ fontSize: 10 }}>{isLong ? '多' : '空'} · {marginLabel}</span></span>
                     <span className={'num ' + pnlCls}>
                       {fmtMoney(pnl.pnl)}
                       {pnl.pct !== null && <span className="dim"> ({fmtPct(pnl.pct, 2)})</span>}
@@ -375,7 +382,7 @@ export default function PositionsCard({
                     <div><span>张数</span><span>{Math.abs(p.size)}</span></div>
                     <div><span>开仓价</span><span>{fmtPrice(p.entryPrice, round)}</span></div>
                     <div><span>标记价</span><span>{fmtPrice(mark, round)}</span></div>
-                    <div><span>强平价</span><span>{p.liqPrice > 0 ? fmtPrice(p.liqPrice, round) : '—'}</span></div>
+                    <div><span>强平价</span><span>{liqPrice > 0 ? `${exchangeLiqPrice > 0 ? '' : '≈ '}${fmtPrice(liqPrice, round)}` : '—'}</span></div>
                     <div><span>价值</span><span>{fmtUsd(p.value, 0)}</span></div>
                     <div><span>持仓模式</span><span>{p.mode === 'single' ? '单向' : p.mode === 'dual_long' ? '双向多' : p.mode === 'dual_short' ? '双向空' : p.mode}</span></div>
                   </div>
