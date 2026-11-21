@@ -1,6 +1,7 @@
 /** Offline checks for Bitget UTA response mappings and order direction. */
 import {
   bitgetAccountSnapshot,
+  bitgetMarginMode,
   bitgetOrderSide,
   bitgetUtaOrderSide,
   mapBitgetPosition,
@@ -10,6 +11,8 @@ import {
 } from '../src/bitget/adapter.js';
 
 const checks: [string, unknown, unknown][] = [
+  ['map cross margin mode to Bitget value', bitgetMarginMode(true), 'crossed'],
+  ['map isolated margin mode to Bitget value', bitgetMarginMode(false), 'isolated'],
   ['hedge open long', bitgetOrderSide('hedge_mode', 'long', false), 'buy'],
   ['hedge close long keeps position side', bitgetOrderSide('hedge_mode', 'long', true), 'buy'],
   ['hedge open short', bitgetOrderSide('hedge_mode', 'short', false), 'sell'],

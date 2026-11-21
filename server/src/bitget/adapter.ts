@@ -65,6 +65,10 @@ export function symbolOf(name: string): string {
   return String(name ?? '').toUpperCase().replace(/_/g, '');
 }
 
+export function bitgetMarginMode(cross: boolean): 'crossed' | 'isolated' {
+  return cross ? 'crossed' : 'isolated';
+}
+
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -810,12 +814,12 @@ export class BitgetExchange implements Exchange {
   }> {
     this.requireKeys();
     const sym = symbolOf(name);
-    const marginMode = opts.cross ? 'crossed' : 'isolated';
+    const marginMode = bitgetMarginMode(opts.cross);
     const base: Record<string, unknown> = {
       category: PRODUCT,
       symbol: sym,
       leverage: String(opts.lev),
-      marginMode: opts.cross ? 'cross' : 'isolated',
+      marginMode,
     };
     const posMode = await this.currentPosMode();
     if (!opts.cross) {
