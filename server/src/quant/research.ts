@@ -15,7 +15,7 @@
 
 import type { Candle, Condition } from './backtest.js';
 import { conditionHolds, IndicatorCache } from './backtest.js';
-import { searchParametersWithProgress, type Candidate, type SearchOptions } from './search.js';
+import { evaluateBlindCandidate, searchParametersWithProgress, type Candidate, type SearchOptions } from './search.js';
 import { judge, DEFAULT_CRITERIA, type Criteria, type Verdict } from './criteria.js';
 import { proposeHypothesis, toSpec, validateSemantics, type Hypothesis, type RoundSummary } from './ai.js';
 
@@ -30,6 +30,7 @@ export interface RunOpts {
     slippagePct: number;
     capital: number;
     riskPerTrade: number;
+    maxMarginPct?: number;
     leverage: number;
     fundingRatePer8h: number;
   };
@@ -61,6 +62,13 @@ export interface ResearchReport {
   rounds: RoundSummary[];
   /** 找到的合格方案。null 表示所有轮次都没找出达标的 */
   winner: { hypothesis: Hypothesis; candidate: Candidate; verdict: Verdict } | null;
+  /** 仅在所有假设轮次结束后运行一次的最终盲测，包括未通过的结果。 */
+  finalEvaluation: {
+    hypothesis: Hypothesis;
+    candidate: Candidate;
+    validationVerdict: Verdict;
+    verdict: Verdict;
+  } | null;
   /** 结束原因，直接展示给用户 */
   stopReason: string;
   criteria: Criteria;
@@ -77,6 +85,11 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
   const rounds: RoundSummary[] = [];
   const notes: string[] = [];
   let winner: ResearchReport['winner'] = null;
+  let validationSelection: {
+    hypothesis: Hypothesis;
+    candidate: Candidate;
+    verdict: Verdict;
+  } | null = null;
   let stopReason = '跑完 ' + maxRounds + ' 轮，没有找出达标方案';
 
   for (let i = 1; i <= maxRounds; i++) {
@@ -145,7 +158,7 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
         spec,
         opts.candles,
         opts.market,
-        { ...opts.search, minTrades: criteria.minTrades },
+        { ...opts.search, minTrades: criteria.minTrades, evaluateBlind: false },
         ({ completed, total }) => {
           const stride = Math.max(1, Math.floor(total / 100));
           if (completed === 1 || completed === total || completed % stride === 0) {
@@ -164,30 +177,42 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
       opts.onStage?.('search', '第 ' + i + ' 轮：这组条件一个候选都没跑出来，换思路');
     }
 
-    // ---- 3. 判定 ----
-    // 只看样本量够的：样本不足的那份排第一也是噪音，拿它去判定等于自己骗自己
+    // ---- 3. 验证段筛选 ----
+    // 每轮只使用训练和验证数据。盲测结果要等所有假设迭代结束后才计算。
     const eligible = candidates.filter((c) => !c.insufficientSample);
     const best = eligible[0] ?? candidates[0] ?? null;
     summary.best = best;
     if (best && eligible.length > 0) {
+      const stats = best.validateResult.stats;
       summary.verdict = judge({
-        blindExpectancyPct: best.blindExpectancyPct,
-        blindTrades: best.blindTrades,
-        blindMaxDrawdownPct: best.blindMaxDrawdownPct,
-        blindPayoff: best.blindPayoff,
-        blindWinRate: best.blindWinRate,
-        decay: best.decay,
-        costExpectancy: best.costExpectancy,
+        blindExpectancyPct: stats.expectancyPct,
+        blindTrades: stats.trades,
+        blindMaxDrawdownPct: stats.maxDrawdownPct,
+        blindPayoff: stats.payoff,
+        blindWinRate: stats.winRate,
+        decay: best.validateDecay,
+        costExpectancy: best.validateCostExpectancy,
       }, criteria);
+      if (!validationSelection || best.score > validationSelection.candidate.score) {
+        validationSelection = {
+          hypothesis: summary.hypothesis,
+          candidate: best,
+          verdict: summary.verdict,
+        };
+      }
     }
 
     rounds.push(summary);
     opts.onRound?.(summary);
 
-    // ---- 4. 达标就停 ----
+    // ---- 4. 验证段通过后停止假设搜索 ----
     if (summary.verdict?.passed && summary.best) {
-      winner = { hypothesis: summary.hypothesis, candidate: summary.best, verdict: summary.verdict };
-      stopReason = '第 ' + i + ' 轮找到达标方案';
+      validationSelection = {
+        hypothesis: summary.hypothesis,
+        candidate: summary.best,
+        verdict: summary.verdict,
+      };
+      stopReason = '第 ' + i + ' 轮通过验证段筛选，开始最终盲测';
       break;
     }
     if (opts.isCancelled?.()) {
@@ -196,6 +221,63 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
     }
     if (i === maxRounds) {
       stopReason = maxRounds + ' 轮都没达标';
+    }
+  }
+
+  let finalEvaluation: ResearchReport['finalEvaluation'] = null;
+  if (validationSelection && !opts.isCancelled?.()) {
+    opts.onStage?.('blind', '对验证段选定方案运行一次最终盲测');
+    const spec = toSpec(validationSelection.hypothesis, opts.contract + ' ' + opts.interval + ' final');
+    const candidate = evaluateBlindCandidate(
+      spec,
+      opts.candles,
+      opts.market,
+      validationSelection.candidate,
+      {
+        ...opts.search,
+        minTrades: criteria.minTrades,
+        costMultipliers: [criteria.costStressMultiple],
+      },
+    );
+
+    if (
+      candidate.blindExpectancyPct !== undefined
+      && candidate.blindTrades !== undefined
+      && candidate.blindMaxDrawdownPct !== undefined
+      && candidate.blindPayoff !== undefined
+      && candidate.blindWinRate !== undefined
+      && candidate.decay !== undefined
+      && candidate.costExpectancy !== undefined
+    ) {
+      const verdict = judge({
+        blindExpectancyPct: candidate.blindExpectancyPct,
+        blindTrades: candidate.blindTrades,
+        blindMaxDrawdownPct: candidate.blindMaxDrawdownPct,
+        blindPayoff: candidate.blindPayoff,
+        blindWinRate: candidate.blindWinRate,
+        decay: candidate.decay,
+        costExpectancy: candidate.costExpectancy,
+      }, criteria);
+      finalEvaluation = {
+        hypothesis: validationSelection.hypothesis,
+        candidate,
+        validationVerdict: validationSelection.verdict,
+        verdict,
+      };
+
+      if (verdict.passed) {
+        if (validationSelection.verdict.passed) {
+          winner = { hypothesis: validationSelection.hypothesis, candidate, verdict };
+          stopReason = '验证段选定的候选通过最终盲测';
+        } else {
+          stopReason = '验证段未通过的最佳候选在最终盲测中表现较好，但不符合验证条件';
+        }
+      } else {
+        stopReason = '验证段选定的候选未通过最终盲测';
+      }
+    } else {
+      stopReason = '最终盲测没有可判定结果';
+      notes.push('最终盲测未返回完整指标，策略不保存为达标方案');
     }
   }
 
@@ -211,6 +293,7 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
     finishedAt: Date.now(),
     rounds,
     winner,
+    finalEvaluation,
     stopReason,
     criteria,
     notes,
@@ -220,9 +303,24 @@ export async function research(opts: RunOpts): Promise<ResearchReport> {
 /** 报告里给前端的一句话结论。放在这里，别让页面自己拼措辞 */
 export function verdictLine(r: ResearchReport): string {
   if (r.winner) {
+    const expectancy = r.winner.candidate.blindExpectancyPct;
+    const trades = r.winner.candidate.blindTrades;
+    if (expectancy === undefined || trades === undefined) {
+      return '候选通过判定，但最终盲测指标不完整';
+    }
     return '找到了：' + r.winner.hypothesis.thesis + '（样本外期望 '
-      + r.winner.candidate.blindExpectancyPct.toFixed(3) + '%/笔，'
-      + r.winner.candidate.blindTrades + ' 笔）';
+      + expectancy.toFixed(3) + '%/笔，'
+      + trades + ' 笔）';
+  }
+  if (r.finalEvaluation) {
+    const validationFailed = r.finalEvaluation.validationVerdict.failed.map((x) => x.label);
+    const blindFailed = r.finalEvaluation.verdict.failed.map((x) => x.label);
+    return '最佳验证候选' + (validationFailed.length
+      ? '未通过验证筛选（' + validationFailed.join('、') + '）'
+      : '通过验证筛选')
+      + '；最终盲测' + (blindFailed.length
+        ? '未通过（' + blindFailed.join('、') + '）'
+        : '通过');
   }
   return '没有找到达标方案：' + r.stopReason
     + '。这本身是结论 —— 这些参数范围和规则在这段数据上不值得做。';

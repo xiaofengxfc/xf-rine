@@ -89,6 +89,9 @@ export interface RunnerDeps {
   binding(strategyId: string): {
     contract: string;
     interval: string;
+    /** 当前允许实盘执行的回测合约和周期 */
+    testedContract: string;
+    testedInterval: string;
     passed: boolean | null;
     failed: string[];
     enoughSample: boolean;
@@ -282,6 +285,8 @@ export class AiRunner {
   async tick(force = false): Promise<DecisionRecord | null> {
     if (this.busy) return null;
     this.busy = true;
+    this.skip = '';
+    this.lastError = '';
     this.lastTickAt = Date.now();
     const t0 = Date.now();
     try {
@@ -343,7 +348,13 @@ export class AiRunner {
         return null;
       }
 
-      const positions = await this.deps.openPositions().catch(() => []);
+      let positions: Awaited<ReturnType<RunnerDeps['openPositions']>>;
+      try {
+        positions = await this.deps.openPositions();
+      } catch (error) {
+        this.skip = '持仓读取失败，本轮已停止：' + (error as Error).message;
+        throw error;
+      }
       this.positionsNow = positions.length;
       if (positions.length >= withDay.maxPositions) {
         this.skip = '已经有 ' + positions.length + ' 个持仓，到上限了';
@@ -351,16 +362,28 @@ export class AiRunner {
       }
 
       /**
-       * 合约从配置里的合约池取，池子是空的才退回策略上记的那个。
-       *
-       * 这里以前写死 bound.contract，导致 AI 交易页上的「合约」那一格完全没作用 ——
-       * 页面改了、存了、显示也变了，实际下单永远还是策略存的时候那个币。
-       * 现在池子里挑一个还没有持仓的；都满了就退到第一个。
+       * 按各合约上次判断时间排序，优先处理最久没检查的合约。
+       * 已有持仓的合约直接跳过，同一根已收盘 K 线也跳过并继续检查下一个合约，
+       * 避免池子里的第一个合约占住每一轮、让后面的合约长期得不到判断。
        */
       const pool = withDay.contracts.length > 0 ? withDay.contracts : [bound.contract];
-      const contract = pool.find((c) => !positions.some((p) => p.contract === c)) ?? pool[0]!;
-      if (positions.some((p) => p.contract === contract)) {
-        this.skip = contract + ' 上已经有仓了';
+      const testedContract = bound.testedContract.trim().toUpperCase();
+      const testedInterval = bound.testedInterval.trim();
+      if (!testedContract || testedInterval !== bound.interval) {
+        this.skip = '策略没有与当前周期匹配的回测记录，不能下单';
+        return null;
+      }
+      const testedPool = pool.filter((contract) => contract.toUpperCase() === testedContract);
+      if (testedPool.length === 0) {
+        this.skip = '当前合约池没有回测验证过的合约 ' + testedContract + '，不能下单';
+        return null;
+      }
+      const heldContracts = new Set(positions.map((p) => p.contract.toUpperCase()));
+      const candidates = testedPool
+        .filter((contract) => !heldContracts.has(contract.toUpperCase()))
+        .sort((a, b) => (this.lastDecideAt.get(a) ?? 0) - (this.lastDecideAt.get(b) ?? 0));
+      if (candidates.length === 0) {
+        this.skip = '合约池里的合约都已有持仓';
         return null;
       }
 
@@ -371,10 +394,28 @@ export class AiRunner {
        * 后者在服务重启、机器休眠之后会算错，前者永远和行情对齐。
        * 「立即决策一次」跳过这个判断，方便刚开开关时先看一轮。
        */
-      const recent = await this.deps.recentCandles(contract, bound.interval, 2).catch(() => [] as { t: number }[]);
-      const lastBar = recent[recent.length - 1]?.t ?? 0;
-      if (!force && lastBar > 0 && this.lastBarAt.get(contract) === lastBar) {
-        this.skip = '这一根 K 线已经判断过了，等下一根收盘';
+      let contract = '';
+      let lastBar = 0;
+      for (const candidate of candidates) {
+        let recent: { t: number }[];
+        try {
+          recent = await this.deps.recentCandles(candidate, bound.interval, 2);
+        } catch (error) {
+          this.skip = candidate + ' 的 K 线读取失败，本轮已停止：' + (error as Error).message;
+          throw error;
+        }
+        const candidateLastBar = recent[recent.length - 1]?.t ?? 0;
+        if (!(candidateLastBar > 0)) {
+          this.skip = candidate + ' 没有可用的已收盘 K 线，本轮已停止';
+          throw new Error(this.skip);
+        }
+        if (!force && this.lastBarAt.get(candidate) === candidateLastBar) continue;
+        contract = candidate;
+        lastBar = candidateLastBar;
+        break;
+      }
+      if (!contract) {
+        this.skip = '合约池里的合约都已判断过当前这根 K 线，等下一根收盘';
         return null;
       }
       this.skip = '';
@@ -388,6 +429,7 @@ export class AiRunner {
       return rec;
     } catch (e) {
       this.lastError = (e as Error).message;
+      if (!this.skip) this.skip = '本轮失败：' + this.lastError;
       this.counts.errors += 1;
       console.warn('[ai] 这一轮没跑成：', this.lastError);
       return null;

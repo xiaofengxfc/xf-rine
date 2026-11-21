@@ -104,6 +104,8 @@ export interface BacktestOpts {
    * 从"没仓"到"有方向" → 按下一根开盘开仓。
    */
   signalAt?: (i: number) => 'long' | 'short' | 'flat';
+  /** 首个允许开仓的信号下标。此前 K 线只用于指标预热。 */
+  tradeStartIndex?: number;
   /** 每个合约的乘数：1 张 = multiplier 个币 */
   multiplier: number;
   /** taker 费率，比如 0.0005 */
@@ -112,9 +114,17 @@ export interface BacktestOpts {
   slippagePct: number;
   /** 初始保证金（USDT）。按张数下注，所以要换算成本金 */
   capital: number;
-  /** 每笔用多少保证金比例，0~1 */
+  /** 止损触发时承担的权益比例，例如 0.005 表示 0.5%。 */
   riskPerTrade: number;
+  /** 保证金最多占当前权益的比例，默认 40%，与实盘风控一致。 */
+  maxMarginPct?: number;
+  /** 可选的交易所张数步进及上下限。 */
+  sizeStep?: number;
+  sizeMin?: number;
+  sizeMax?: number;
   leverage: number;
+  /** 可选的合约杠杆上限。 */
+  leverageMax?: number;
   /** 资金费率（8 小时一次），按 K 线时间线性摊到每根 */
   fundingRatePer8h: number;
 }
@@ -230,6 +240,7 @@ export class IndicatorCache {
 
 // 具体实现从 indicators.ts 注入，避免这个文件同时管"怎么回测"和"指标怎么算"
 import { buildIndicator as buildIndicatorImpl } from './indicators.js';
+import { ceilSizeToStep, floorSizeToStep } from '../exchange/size.js';
 function buildIndicator(name: string, candles: Candle[], params: Params): IndicatorSeries {
   return buildIndicatorImpl(name, candles, params);
 }
@@ -254,13 +265,13 @@ export function conditionHolds(c: Condition, i: number, cache: IndicatorCache, p
     case 'crossUp': {
       // 上一根还不满足、这一根满足，才算"上穿"。少了"上一根不满足"这一半，
       // 一路在上面的指标会每根都报一次穿越
-      const lPrev = cache.get(c.left, params).at(i - 1);
-      const rPrev = c.rightParam ? right : cache.get(c.right, params).at(i - 1);
+      const lPrev = cache.get(c.left, params).at(i - ls - 1);
+      const rPrev = c.rightParam ? right : cache.get(c.right, params).at(i - rs - 1);
       return Number.isFinite(lPrev) && Number.isFinite(rPrev) && lPrev <= rPrev && left > right;
     }
     case 'crossDown': {
-      const lPrev = cache.get(c.left, params).at(i - 1);
-      const rPrev = c.rightParam ? right : cache.get(c.right, params).at(i - 1);
+      const lPrev = cache.get(c.left, params).at(i - ls - 1);
+      const rPrev = c.rightParam ? right : cache.get(c.right, params).at(i - rs - 1);
       return Number.isFinite(lPrev) && Number.isFinite(rPrev) && lPrev >= rPrev && left < right;
     }
     default:
@@ -336,6 +347,10 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
   };
 
   let balance = opts.capital;
+  const tradeStartIndex = Math.max(warmup, Math.ceil(opts.tradeStartIndex ?? 0));
+  const maxMarginPct = Number.isFinite(opts.maxMarginPct)
+    ? Math.max(0, Math.min(1, opts.maxMarginPct!))
+    : 0.4;
   // 每根的资金费率：8 小时一次，按这根 K 线覆盖的秒数摊
   const barSeconds = candles.length > 1 ? candles[1]!.t - candles[0]!.t : 0;
   const fundingPerBar = barSeconds > 0 ? opts.fundingRatePer8h * (barSeconds / (8 * 3600)) : 0;
@@ -353,29 +368,41 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
    * dir 不传就按 spec.side —— 规则策略永远只有一个方向；
    * 提示词策略每一轮可能换边，由 signalAt 决定。
    */
-  const open = (i: number, price: number, dir: 'long' | 'short' = spec.side): boolean => {
+  const open = (signalIndex: number, entryIndex: number, price: number, dir: 'long' | 'short' = spec.side): boolean => {
     if (holding) return false;
-    const marginPerUnit = (price * opts.multiplier) / Math.max(1, opts.leverage);
-    if (!(marginPerUnit > 0)) return false;
-    const budget = balance * opts.riskPerTrade;
-    const size = Math.floor(budget / marginPerUnit);
-    // 至少要能开 1 张，开不了就这轮不做 —— 不是"向下取整到 0 张然后假装开了"
-    if (size < 1) return false;
-
     const entryPrice = dir === 'long' ? price * (1 + slip) : price * (1 - slip);
-    const atr = cache.get({ name: 'atr', periodKey: 'atrPeriod' }, spec.params).at(i);
+    // 信号在前一根收盘后确定。下一根开盘成交时只能使用信号 K 线的 ATR，
+    // 不能用入场 K 线之后才知道的高低收价设定止损止盈。
+    const atr = cache.get({ name: 'atr', periodKey: 'atrPeriod' }, spec.params).at(signalIndex);
     const stopDist = stopDistance(spec, entryPrice, atr);
     const targetDist = targetDistance(spec, entryPrice, atr, stopDist);
     if (!(stopDist > 0) || !(targetDist > 0)) return false;
 
+    const riskPerContract = stopDist * opts.multiplier;
+    const leverageCap = opts.leverageMax && opts.leverageMax > 0 ? opts.leverageMax : opts.leverage;
+    const leverage = Math.max(1, Math.min(opts.leverage, leverageCap));
+    const marginPerContract = (price * opts.multiplier) / leverage;
+    if (!(riskPerContract > 0) || !(marginPerContract > 0)) return false;
+    const riskBudget = balance * opts.riskPerTrade;
+    const marginBudget = balance * maxMarginPct;
+    const sizeStep = opts.sizeStep && opts.sizeStep > 0 ? opts.sizeStep : 1;
+    const sizeByRisk = floorSizeToStep(riskBudget / riskPerContract, sizeStep);
+    const sizeByMargin = floorSizeToStep(marginBudget / marginPerContract, sizeStep);
+    let size = Math.min(sizeByRisk, sizeByMargin);
+    if (opts.sizeMax && opts.sizeMax > 0) {
+      size = Math.min(size, floorSizeToStep(opts.sizeMax, sizeStep));
+    }
+    const minSize = ceilSizeToStep(opts.sizeMin && opts.sizeMin > 0 ? opts.sizeMin : sizeStep, sizeStep);
+    if (size < minSize) return false;
+
     pos = {
       side: dir,
-      entryIndex: i,
+      entryIndex,
       entryPrice,
       size,
       stop: dir === 'long' ? entryPrice - stopDist : entryPrice + stopDist,
       target: dir === 'long' ? entryPrice + targetDist : entryPrice - targetDist,
-      margin: size * marginPerUnit,
+      margin: size * marginPerContract,
       fundingPaid: 0,
     };
     holding = true;
@@ -449,6 +476,13 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
       }
     }
 
+    // 先记录刚收盘 K 线的权益，再处理下一根开盘成交的信号单，
+    // 避免把新仓错记到信号 K 线的收盘权益上。
+    const unrealised = holding
+      ? pnl(pos.side, pos.entryPrice, bar.c, pos.size) - pos.fundingPaid
+      : 0;
+    equity.push({ t: bar.t, v: balance + unrealised });
+
     // ---- 收盘后判断信号，成交放到下一根开盘 ----
     if (i < candles.length - 1) {
       const next = candles[i + 1]!;
@@ -464,7 +498,7 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
         if (holding) {
           if (want === 'flat' || want !== pos.side) close(i + 1, next.o, 'signal');
         }
-        if (!holding && want !== 'flat') open(i + 1, next.o, want);
+        if (!holding && want !== 'flat' && i >= tradeStartIndex) open(i, i + 1, next.o, want);
       } else {
         if (holding) {
           // 反向信号平仓：只在明确的穿越信号上平，不在每个不满足的根上平 ——
@@ -474,23 +508,22 @@ export function backtest(spec: StrategySpec, candles: Candle[], opts: BacktestOp
             : spec.entry.some((c) => c.op === 'crossUp' && conditionHolds(c, i, cache, spec.params));
           if (crossed) close(i + 1, next.o, 'signal');
         }
-        if (!holding && i >= warmup) {
+        if (!holding && i >= tradeStartIndex) {
           const ok = spec.entry.every((c) => conditionHolds(c, i, cache, spec.params));
-          if (ok) open(i + 1, next.o);
+          if (ok) open(i, i + 1, next.o);
         }
       }
     }
 
-    // ---- 记账 ----
-    const unrealised = holding
-      ? pnl(pos.side, pos.entryPrice, bar.c, pos.size) - pos.fundingPaid
-      : 0;
-
-    equity.push({ t: bar.t, v: balance + unrealised });
   }
 
   // 最后一根还没平：按收盘平掉，让这笔进统计。不平的话最后一笔永远悬着，统计少一笔
-  if (holding) close(candles.length - 1, candles[candles.length - 1]!.c, 'end');
+  if (holding) {
+    close(candles.length - 1, candles[candles.length - 1]!.c, 'end');
+    // 最后一根权益先于退出滑点和手续费记账。这里用平仓后的余额更新，
+    // 让收益、回撤与已平仓交易的净值一致。
+    equity[equity.length - 1]!.v = balance;
+  }
 
   return { trades, equity, stats: statsOf(trades, equity, opts.capital) };
 }

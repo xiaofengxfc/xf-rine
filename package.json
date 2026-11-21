@@ -19,6 +19,7 @@
     "check:pick": "pnpm -F server exec tsx scripts/check-pick.ts",
     "check:ai": "pnpm -F server exec tsx scripts/check-ai.ts",
     "check:quant": "pnpm -F server exec tsx scripts/check-quant.ts",
+    "check:prompt-baseline": "pnpm -F server exec tsx scripts/check-prompt-baseline.ts",
     "research": "pnpm -F server exec tsx scripts/research.ts",
     "pack:sidecar": "node sidecar/tools/build-exe.mjs",
     "pack:win": "pnpm -F web build && node sidecar/tools/build-exe.mjs && pnpm --filter ./desktop dist",

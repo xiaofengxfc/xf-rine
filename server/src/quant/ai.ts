@@ -174,8 +174,9 @@ export function historyText(rounds: RoundSummary[]): string {
     ];
     if (r.best) {
       lines.push(
-        '  最好的一份：样本外期望 ' + r.best.blindExpectancyPct.toFixed(3) + '%/笔，'
-        + r.best.blindTrades + ' 笔，盈亏比 ' + r.best.blindPayoff + '，回撤 ' + r.best.blindMaxDrawdownPct.toFixed(1) + '%',
+        '  验证段最佳候选：期望 ' + r.best.validateExpectancyPct.toFixed(3) + '%/笔，'
+        + r.best.validateTrades + ' 笔，盈亏比 ' + r.best.validatePayoff
+        + '，回撤 ' + r.best.validateMaxDrawdownPct.toFixed(1) + '%',
       );
     } else {
       lines.push('  没有任何一组成交');
@@ -183,8 +184,8 @@ export function historyText(rounds: RoundSummary[]): string {
     if (r.verdict) {
       lines.push(
         r.verdict.passed
-          ? '  结论：达标'
-          : '  未通过：' + r.verdict.failed.map((f) => f.label + '（' + f.value + '，要求 ' + f.threshold + '）').join('；'),
+          ? '  验证筛选：通过'
+          : '  验证筛选未通过：' + r.verdict.failed.map((f) => f.label + '（' + f.value + '，要求 ' + f.threshold + '）').join('；'),
       );
     }
     return lines.join('\n');

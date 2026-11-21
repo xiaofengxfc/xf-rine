@@ -15,9 +15,9 @@ import { Router, type Request, type Response } from 'express';
 import { exchange } from '../exchange/index.js';
 import { config, exchangeLabel } from '../config.js';
 import { getSeries } from './data.js';
-import { backtest, type BacktestResult, type StrategySpec, type Candle } from './backtest.js';
-import { runPromptSignals, expandSignals, randomBaselineSignals } from './promptBacktest.js';
-import { searchParametersWithProgress } from './search.js';
+import { backtest, warmupOf, type BacktestResult, type BacktestOpts, type StrategySpec, type Candle } from './backtest.js';
+import { runPromptSignals, expandSignals, randomBaselineSignals, backtestPromptSignals } from './promptBacktest.js';
+import { evaluateBlindCandidate, searchParametersWithProgress, splitCandles, type Candidate } from './search.js';
 import { judge, DEFAULT_CRITERIA, type Verdict } from './criteria.js';
 import { listStrategies, saveStrategy, deleteStrategy, recordRun, getStrategy, renameStrategy } from './library.js';
 import { research, verdictLine, type ResearchReport } from './research.js';
@@ -33,6 +33,10 @@ const MAX_BARS = 9000;
 interface ContractMeta {
   multiplier: number;
   takerFee: number;
+  sizeMin?: number;
+  sizeStep?: number;
+  sizeMax?: number;
+  leverageMax?: number;
 }
 
 /**
@@ -56,12 +60,35 @@ export async function contractProblem(contract: string): Promise<string | null> 
   }
 }
 
+/** Add the prompt strategy's same-data random-baseline requirement to its verdict. */
+export function applyPromptBaseline(
+  verdict: Verdict,
+  strategyReturnPct: number,
+  baselineReturnPct: number,
+): Verdict {
+  const baselineCheck = {
+    key: 'baseline',
+    label: '随机基线',
+    pass: strategyReturnPct > baselineReturnPct,
+    value: strategyReturnPct.toFixed(2) + '%',
+    threshold: '> ' + baselineReturnPct.toFixed(2) + '%',
+    why: '提示词策略必须超过同一段行情上的随机信号收益',
+  };
+  const checks = [...verdict.checks, baselineCheck];
+  const failed = checks.filter((check) => !check.pass);
+  return { passed: failed.length === 0, failed, checks };
+}
+
 /** 合约乘数和费率：回测要按它换算张数，不能拍脑袋 */
 async function contractMeta(contract: string): Promise<ContractMeta> {
   const c = await exchange().publicContract(contract);
   return {
     multiplier: Number(c.quanto_multiplier) || 0.0001,
     takerFee: Number(c.taker_fee_rate) || 0.0005,
+    sizeMin: Number(c.order_size_min) || 1,
+    sizeStep: Number(c.size_step) || 1,
+    sizeMax: Number(c.order_size_max) || 0,
+    leverageMax: Number(c.leverage_max) || 0,
   };
 }
 
@@ -75,9 +102,75 @@ function marketOf(meta: ContractMeta, body: Record<string, unknown>) {
     feeRate: meta.takerFee,
     slippagePct: n('slippagePct', 0.0002),
     capital: n('capital', 1000),
-    riskPerTrade: n('riskPerTrade', 0.005),
+    riskPerTrade: Math.max(0.0005, Math.min(0.05, n('riskPerTrade', 0.005))),
+    maxMarginPct: 0.4,
     leverage: n('leverage', 5),
+    sizeMin: meta.sizeMin ?? 1,
+    sizeStep: meta.sizeStep ?? 1,
+    sizeMax: meta.sizeMax ?? 0,
+    leverageMax: meta.leverageMax ?? 0,
     fundingRatePer8h: Number(body.fundingRatePer8h) || 0,
+  };
+}
+
+function hasBlindEvaluation(candidate: Candidate | null | undefined): candidate is Candidate & {
+  blindExpectancyPct: number;
+  blindTrades: number;
+  blindPayoff: number;
+  blindWinRate: number;
+  blindMaxDrawdownPct: number;
+  decay: number;
+  costExpectancy: Record<string, number>;
+  blindResult: BacktestResult;
+} {
+  return Boolean(
+    candidate
+    && candidate.blindExpectancyPct !== undefined
+    && candidate.blindTrades !== undefined
+    && candidate.blindPayoff !== undefined
+    && candidate.blindWinRate !== undefined
+    && candidate.blindMaxDrawdownPct !== undefined
+    && candidate.decay !== undefined
+    && candidate.costExpectancy !== undefined
+    && candidate.blindResult,
+  );
+}
+
+function evaluateFixedRuleHoldout(spec: StrategySpec, candles: Candle[], opts: BacktestOpts): {
+  result: BacktestResult;
+  enoughSample: boolean;
+  verdict: Verdict | null;
+  evaluationBars: number;
+} {
+  const split = splitCandles(candles, warmupOf(spec));
+  const train = backtest(spec, split.train, opts);
+  const result = backtest(spec, split.blind, {
+    ...opts,
+    tradeStartIndex: split.blindTradeStartIndex,
+  });
+  const costMultiple = DEFAULT_CRITERIA.costStressMultiple;
+  const stressed = backtest(spec, split.blind, {
+    ...opts,
+    tradeStartIndex: split.blindTradeStartIndex,
+    feeRate: opts.feeRate * costMultiple,
+    slippagePct: opts.slippagePct * costMultiple,
+  });
+  const enoughSample = result.stats.trades >= DEFAULT_CRITERIA.minTrades;
+  const verdict = enoughSample ? judge({
+    blindExpectancyPct: result.stats.expectancyPct,
+    blindTrades: result.stats.trades,
+    blindMaxDrawdownPct: result.stats.maxDrawdownPct,
+    blindPayoff: result.stats.payoff,
+    blindWinRate: result.stats.winRate,
+    decay: train.stats.expectancyPct - result.stats.expectancyPct,
+    costExpectancy: { [String(costMultiple)]: stressed.stats.expectancyPct },
+  }) : null;
+
+  return {
+    result,
+    enoughSample,
+    verdict,
+    evaluationBars: Math.max(0, split.blind.length - split.blindTradeStartIndex),
   };
 }
 
@@ -236,46 +329,45 @@ export function mountQuant(router: Router, deps: {
     const { virtual } = await zoneVirtual(contract, interval, series.candles);
     const hasRanges = Object.keys(spec.ranges ?? {}).length > 0;
     let run: { result: BacktestResult; enoughSample: boolean; verdict: Verdict | null };
+    let selectedParams: Candidate['params'] | undefined;
 
     if (hasRanges) {
-      // 有范围时用搜索选出来的最优参数再跑一次整段，拿到完整的回测结果再记账
-      const candidates = await searchParametersWithProgress(spec, series.candles, { ...market, virtual }, { minTrades: DEFAULT_CRITERIA.minTrades });
+      // 搜索只使用训练和验证段，选定参数后才在盲测段做最终评估。
+      const candidates = await searchParametersWithProgress(spec, series.candles, { ...market, virtual }, {
+        minTrades: DEFAULT_CRITERIA.minTrades,
+        evaluateBlind: false,
+      });
       const eligible = candidates.filter((c) => !c.insufficientSample);
       const best = eligible[0] ?? candidates[0];
-      if (!best || !best.blindResult) {
+      if (!best) {
         res.status(400).json({ error: 'NO_TRADES', detail: '没有任何候选成交，这份策略在这段数据上跑不出结果' });
         return;
       }
+      const evaluated = evaluateBlindCandidate(spec, series.candles, { ...market, virtual }, best, {
+        minTrades: DEFAULT_CRITERIA.minTrades,
+        costMultipliers: [DEFAULT_CRITERIA.costStressMultiple],
+      });
+      if (!hasBlindEvaluation(evaluated)) {
+        res.status(400).json({ error: 'NO_TRADES', detail: '选定参数没有可判定的盲测结果' });
+        return;
+      }
+      selectedParams = evaluated.params;
+      const enoughSample = !evaluated.insufficientBlindSample;
       run = {
-        result: best.blindResult,
-        enoughSample: eligible.length > 0,
-        verdict: eligible.length > 0 ? judge({
-          blindExpectancyPct: best.blindExpectancyPct,
-          blindTrades: best.blindTrades,
-          blindMaxDrawdownPct: best.blindMaxDrawdownPct,
-          blindPayoff: best.blindPayoff,
-          blindWinRate: best.blindWinRate,
-          decay: best.decay,
-          costExpectancy: best.costExpectancy,
+        result: evaluated.blindResult,
+        enoughSample,
+        verdict: enoughSample ? judge({
+          blindExpectancyPct: evaluated.blindExpectancyPct,
+          blindTrades: evaluated.blindTrades,
+          blindMaxDrawdownPct: evaluated.blindMaxDrawdownPct,
+          blindPayoff: evaluated.blindPayoff,
+          blindWinRate: evaluated.blindWinRate,
+          decay: evaluated.decay,
+          costExpectancy: evaluated.costExpectancy,
         }) : null,
       };
     } else {
-      const r = backtest(spec, series.candles, { ...market, virtual });
-      run = {
-        result: r,
-        enoughSample: r.stats.trades >= DEFAULT_CRITERIA.minTrades,
-        verdict: r.stats.trades >= DEFAULT_CRITERIA.minTrades
-          ? judge({
-              blindExpectancyPct: r.stats.expectancyPct,
-              blindTrades: r.stats.trades,
-              blindMaxDrawdownPct: r.stats.maxDrawdownPct,
-              blindPayoff: r.stats.payoff,
-              blindWinRate: r.stats.winRate,
-              decay: 0,
-              costExpectancy: { '2': r.stats.expectancyPct },
-            })
-          : null,
-      };
+      run = evaluateFixedRuleHoldout(spec, series.candles, { ...market, virtual });
     }
 
     const saved = recordRun(String(req.params.id), run.result, {
@@ -284,7 +376,7 @@ export function mountQuant(router: Router, deps: {
       enoughSample: run.enoughSample,
       contract,
       interval,
-    });
+    }, selectedParams);
     if (!saved) {
       res.status(404).json({ error: 'NOT_FOUND', detail: '没有这条策略' });
       return;
@@ -383,15 +475,16 @@ export function mountQuant(router: Router, deps: {
           enoughSample: r.enoughSample,
           best: r.best ? {
             params: r.best.params,
-            blindExpectancyPct: r.best.blindExpectancyPct,
-            blindTrades: r.best.blindTrades,
-            blindPayoff: r.best.blindPayoff,
-            blindWinRate: r.best.blindWinRate,
-            blindMaxDrawdownPct: r.best.blindMaxDrawdownPct,
-            blindReturnPct: r.best.blindReturnPct,
-            costExpectancy: r.best.costExpectancy,
-            decay: r.best.decay,
+            validateExpectancyPct: r.best.validateExpectancyPct,
+            validateTrades: r.best.validateTrades,
+            validatePayoff: r.best.validatePayoff,
+            validateWinRate: r.best.validateWinRate,
+            validateMaxDrawdownPct: r.best.validateMaxDrawdownPct,
+            validateReturnPct: r.best.validateReturnPct,
+            validateDecay: r.best.validateDecay,
+            validateCostExpectancy: r.best.validateCostExpectancy,
           } : null,
+          verdictStage: 'validation',
           verdict: r.verdict,
         }),
       });
@@ -501,6 +594,7 @@ export function mountQuant(router: Router, deps: {
         });
         send({ type: 'backtest-result', result: {
           mode: 'prompt',
+          evaluationSegment: 'blind',
           bars: series.candles.length,
           days: Math.round((series.span.to - series.span.from) / 86400),
           gaps: series.gaps,
@@ -537,21 +631,31 @@ export function mountQuant(router: Router, deps: {
           method: body.method === 'random' ? 'random' : 'grid',
           maxTrials,
           minTrades: DEFAULT_CRITERIA.minTrades,
+          evaluateBlind: false,
         }, ({ completed, total }) => send({
           type: 'backtest-progress', stage: 'search', message: '参数搜索 ' + completed + '/' + total,
           done: completed, total,
         }));
         const eligible = candidates.filter((c) => !c.insufficientSample);
-        const best = eligible[0] ?? candidates[0] ?? null;
+        const validationBest = eligible[0] ?? candidates[0] ?? null;
+        const evaluatedBest = validationBest
+          ? evaluateBlindCandidate(spec, series.candles, { ...market, virtual }, validationBest, {
+              minTrades: DEFAULT_CRITERIA.minTrades,
+              costMultipliers: [DEFAULT_CRITERIA.costStressMultiple],
+            })
+          : null;
+        const best = hasBlindEvaluation(evaluatedBest) ? evaluatedBest : null;
+        const enoughBlindSample = Boolean(best && !best.insufficientBlindSample);
         send({ type: 'backtest-result', result: {
           mode: 'search',
+          evaluationSegment: 'blind',
           bars: series.candles.length,
           days: Math.round((series.span.to - series.span.from) / 86400),
           gaps: series.gaps,
           candidates: candidates.length,
           enoughSample: eligible.length,
           best,
-          verdict: best && eligible.length ? judge({
+          verdict: best && enoughBlindSample ? judge({
             blindExpectancyPct: best.blindExpectancyPct,
             blindTrades: best.blindTrades,
             blindMaxDrawdownPct: best.blindMaxDrawdownPct,
@@ -565,10 +669,12 @@ export function mountQuant(router: Router, deps: {
         return;
       }
 
-      send({ type: 'backtest-progress', stage: 'backtest', message: '运行策略并生成权益曲线' });
-      const result = backtest(spec, series.candles, { ...market, virtual });
+      send({ type: 'backtest-progress', stage: 'backtest', message: '运行最终留出段并生成权益曲线' });
+      const holdout = evaluateFixedRuleHoldout(spec, series.candles, { ...market, virtual });
+      const result = holdout.result;
       send({ type: 'backtest-result', result: {
         mode: 'single',
+        evaluationSegment: 'blind',
         bars: series.candles.length,
         days: Math.round((series.span.to - series.span.from) / 86400),
         gaps: series.gaps,
@@ -579,15 +685,7 @@ export function mountQuant(router: Router, deps: {
           entryPrice: t.entryPrice, exitPrice: t.exitPrice,
           net: Math.round(t.net * 100) / 100, reason: t.reason,
         })),
-        verdict: judge({
-          blindExpectancyPct: result.stats.expectancyPct,
-          blindTrades: result.stats.trades,
-          blindMaxDrawdownPct: result.stats.maxDrawdownPct,
-          blindPayoff: result.stats.payoff,
-          blindWinRate: result.stats.winRate,
-          decay: 0,
-          costExpectancy: { '2': 0 },
-        }),
+        verdict: holdout.verdict,
       }});
       res.end();
     } catch (e) {
@@ -653,6 +751,7 @@ export function mountQuant(router: Router, deps: {
       });
       res.json({
         mode: 'prompt',
+        evaluationSegment: 'blind',
         bars: series.candles.length,
         days: Math.round((series.span.to - series.span.from) / 86400),
         gaps: series.gaps,
@@ -692,18 +791,28 @@ export function mountQuant(router: Router, deps: {
         method: body.method === 'random' ? 'random' : 'grid',
         maxTrials: Math.min(400, Math.max(20, Number(body.maxTrials) || 200)),
         minTrades: DEFAULT_CRITERIA.minTrades,
+        evaluateBlind: false,
       });
       const eligible = candidates.filter((c) => !c.insufficientSample);
-      const best = eligible[0] ?? candidates[0] ?? null;
+      const validationBest = eligible[0] ?? candidates[0] ?? null;
+      const evaluatedBest = validationBest
+        ? evaluateBlindCandidate(spec, series.candles, { ...market, virtual }, validationBest, {
+            minTrades: DEFAULT_CRITERIA.minTrades,
+            costMultipliers: [DEFAULT_CRITERIA.costStressMultiple],
+          })
+        : null;
+      const best = hasBlindEvaluation(evaluatedBest) ? evaluatedBest : null;
+      const enoughBlindSample = Boolean(best && !best.insufficientBlindSample);
       res.json({
         mode: 'search',
+        evaluationSegment: 'blind',
         bars: series.candles.length,
         days: Math.round((series.span.to - series.span.from) / 86400),
         gaps: series.gaps,
         candidates: candidates.length,
         enoughSample: eligible.length,
         best,
-        verdict: best && eligible.length ? judge({
+        verdict: best && enoughBlindSample ? judge({
           blindExpectancyPct: best.blindExpectancyPct,
           blindTrades: best.blindTrades,
           blindMaxDrawdownPct: best.blindMaxDrawdownPct,
@@ -716,10 +825,12 @@ export function mountQuant(router: Router, deps: {
       return;
     }
 
-    // 没有范围：整段数据跑一次，权益曲线直接回去画图
-    const result = backtest(spec, series.candles, { ...market, virtual });
+    // 无参数搜索时也只用最终盲测段形成策略结论。
+    const holdout = evaluateFixedRuleHoldout(spec, series.candles, { ...market, virtual });
+    const result = holdout.result;
     res.json({
       mode: 'single',
+      evaluationSegment: 'blind',
       bars: series.candles.length,
       days: Math.round((series.span.to - series.span.from) / 86400),
       gaps: series.gaps,
@@ -734,15 +845,7 @@ export function mountQuant(router: Router, deps: {
         net: Math.round(t.net * 100) / 100,
         reason: t.reason,
       })),
-      verdict: judge({
-        blindExpectancyPct: result.stats.expectancyPct,
-        blindTrades: result.stats.trades,
-        blindMaxDrawdownPct: result.stats.maxDrawdownPct,
-        blindPayoff: result.stats.payoff,
-        blindWinRate: result.stats.winRate,
-        decay: 0,
-        costExpectancy: { '2': 0 },
-      }),
+      verdict: holdout.verdict,
     });
   }));
 }
@@ -851,27 +954,36 @@ async function runPromptBacktest(input: {
 
   const expanded = expandSignals(input.candles, asked.signals);
   const spec = promptSpecFor('long');
-  const result = backtest(spec, input.candles, { ...input.market, signalAt: (i) => expanded[i] ?? 'flat' });
-
-  // 随机基线：同样的抽样节奏、同样的离场规则，方向随机
+  // 对比模型与随机信号时，两者只看同一段最终留出样本。
   const baseSignals = randomBaselineSignals(input.candles, Math.max(input.lookback, 30));
-  const baseResult = backtest(spec, input.candles, { ...input.market, signalAt: (i) => baseSignals[i] ?? 'flat' });
+  const evaluated = backtestPromptSignals(
+    input.candles,
+    expanded,
+    baseSignals,
+    spec,
+    input.market,
+    warmupOf(spec),
+    DEFAULT_CRITERIA.costStressMultiple,
+  );
+  const { result, baseline: baseResult, stressed } = evaluated;
 
-  const enoughSample = result.stats.trades >= DEFAULT_CRITERIA.minTrades && asked.leaks === 0;
+  const enoughSample = result.stats.trades >= DEFAULT_CRITERIA.minTrades
+    && baseResult.stats.trades >= DEFAULT_CRITERIA.minTrades
+    && asked.leaks === 0;
   /**
    * 判定。除了通用那五项，这里多一条：必须超过随机基线。
    * 提示词策略最容易骗人的地方就是「看起来有胜率，其实和乱猜差不多」。
    */
   const verdict = enoughSample
-    ? judge({
+    ? applyPromptBaseline(judge({
         blindExpectancyPct: result.stats.expectancyPct,
         blindTrades: result.stats.trades,
         blindMaxDrawdownPct: result.stats.maxDrawdownPct,
         blindPayoff: result.stats.payoff,
         blindWinRate: result.stats.winRate,
         decay: 0,
-        costExpectancy: { '2': result.stats.expectancyPct },
-      })
+        costExpectancy: { [String(DEFAULT_CRITERIA.costStressMultiple)]: stressed.stats.expectancyPct },
+      }), result.stats.totalReturnPct, baseResult.stats.totalReturnPct)
     : null;
 
   return {

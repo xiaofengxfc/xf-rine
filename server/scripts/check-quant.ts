@@ -18,9 +18,9 @@ import { backtest, conditionHolds, IndicatorCache, warmupOf } from '../src/quant
 import { buildIndicator } from '../src/quant/indicators.js';
 import { sanitizeHypothesis, FALLBACK_HYPOTHESIS, validateSemantics } from '../src/quant/ai.js';
 import { buildAnonContext, assertAnonymous, parseVerdict } from '../src/quant/promptStrategy.js';
-import { randomBaselineSignals } from '../src/quant/promptBacktest.js';
+import { backtestPromptSignals, randomBaselineSignals } from '../src/quant/promptBacktest.js';
 import { buildZoneTimeline, zoneSeries, nearestZone } from '../src/quant/zones.js';
-import { searchParameters, searchParametersWithProgress } from '../src/quant/search.js';
+import { evaluateBlindCandidate, expandGrid, searchParameters, searchParametersWithProgress, splitCandles } from '../src/quant/search.js';
 
 let fails = 0;
 let passes = 0;
@@ -42,7 +42,7 @@ function bar(t: number, o: number, h: number, l: number, c: number, v = 100): Ca
 
 const OPTS = {
   multiplier: 1, feeRate: 0, slippagePct: 0, capital: 10000,
-  riskPerTrade: 1, leverage: 1, fundingRatePer8h: 0,
+  riskPerTrade: 0.05, leverage: 5, fundingRatePer8h: 0,
 };
 
 console.log('\n[1] 指标：和手算对');
@@ -118,6 +118,47 @@ console.log('\n[3] 成交在下一根开盘，不在信号那一根的收盘');
   const r = backtest(spec, c, OPTS);
   ok('正好开了一笔', r.trades.length === 1, JSON.stringify(r.trades.map((t) => t.entryPrice)));
   if (r.trades.length) near('入场价是信号后那根的开盘 200', r.trades[0]!.entryPrice, 200);
+  near('下一根开盘入场不改写信号 K 线权益', r.equity[4]!.v, OPTS.capital);
+}
+
+console.log('\n[3a] ATR 止损只使用信号收盘时已知的数据');
+{
+  const candles = [
+    bar(0, 100, 101, 99, 100),
+    bar(60, 100, 102, 99, 100),
+    bar(120, 100, 102, 99, 100),
+    bar(180, 100, 103, 100, 100), // Signal bar ATR(2) is 3.
+    bar(240, 130, 132, 126.5, 130), // Entry bar ATR is larger, but stop was already set at the open.
+    bar(300, 130, 131, 129, 130),
+  ];
+  const spec: StrategySpec = {
+    name: 'causal-atr', side: 'long', params: { atrPeriod: 2 }, ranges: {},
+    entry: [], stop: { kind: 'atr', value: 1 }, target: { kind: 'rr', value: 1 }, maxPositions: 1,
+  };
+  const result = backtest(spec, candles, { ...OPTS, signalAt: (i) => i === 3 ? 'long' : 'flat' });
+  ok('入场 K 线触发了按信号 ATR 设定的止损', result.trades.length === 1 && result.trades[0]!.reason === 'stop', JSON.stringify(result.trades));
+  if (result.trades.length) near('止损价按信号 ATR 3 计算', result.trades[0]!.exitPrice, 127);
+}
+
+console.log('\n[3b] shifted crossover 比较两个移位后的相邻值');
+{
+  const candles = [
+    bar(0, 10, 20, 9, 15),
+    bar(60, 10, 12, 9, 10),
+    bar(120, 14, 16, 13, 15),
+    bar(180, 15, 17, 14, 16),
+  ];
+  const cache = new IndicatorCache(candles);
+  const params = { threshold: 10, period: 1 };
+  const shiftedLeft: Condition = {
+    left: { name: 'close' }, op: 'crossUp', right: { name: 'close' }, rightParam: 'threshold', shift: 1,
+  };
+  ok('左边 shift=1 时识别前一根的上穿', conditionHolds(shiftedLeft, 3, cache, { ...params, threshold: 12 }));
+
+  const shiftedRight: Condition = {
+    left: { name: 'close' }, op: 'crossUp', right: { name: 'highest', periodKey: 'period' }, rightShift: 1,
+  };
+  ok('右边 rightShift=1 时使用对应的前值', conditionHolds(shiftedRight, 3, cache, params));
 }
 
 console.log('\n[4] 止损按触发价成交；跳空时按开盘价成交（不吃想象中的好价）');
@@ -238,8 +279,8 @@ console.log('\n[7] 统计口径：盈亏比是「平均盈利 ÷ 平均亏损」
     ok('第二笔是止盈', win.reason === 'target', win.reason);
 
     // 每张名义 100（价格 100 × 1 张 × 乘数 1），5% 止损亏 5，10% 止盈赚 10
-    // 第一笔张数 = floor(10000 × 100% ÷ 100) = 100 张，亏 500，余额变 9500
-    // 第二笔 = floor(9500 ÷ 100) = 95 张，赚 950 —— 仓位跟着余额缩，这是正确的
+    // 每笔风险预算是权益的 5%。第一笔 100 张，止损亏 500，余额变 9500。
+    // 第二笔风险预算随余额降为 475，开 95 张，盈利 950。
     ok('第一笔 100 张', loss.size === 100, String(loss.size));
     ok('第二笔按缩水后的余额开 95 张', win.size === 95, String(win.size));
     const lossUsd = Math.abs(loss.net);
@@ -253,6 +294,70 @@ console.log('\n[7] 统计口径：盈亏比是「平均盈利 ÷ 平均亏损」
     ok('每笔期望 = (950 - 500) / 2 = 225', Math.abs(r.stats.expectancy - 225) < 1e-6, String(r.stats.expectancy));
     ok('profitFactor = 950 / 500 = 1.9', Math.abs(r.stats.profitFactor - 1.9) < 1e-9, String(r.stats.profitFactor));
   }
+}
+
+console.log('\n[7a] 最后一笔平仓成本计入最终权益');
+{
+  const candles = [
+    bar(0, 100, 101, 99, 100),
+    bar(60, 100, 101, 99, 100),
+    bar(120, 100, 101, 99, 100),
+    bar(180, 100, 101, 99, 100),
+    bar(240, 100, 105, 99, 105),
+    bar(300, 100, 105, 99, 105),
+  ];
+  const spec: StrategySpec = {
+    name: 'end-fees', side: 'long', params: { atrPeriod: 1 }, ranges: {},
+    entry: [], stop: { kind: 'pct', value: 0.5 }, target: { kind: 'pct', value: 0.5 }, maxPositions: 1,
+  };
+  const result = backtest(spec, candles, {
+    ...OPTS, feeRate: 0.001, slippagePct: 0.001, signalAt: () => 'long',
+  });
+  ok('最后一笔按 end 平仓', result.trades.length === 1 && result.trades[0]!.reason === 'end', JSON.stringify(result.trades));
+  if (result.trades.length) {
+    near('权益末值与已实现余额一致', result.equity[result.equity.length - 1]!.v, OPTS.capital + result.trades[0]!.net);
+    near('总收益与已实现交易净值一致', result.stats.totalReturnPct, result.trades[0]!.net / OPTS.capital * 100);
+  }
+}
+
+console.log('\n[7b] 回测仓位同时受止损风险和保证金上限约束');
+{
+  const candles = [
+    bar(0, 100, 101, 99, 100),
+    bar(60, 100, 101, 99, 100),
+    bar(120, 100, 101, 99, 130),
+    bar(180, 100, 101, 99, 100),
+    bar(240, 100, 101, 99, 100),
+  ];
+  const result = backtest(spec5(), candles, {
+    ...OPTS, riskPerTrade: 0.5, maxMarginPct: 0.01, signalAt: () => 'long',
+  });
+  ok('保证金上限先于更宽的止损风险预算生效', result.trades.length === 1 && result.trades[0]!.size === 5,
+    JSON.stringify(result.trades));
+}
+
+console.log('\n[7c] 合约步进、最小最大张数和杠杆上限进入回测仓位');
+{
+  const candles = [
+    bar(0, 100, 101, 99, 100),
+    bar(60, 100, 101, 99, 100),
+    bar(120, 100, 101, 99, 130),
+    bar(180, 100, 101, 99, 100),
+    bar(240, 100, 101, 99, 100),
+  ];
+  const result = backtest(spec5(), candles, {
+    ...OPTS,
+    riskPerTrade: 0.05,
+    maxMarginPct: 1,
+    leverage: 10,
+    leverageMax: 2,
+    sizeStep: 0.5,
+    sizeMin: 1.5,
+    sizeMax: 4.25,
+    signalAt: () => 'long',
+  });
+  ok('结果按最大张数取步进下方', result.trades.length === 1 && result.trades[0]!.size === 4,
+    JSON.stringify(result.trades));
 }
 {
   // 亏损时 payoff 必须是 0 而不是 Infinity —— 一场没亏的回测最容易把这块画成一个好看的数字
@@ -564,6 +669,71 @@ console.log('\n[15] 参数搜索的异步进度与同步结果一致');
   const asyncResult = await searchParametersWithProgress(spec, candles, base, { minTrades: 1 }, (p) => progress.push(p));
   eq('异步候选与同步候选一致', asyncResult, sync);
   eq('每组参数各报告一次进度', progress, [1, 2, 3].map((completed) => ({ completed, total: 3 })));
+
+  const validationOnly = searchParameters(spec, candles, base, { minTrades: 1, evaluateBlind: false });
+  ok('不评估盲测时仍返回完整验证结果', validationOnly.length > 0 && Boolean(validationOnly[0]!.validateResult));
+  ok('不评估盲测时不暴露盲测字段', validationOnly.every((candidate) =>
+    !('blindTrades' in candidate) && !('blindResult' in candidate) && !('costExpectancy' in candidate)));
+  ok('不评估盲测时保留验证成本压力指标', Boolean(validationOnly[0]!.validateCostExpectancy['2']));
+  if (validationOnly[0]) {
+    const candidate = validationOnly[0];
+    const expectedScore = Math.round((candidate.validateExpectancyPct
+      + Math.min(candidate.validatePayoff, 5) * 0.3
+      + candidate.validateWinRate * 0.5
+      - Math.max(0, candidate.validateDecay) * 0.5
+      - candidate.validateMaxDrawdownPct * 0.05) * 1000) / 1000;
+    near('候选分数只按验证段统计计算', candidate.score, expectedScore, 0.03);
+
+    const evaluated = evaluateBlindCandidate(spec, candles, base, candidate, { minTrades: 1 });
+    ok('被选候选可以单独评估盲测', Boolean(evaluated.blindResult) && typeof evaluated.blindTrades === 'number');
+  }
+}
+
+console.log('\n[16] 随机搜索组合数少于请求次数时正常结束');
+{
+  const sampled = expandGrid({ n: 2 }, { n: [2, 3, 1] }, 'random', 20, 4);
+  ok('返回搜索空间内的全部两个唯一组合', sampled.length === 2
+    && new Set(sampled.map((x) => x.n)).size === 2,
+  JSON.stringify(sampled));
+}
+
+console.log('\n[17] 验证与盲测预热区不计入各自交易');
+{
+  const candles = Array.from({ length: 100 }, (_, i) => bar(i * 60, 100, 101, 99, 100));
+  const split = splitCandles(candles, 10);
+  ok('验证、盲测的交易起点都越过 10 根预热',
+    split.validateTradeStartIndex === 10 && split.blindTradeStartIndex === 10,
+    split.validateTradeStartIndex + '/' + split.blindTradeStartIndex);
+  const spec: StrategySpec = {
+    name: 'split-padding', side: 'long', params: { atrPeriod: 1 }, ranges: {},
+    entry: [], stop: { kind: 'pct', value: 0.5 }, target: { kind: 'pct', value: 0.5 }, maxPositions: 1,
+  };
+  const result = backtest(spec, split.validate, {
+    ...OPTS, signalAt: () => 'long', tradeStartIndex: split.validateTradeStartIndex,
+  });
+  ok('验证段第一笔在正式验证范围内入场', result.trades.length === 1
+    && result.trades[0]!.entryTime === candles[71]!.t,
+  String(result.trades[0]?.entryTime));
+}
+
+console.log('\n[18] 提示词与随机基线只在同一最终留出段比较');
+{
+  const candles = Array.from({ length: 100 }, (_, i) => bar(i * 60, 100, 101, 99, 100));
+  const signals = new Array(candles.length).fill('long' as const);
+  const randomSignals = new Array(candles.length).fill('short' as const);
+  const spec: StrategySpec = {
+    name: 'prompt-holdout', side: 'long', params: { atrPeriod: 1 }, ranges: {}, entry: [],
+    stop: { kind: 'pct', value: 0.5 }, target: { kind: 'pct', value: 0.5 }, maxPositions: 1,
+  };
+  const costs = { ...OPTS, feeRate: 0.001, slippagePct: 0.001 };
+  const result = backtestPromptSignals(candles, signals, randomSignals, spec, costs, 10, 2);
+  const split = splitCandles(candles, 10);
+  const blindOffset = candles.length - split.blind.length;
+  const firstEligible = candles[blindOffset + split.blindTradeStartIndex]!.t;
+  ok('提示词结果从盲测边界开始', result.result.equity.length === split.blind.length);
+  ok('盲测预热区内没有开仓', result.result.trades.every((trade) => trade.entryTime >= firstEligible));
+  ok('随机基线使用同一盲测区间', result.baseline.equity.length === split.blind.length);
+  ok('成本压力回测提高了费用', result.stressed.stats.totalFee > result.result.stats.totalFee);
 }
 
 const total = passes + fails;

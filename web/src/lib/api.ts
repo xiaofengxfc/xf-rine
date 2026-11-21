@@ -700,14 +700,33 @@ export interface QuantVerdict {
 
 export interface QuantBest {
   params: Record<string, number>;
-  blindExpectancyPct: number;
-  blindTrades: number;
-  blindPayoff: number;
-  blindWinRate: number;
-  blindMaxDrawdownPct: number;
-  blindReturnPct: number;
-  costExpectancy: Record<string, number>;
-  decay: number;
+  validateExpectancyPct: number;
+  validateTrades: number;
+  validatePayoff: number;
+  validateWinRate: number;
+  validateMaxDrawdownPct: number;
+  validateReturnPct: number;
+  validateDecay: number;
+  validateCostExpectancy: Record<string, number>;
+}
+
+export interface QuantFinalEvaluation {
+  candidate: {
+    blindExpectancyPct?: number;
+    blindTrades?: number;
+    blindPayoff?: number;
+    blindWinRate?: number;
+    blindMaxDrawdownPct?: number;
+    blindReturnPct?: number;
+    costExpectancy?: Record<string, number>;
+    decay?: number;
+  };
+  validationVerdict: QuantVerdict;
+  verdict: QuantVerdict;
+}
+
+export interface QuantResearchReport {
+  finalEvaluation: QuantFinalEvaluation | null;
 }
 
 export interface QuantRound {
@@ -716,6 +735,7 @@ export interface QuantRound {
   candidates: number;
   enoughSample: number;
   best: QuantBest | null;
+  verdictStage: 'validation';
   verdict: QuantVerdict | null;
 }
 
@@ -726,7 +746,7 @@ export type QuantEvent =
   | { type: 'hypothesis'; round: number; thesis: string; entry: { left: string; op: string; right: string; shift: number }[]; params: Record<string, number> }
   | ({ type: 'round' } & QuantRound)
   /** saved：达标的方案已经自动存进策略库，页面可以直接载入编辑器 */
-  | { type: 'done'; verdict: string; report: unknown; saved?: { id: string; name: string; spec: QuantSpec } | null }
+  | { type: 'done'; verdict: string; report: QuantResearchReport; saved?: { id: string; name: string; spec: QuantSpec } | null }
   | { type: 'note'; message: string }
   | { type: 'error'; message: string }
   | { type: 'backtest-progress'; stage: string; message: string; done?: number; total?: number }
@@ -740,6 +760,7 @@ export interface QuantTradeRow {
 
 export interface QuantBacktestResult {
   mode: 'single' | 'search' | 'prompt';
+  evaluationSegment?: 'blind';
   bars: number;
   days: number;
   gaps: number;

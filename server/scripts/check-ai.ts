@@ -162,6 +162,12 @@ async function main(): Promise<void> {
     // 止盈 63400、入场 62000（没给入场价就按现价）、止损 61650 → (1400 / 350) = 4
     ok('盈亏比算对了', Math.abs(g.rr - 4) < 0.01, String(g.rr));
 
+    const marketPlanWithEntry = strat.gatePlan(base, {
+      plan: { action: 'long', confidence: 0.72, entry: 63000, entryType: 'market', stop: 61650, target: 63400 },
+      market, info, account, openPositions: 0, contractHasPosition: false, dayLossPct: 0, risk: strat.RISK_DEFAULTS,
+    });
+    eq('市价单忽略模型给的入场价，按现价算止损距离', marketPlanWithEntry.stopDistance, 350);
+
     // 同一套行情、同一个方案，只把策略的单笔风险从 0.5% 调到 2%，张数必须跟着变。
     // 这两个数如果一样，说明风险参数根本没有接进闸门（以前就出过这种问题：
     // 页面上改了、存了、显示也变了，实际算张数用的还是旧值）
@@ -190,6 +196,7 @@ async function main(): Promise<void> {
   refuse('盈亏比不够', { plan: { action: 'long', confidence: 0.72, entry: null, stop: 61650, target: 62150 } }, '盈亏比');
   refuse('没给止盈', { plan: { action: 'long', confidence: 0.72, entry: null, stop: 61650, target: null } }, '盈亏比');
   refuse('置信度不够', { plan: { action: 'long', confidence: 0.3, entry: null, stop: 61650, target: 63400 } }, '置信度');
+  refuse('AI 限价单没有成交跟踪', { plan: { action: 'long', confidence: 0.72, entry: 61900, entryType: 'limit', stop: 61650, target: 63400 } }, '下单类型');
   refuse('这个合约已经有仓', { contractHasPosition: true }, '重复开仓');
   refuse('同时持仓到上限', { openPositions: 2 }, '持仓数');
   refuse('日内亏损到上限', { dayLossPct: 3.2 }, '日内亏损');
@@ -269,10 +276,71 @@ async function main(): Promise<void> {
     const off = await runner.tick();
     // 判断节奏改成了「每根已收盘 K 线一次」，不再是「隔几分钟」：
     // 同一根 K 线上再点一次，必须直接跳过
-    ok('同一根 K 线不重复判断', off === null && runner.status().skip.includes('已经判断过'), runner.status().skip);
+    ok('同一根 K 线不重复判断', off === null && runner.status().skip.includes('都已判断过'), runner.status().skip);
     strat.saveStrategy({ ...base, enabled: false });
     const off2 = await runner.tick();
     ok('关掉之后什么都不做', off2 === null && runner.status().skip === '策略没开', runner.status().skip);
+  }
+
+  console.log('\n[7b] 持仓故障与回测合约：不确定状态不发单');
+  {
+    strat.saveStrategy({ ...base, enabled: true, dayKey: '', dayStartEquity: 0 });
+    let snapshotCalls = 0;
+    let orderCalls = 0;
+    const failedPositions = new AiRunner({
+      snapshot: async () => { snapshotCalls += 1; return fakeSnapshot(); },
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => { throw new Error('positions unavailable'); },
+      recentCandles: async () => risingCandles(),
+      askModel: async () => { throw new Error('规则策略不该调用模型'); },
+      binding: (id: string) => (id === 'st_test' ? ruleBinding() : null),
+      execute: async () => { orderCalls += 1; throw new Error('不该发单'); },
+    });
+    const failed = await failedPositions.tick(true);
+    ok('持仓接口失败时跳过决策', failed === null);
+    eq('没有请求信号数据', snapshotCalls, 0);
+    eq('没有发单', orderCalls, 0);
+    ok('状态显示持仓读取失败', failedPositions.status().skip.includes('持仓读取失败'), failedPositions.status().skip);
+    ok('错误细节保留在状态中', failedPositions.status().lastError.includes('positions unavailable'), failedPositions.status().lastError);
+
+    const selected: string[] = [];
+    const onlyTestedContract = new AiRunner({
+      snapshot: async (contract) => { selected.push(contract); return fakeSnapshot(); },
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => [],
+      recentCandles: async () => risingCandles(),
+      askModel: async () => { throw new Error('规则策略不该调用模型'); },
+      binding: (id: string) => (id === 'st_test' ? ruleBinding({ testedContract: 'BTC_USDT', testedInterval: '15m' }) : null),
+      execute: async (req) => ({ id: req.contract, status: 'finished', fillPrice: 62010, size: req.size }),
+    });
+    strat.saveStrategy({ ...base, enabled: true, contracts: ['ETH_USDT', 'BTC_USDT'] });
+    const tested = await onlyTestedContract.tick(true);
+    eq('合约池里优先选回测通过的 BTC', selected, ['BTC_USDT']);
+    eq('回测通过的合约可以执行', tested?.contract, 'BTC_USDT');
+
+    strat.saveStrategy({ ...base, enabled: true, contracts: ['ETH_USDT'] });
+    const untested = await onlyTestedContract.tick(true);
+    ok('合约池只有未回测品种时跳过', untested === null);
+    ok('明确显示合约没有回测验证', onlyTestedContract.status().skip.includes('没有回测验证'), onlyTestedContract.status().skip);
+
+    strat.saveStrategy({ ...base, enabled: true, contracts: ['BTC_USDT'] });
+    let wrongIntervalSnapshots = 0;
+    const wrongIntervalRunner = new AiRunner({
+      snapshot: async () => { wrongIntervalSnapshots += 1; return fakeSnapshot(); },
+      contractMeta: async () => info,
+      account: async () => account,
+      openPositions: async () => [],
+      recentCandles: async () => risingCandles(),
+      askModel: async () => { throw new Error('规则策略不该调用模型'); },
+      binding: (id: string) => (id === 'st_test' ? ruleBinding({ testedInterval: '1h' }) : null),
+      execute: async () => { throw new Error('周期不匹配时不该发单'); },
+    });
+    const wrongInterval = await wrongIntervalRunner.tick(true);
+    ok('回测周期不匹配时跳过', wrongInterval === null);
+    eq('周期不匹配时不读取行情决策', wrongIntervalSnapshots, 0);
+    ok('明确显示回测周期不匹配', wrongIntervalRunner.status().skip.includes('周期匹配'), wrongIntervalRunner.status().skip);
   }
 
   console.log('\n[8] 熔断：日内亏损到上限就停下');
@@ -334,7 +402,11 @@ async function main(): Promise<void> {
     ok('没达标不让跑，并说出原因', !r3.ok && r3.reason.includes('样本外期望'), r3.reason);
 
     const good = bindingOf({ id: 'a', name: 'A', contract: 'BTC_USDT', interval: '1h', lastRun: { passed: true, failed: [], enoughSample: true } });
-    const r4 = checkRunnable({ ...cfg, strategyId: 'a' }, good);
+    const wrongContract = checkRunnable({ ...cfg, strategyId: 'a', interval: '1h', contracts: ['ETH_USDT'] }, good);
+    ok('没有按回测合约配置时不允许实盘', !wrongContract.ok && wrongContract.reason.includes('BTC_USDT'), wrongContract.reason);
+    const wrongInterval = checkRunnable({ ...cfg, strategyId: 'a', interval: '15m' }, good);
+    ok('没有按回测周期配置时不允许实盘', !wrongInterval.ok && wrongInterval.reason.includes('1h'), wrongInterval.reason);
+    const r4 = checkRunnable({ ...cfg, strategyId: 'a', interval: '1h' }, good);
     ok('达标的策略可以跑', r4.ok, r4.reason);
     ok('合约只取策略训练的那个币', good?.contract === 'BTC_USDT', String(good?.contract));
     ok('周期也取策略的', good?.interval === '1h', String(good?.interval));
@@ -379,8 +451,9 @@ async function main(): Promise<void> {
     const fakeResult = { stats: { expectancyPct: 0.3, trades: 40, payoff: 1.7, maxDrawdownPct: 10 } };
     const withRun = lib.recordRun(s1.id, fakeResult as never, {
       passed: true, failed: [], enoughSample: true, contract: 'BTC_USDT', interval: '1h',
-    });
+    }, { ...spec.params, n: 35 });
     ok('结论记上了', withRun?.lastRun?.passed === true);
+    eq('搜索选中的参数与回测结论一并保存', withRun?.spec?.params.n, 35);
     const renamed = lib.renameStrategy(s1.id, '改过名');
     ok('改名成功', renamed?.name === '改过名', renamed?.name);
     ok('改名不清回测结论', renamed?.lastRun?.passed === true, JSON.stringify(renamed?.lastRun));
@@ -476,7 +549,8 @@ function risingCandles(n = 60) {
 /** 一条能在上面那段 K 线上命中的规则策略 */
 function ruleBinding(over: Record<string, unknown> = {}) {
   return {
-    contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
+    contract: 'BTC_USDT', interval: '15m', testedContract: 'BTC_USDT', testedInterval: '15m',
+    passed: true, failed: [], enoughSample: true,
     kind: 'rule' as const,
     prompt: null,
     risk: { riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 },
@@ -494,7 +568,8 @@ function ruleBinding(over: Record<string, unknown> = {}) {
 /** 一条提示词策略 */
 function promptBinding(over: Record<string, unknown> = {}) {
   return {
-    contract: 'BTC_USDT', interval: '15m', passed: true, failed: [], enoughSample: true,
+    contract: 'BTC_USDT', interval: '15m', testedContract: 'BTC_USDT', testedInterval: '15m',
+    passed: true, failed: [], enoughSample: true,
     kind: 'prompt' as const,
     spec: null,
     risk: { riskPct: 0.5, maxMarginPct: 40, stopAtrMult: 0.8 },

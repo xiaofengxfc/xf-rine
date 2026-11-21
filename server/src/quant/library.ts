@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HOME_DIR } from '../config.js';
-import type { StrategySpec } from './backtest.js';
+import type { Params, StrategySpec } from './backtest.js';
 import type { BacktestResult } from './backtest.js';
 import { sanitizeRisk } from '../aiStrategy.js';
 
@@ -225,10 +225,17 @@ export function recordRun(id: string, result: BacktestResult, verdict: {
   enoughSample: boolean;
   contract: string;
   interval: string;
-}): SavedStrategy | null {
+}, selectedParams?: Params): SavedStrategy | null {
   const lib = readLibrary();
   const s = lib.strategies.find((x) => x.id === id);
   if (!s) return null;
+  // Search-selected parameters and the run proof must be committed together.
+  // Otherwise live execution can use the old base params while the passing run
+  // belongs to a different candidate.
+  if (selectedParams && s.kind === 'rule' && s.spec) {
+    s.spec = { ...s.spec, params: { ...selectedParams } };
+    s.updatedAt = Date.now();
+  }
   s.lastRun = {
     at: Date.now(),
     contract: verdict.contract,

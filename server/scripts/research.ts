@@ -61,7 +61,8 @@ async function main(): Promise<void> {
       feeRate: 0.0005,
       slippagePct: 0.0002,
       capital,
-      riskPerTrade: 0.5,
+      riskPerTrade: 0.005,
+      maxMarginPct: 0.4,
       leverage: 5,
       fundingRatePer8h: 0.0001,
     },
@@ -79,11 +80,11 @@ async function main(): Promise<void> {
         return;
       }
       console.log('  结果：候选 ' + r.candidates + ' 组，样本量够 ' + r.enoughSample + ' 组');
-      console.log('  最优：样本外期望 ' + r.best.blindExpectancyPct.toFixed(3) + '%/笔，'
-        + r.best.blindTrades + ' 笔，盈亏比 ' + r.best.blindPayoff
-        + '，回撤 ' + r.best.blindMaxDrawdownPct.toFixed(1) + '%');
-      console.log('  判定：' + (r.verdict
-        ? (r.verdict.passed ? '达标' : '未通过 ' + r.verdict.failed.map((f) => f.label).join('、'))
+      console.log('  验证段最佳：期望 ' + r.best.validateExpectancyPct.toFixed(3) + '%/笔，'
+        + r.best.validateTrades + ' 笔，盈亏比 ' + r.best.validatePayoff
+        + '，回撤 ' + r.best.validateMaxDrawdownPct.toFixed(1) + '%');
+      console.log('  验证筛选：' + (r.verdict
+        ? (r.verdict.passed ? '通过' : '未通过 ' + r.verdict.failed.map((f) => f.label).join('、'))
         : '样本不足，不判定'));
     },
   });
@@ -91,6 +92,12 @@ async function main(): Promise<void> {
   console.log('');
   console.log('=== 结论 ===');
   console.log(verdictLine(rep));
+  if (rep.finalEvaluation) {
+    const blind = rep.finalEvaluation.candidate;
+    console.log('最终盲测：' + (blind.blindExpectancyPct?.toFixed(3) ?? '—') + '%/笔，'
+      + (blind.blindTrades ?? '—') + ' 笔，回撤 '
+      + (blind.blindMaxDrawdownPct?.toFixed(1) ?? '—') + '%');
+  }
   if (rep.notes.length) {
     console.log('备注：');
     for (const n of rep.notes) console.log('  ' + n);

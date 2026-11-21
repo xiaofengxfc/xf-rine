@@ -14,7 +14,9 @@
  *      回测看着覆盖全期，实际隔一段才真正看过一次行情。做策略不该省这一步。
  */
 
-import type { Candle } from './backtest.js';
+import type { Candle, StrategySpec, BacktestOpts, BacktestResult } from './backtest.js';
+import { backtest } from './backtest.js';
+import { splitCandles } from './search.js';
 import { buildAnonContext, assertAnonymous, parseVerdict, type Verdict, type PromptSignal } from './promptStrategy.js';
 
 export interface PromptRunOpts {
@@ -150,4 +152,38 @@ export function randomBaselineSignals(candles: Candle[], startIndex: number, see
     out[i] = cur;
   }
   return out;
+}
+
+/** Evaluate prompt and random signals only on the final held-out window. */
+export function backtestPromptSignals(
+  candles: Candle[],
+  signals: Verdict[],
+  randomSignals: Verdict[],
+  spec: StrategySpec,
+  opts: BacktestOpts,
+  warmup: number,
+  costMultiple = 2,
+): { result: BacktestResult; baseline: BacktestResult; stressed: BacktestResult } {
+  const split = splitCandles(candles, warmup);
+  const offset = candles.length - split.blind.length;
+  const testSignals = (source: Verdict[]) => (i: number): Verdict => source[offset + i] ?? 'flat';
+  const blindOpts = {
+    ...opts,
+    tradeStartIndex: split.blindTradeStartIndex,
+  };
+  const result = backtest(spec, split.blind, {
+    ...blindOpts,
+    signalAt: testSignals(signals),
+  });
+  const baseline = backtest(spec, split.blind, {
+    ...blindOpts,
+    signalAt: testSignals(randomSignals),
+  });
+  const stressed = backtest(spec, split.blind, {
+    ...blindOpts,
+    feeRate: opts.feeRate * costMultiple,
+    slippagePct: opts.slippagePct * costMultiple,
+    signalAt: testSignals(signals),
+  });
+  return { result, baseline, stressed };
 }

@@ -344,7 +344,7 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
                 disabled={!canEdit || on}
                 onChange={(c) => patch({ contracts: [c] })}
               />
-              <div className="hint">改完合约要回「策略」页重跑一次回测，结论才对应得上</div>
+              <div className="hint">改完合约或周期后，要回「策略」页重跑回测才能启用</div>
             </div>
 
             {/* 选中的策略长什么样，摆在开关旁边 —— 开之前就该看见上次回测是过还是没过 */}
@@ -371,12 +371,15 @@ export default function AiTradingDesk({ env, liveTrading, canEdit, onToast }: Pr
                 {(() => {
                   const running = (form?.contracts ?? []).join(',');
                   const tested = payload.binding.contract;
-                  const diff = running && running !== tested;
+                  const currentInterval = form?.interval ?? '';
+                  const diffContract = running && running !== tested;
+                  const diffInterval = currentInterval && currentInterval !== payload.binding.interval;
+                  const diff = diffContract || diffInterval;
                   return (
                     <div className={'quant-binding-note ' + (diff ? 'warn' : 'dim')}>
                       {diff
-                        ? '注意：回测是在 ' + tested + ' 上做的，现在要跑 ' + running + ' —— 换币之后那条结论不直接适用，建议先在新币上重跑一次'
-                        : '回测合约 ' + tested + ' · 周期 ' + payload.binding.interval}
+                        ? '当前选择 ' + running + ' · ' + currentInterval + '，上次回测是 ' + tested + ' · ' + payload.binding.interval + '。重跑回测后才能启用'
+                        : '已回测合约 ' + tested + ' · 周期 ' + payload.binding.interval}
                     </div>
                   );
                 })()}

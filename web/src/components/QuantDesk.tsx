@@ -730,14 +730,14 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                           候选 {rr.candidates} 组，样本够 {rr.enoughSample} 组
                           {rr.best && (
                             <>
-                              {' · 样本外 '}
-                              <b className={rr.best.blindExpectancyPct > 0 ? 'up' : 'down'}>{rr.best.blindExpectancyPct.toFixed(3)}%/笔</b>
-                              {' · '}{rr.best.blindTrades} 笔 · 盈亏比 {rr.best.blindPayoff}{' · 回撤 '}{rr.best.blindMaxDrawdownPct.toFixed(1)}%
+                              {' · 验证期望 '}
+                              <b className={rr.best.validateExpectancyPct > 0 ? 'up' : 'down'}>{rr.best.validateExpectancyPct.toFixed(3)}%/笔</b>
+                              {' · '}{rr.best.validateTrades} 笔 · 盈亏比 {rr.best.validatePayoff}{' · 回撤 '}{rr.best.validateMaxDrawdownPct.toFixed(1)}%
                             </>
                           )}
                           {rr.verdict && (
                             <span className={rr.verdict.passed ? 'up' : 'down'}>
-                              {' '}— {rr.verdict.passed ? '达标' : '未通过 ' + rr.verdict.failed.map((f) => f.label).join('、')}
+                              {' '}— 验证筛选{rr.verdict.passed ? '通过' : '未通过 ' + rr.verdict.failed.map((f) => f.label).join('、')}
                             </span>
                           )}
                         </div>
@@ -749,6 +749,25 @@ export default function QuantDesk({ canRun, onToast }: Props) {
                     </div>
                   );
                 })}
+                {doneEvent && doneEvent.type === 'done' && doneEvent.report.finalEvaluation && (
+                  <div className="quant-round-result">
+                    <b>最终盲测</b>
+                    {' · 验证筛选'}
+                    {doneEvent.report.finalEvaluation.validationVerdict.passed ? '通过' : '未通过'}
+                    {' · 期望 '}
+                    {doneEvent.report.finalEvaluation.candidate.blindExpectancyPct?.toFixed(3) ?? '—'}
+                    {'%/笔 · '}
+                    {doneEvent.report.finalEvaluation.candidate.blindTrades ?? '—'}
+                    {' 笔 · 回撤 '}
+                    {doneEvent.report.finalEvaluation.candidate.blindMaxDrawdownPct?.toFixed(1) ?? '—'}
+                    {'% · '}
+                    <span className={doneEvent.report.finalEvaluation.verdict.passed ? 'up' : 'down'}>
+                      {doneEvent.report.finalEvaluation.verdict.passed
+                        ? '通过'
+                        : '未通过 ' + doneEvent.report.finalEvaluation.verdict.failed.map((f) => f.label).join('、')}
+                    </span>
+                  </div>
+                )}
                 {doneEvent && doneEvent.type === 'done' && <div className="quant-done">{doneEvent.verdict}</div>}
               </div>
             </div>
@@ -768,7 +787,7 @@ function ResultPanel({ result }: { result: QuantBacktestResult }) {
     <div className="panel quant-result">
       <div className="panel-head">
         <span className="panel-title">回测结果</span>
-        <span className="dim">{result.bars} 根 · {result.days} 天{result.gaps ? ' · 断档 ' + result.gaps : ''}</span>
+        <span className="dim">{result.evaluationSegment === 'blind' ? '最终盲测 · ' : ''}{result.bars} 根 · {result.days} 天{result.gaps ? ' · 断档 ' + result.gaps : ''}</span>
       </div>
       <div className="panel-foot">
         {v && (

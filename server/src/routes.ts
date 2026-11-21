@@ -2771,11 +2771,13 @@ const aiDeps: RunnerDeps = {
     const saved = getSavedStrategy(strategyId);
     if (!saved) return null;
     return {
-      contract: saved.contract,
-      interval: saved.interval,
+      contract: saved.lastRun?.contract ?? saved.contract,
+      interval: saved.lastRun?.interval ?? saved.interval,
       passed: saved.lastRun ? saved.lastRun.passed : null,
       failed: saved.lastRun ? saved.lastRun.failed : [],
       enoughSample: saved.lastRun ? saved.lastRun.enoughSample : false,
+      testedContract: saved.lastRun?.contract ?? '',
+      testedInterval: saved.lastRun?.interval ?? '',
       // 策略类型决定实盘怎么出方向 —— 这两条以前缺失，导致执行器只会走那套旧协议
       kind: saved.kind,
       spec: saved.spec,
@@ -2909,7 +2911,9 @@ router.post('/ai/strategy', wrap(async (req, res) => {
    * 策略上没记合约时，才用策略的默认合约兜底。
    */
   const bound = merged.strategyId ? getSavedStrategy(merged.strategyId) : null;
-  if (bound && merged.contracts.length === 0) merged.contracts = [bound.contract];
+  if (bound && merged.contracts.length === 0) {
+    merged.contracts = [bound.lastRun?.contract ?? bound.contract];
+  }
 
   if (merged.enabled) {
     if (!config.ai.apiKey) {

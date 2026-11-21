@@ -263,14 +263,20 @@ export function bindingOf(saved: {
   contract: string;
   interval: string;
   kind?: 'rule' | 'prompt';
-  lastRun: { passed: boolean; failed: string[]; enoughSample: boolean } | null;
+  lastRun: {
+    passed: boolean;
+    failed: string[];
+    enoughSample: boolean;
+    contract?: string;
+    interval?: string;
+  } | null;
 } | null): StrategyBinding | null {
   if (!saved) return null;
   return {
     id: saved.id,
     name: saved.name,
-    contract: saved.contract,
-    interval: saved.interval,
+    contract: saved.lastRun?.contract || saved.contract,
+    interval: saved.lastRun?.interval || saved.interval,
     kind: saved.kind,
     passed: saved.lastRun ? saved.lastRun.passed : null,
     failed: saved.lastRun ? saved.lastRun.failed : [],
@@ -310,6 +316,18 @@ export function checkRunnable(cfg: StrategyConfig, binding: StrategyBinding | nu
     return {
       ok: false,
       reason: '这条策略上次回测没过：' + (binding.failed.join('、') || '原因不明'),
+    };
+  }
+  if (cfg.contracts.length !== 1 || cfg.contracts[0] !== binding.contract) {
+    return {
+      ok: false,
+      reason: '这条策略的有效回测只覆盖 ' + binding.contract + '。实盘合约池必须只包含该合约，换币后先重跑回测',
+    };
+  }
+  if (cfg.interval !== binding.interval) {
+    return {
+      ok: false,
+      reason: '这条策略的有效回测周期是 ' + binding.interval + '，当前选择 ' + cfg.interval + '，先按当前周期重跑回测',
     };
   }
   return { ok: true, reason: '' };
@@ -362,6 +380,7 @@ export interface GatePlan {
   action: 'long' | 'short' | 'hold';
   confidence: number;
   entry: number | null;
+  entryType?: 'market' | 'limit';
   stop: number | null;
   target: number | null;
 }
@@ -455,12 +474,16 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
     plan.confidence.toFixed(2) + '（门槛 ' + cfg.minConfidence + '）',
   );
 
+  if (plan.entryType === 'limit') {
+    add('下单类型', false, 'AI 限价单暂不支持持续跟踪成交并补挂保护单，本轮只允许市价单');
+  }
+
   // 3. 现价和 ATR 得是真的
   if (!(last > 0)) add('行情', false, '拿不到最新价，不猜');
   if (!(atr > 0)) add('ATR', false, '引擎没给出 ATR —— ATR 是止损距离的尺子，没有它量不了');
 
   // 4. 止损必须有，且在正确的一侧
-  const entry = plan.entry && plan.entry > 0 ? plan.entry : last;
+  const entry = plan.entryType === 'limit' && plan.entry && plan.entry > 0 ? plan.entry : last;
   const stop = plan.stop ?? 0;
   const target = plan.target ?? 0;
   if (!(stop > 0)) {
@@ -535,7 +558,7 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
   if (lev !== cfg.leverage) {
     warnings.push('这个合约最多 ' + input.info.leverageMax + '×，杠杆按 ' + lev + '× 算');
   }
-  const marginPerContract = (last * mult) / lev;
+  const marginPerContract = (entry * mult) / lev;
   const marginBudget = available * (input.risk.maxMarginPct / 100);
   const sizeByMargin = marginPerContract > 0 ? floorSizeToStep(marginBudget / marginPerContract, sizeStep) : 0;
 
@@ -560,8 +583,8 @@ export function gatePlan(cfg: StrategyConfig, input: GateInput): GateOutcome {
   out.ok = true;
   out.action = plan.action;
   out.size = size;
-  out.notional = Number((size * mult * last).toFixed(2));
-  out.margin = Number(((size * mult * last) / lev).toFixed(2));
+  out.notional = Number((size * mult * entry).toFixed(2));
+  out.margin = Number(((size * mult * entry) / lev).toFixed(2));
   out.riskUsd = Number((size * riskPerContract).toFixed(2));
   return out;
 }
