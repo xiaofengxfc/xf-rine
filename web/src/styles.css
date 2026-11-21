@@ -1612,13 +1612,14 @@ body:has(.modal-bg) { overflow: hidden; }
 .app.research-mode .rail,
 .app.research-mode .rail-scrim,
 .app.research-mode .center,
-.app.research-mode .side,
+.app.research-mode .side { display: none; }
 .app.research-mode .rail-btn,
-.app.research-mode .rail-collapse-btn { display: none; }
-/* 研究台不看盘：顶栏那串币价/标记价/资金费会把窄屏撑爆，解锁交易在这儿也没有去处 */
+.app.research-mode .rail-collapse-btn { visibility: hidden; pointer-events: none; }
+/* 研究台隐藏行情和交易控件，保留占位让页签切换时固定在原位。 */
 .app.research-mode .ticker-head,
 .app.research-mode .arm-btn,
-.app.research-mode .wide-only { display: none; }
+.app.research-mode .topbar > .pill.wide-only { visibility: hidden; pointer-events: none; }
+.app.research-mode .brand .wide-only { visibility: hidden; }
 
 .research-main {
   grid-column: 1 / -1;
@@ -1912,13 +1913,14 @@ body:has(.modal-bg) { overflow: hidden; }
 .app.ai-mode .rail,
 .app.ai-mode .rail-scrim,
 .app.ai-mode .center,
-.app.ai-mode .side,
+.app.ai-mode .side { display: none; }
 .app.ai-mode .rail-btn,
-.app.ai-mode .rail-collapse-btn { display: none; }
-/* AI 台不看盘：顶栏那串币价/标记价/资金费会把窄屏撑爆，解锁交易在这儿也没有去处 */
+.app.ai-mode .rail-collapse-btn { visibility: hidden; pointer-events: none; }
+/* AI 台隐藏行情和交易控件，保留占位让页签切换时固定在原位。 */
 .app.ai-mode .ticker-head,
 .app.ai-mode .arm-btn,
-.app.ai-mode .wide-only { display: none; }
+.app.ai-mode .topbar > .pill.wide-only { visibility: hidden; pointer-events: none; }
+.app.ai-mode .brand .wide-only { visibility: hidden; }
 
 .ai-main {
   grid-column: 1 / -1;

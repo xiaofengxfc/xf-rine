@@ -4,7 +4,7 @@ import {
   type Account, type AppConfig, type Bar, type ContractInfo,
   type CloseResult, type LevelsResponse, type LiveTicker, type NewsDigest, type OpenOrder, type Position,
   type PrivateState, type PriceOrder, type Ticker, type WsMessage,
-  type LocalDirInfo, type LocalBars,
+  type LocalDirInfo,
 } from './lib/api.ts';
 import { intervalSeconds, mergeNewer, mergeOlder } from './lib/candles.ts';
 import { fmtPrice, guessPriceRound } from './lib/format.ts';
@@ -17,7 +17,6 @@ import ResearchDesk from './components/ResearchDesk.tsx';
 import AiTradingDesk from './components/AiTradingDesk.tsx';
 import QuantDesk from './components/QuantDesk.tsx';
 import LevelsStrip from './components/LevelsStrip.tsx';
-import LocalBar from './components/LocalBar.tsx';
 import OrderTicket from './components/OrderTicket.tsx';
 import PositionsCard from './components/PositionsCard.tsx';
 import NewsCard from './components/NewsCard.tsx';
@@ -191,19 +190,9 @@ export default function App() {
     } catch { /* 某些 WebView 不让改，忽略 */ }
   }, []);
   const [manualLevels, setManualLevels] = useState<number[]>([]);
-  /**
-   * 本地数据源（移植过来的那套 Parquet 目录）。
-   *
-   * 打开之后图表、档位都改从本地文件读，交易所那条路原样留着 —— 两条路算档位用的是
-   * 同一份算法，区别只在 K 线从哪来：实时行情，还是你硬盘上那批历史文件。
-   *
-   * 这一份状态归两个页面共用：研究台和中台的「本地数据」条都从这儿读，
-   * 各自再拉一份的话，研究台换了目录、切回日内台还是旧的。
-   */
+  /** 研究台读取的本地 Parquet 数据目录。日内台始终使用交易所行情。 */
   const [local, setLocal] = useState<LocalDirInfo | null>(null);
-  /** 现在这张图是不是在算本地文件。和「有没有目录」是两件事，见 LocalBar */
-  const [localOn, setLocalOn] = useState(false);
-  /** 本地模式下选中的品种和周期（周期代号用文件名里的那套：D1 / H1 / 15min…） */
+  /** 研究台本地数据的品种和周期，周期代号来自文件名（D1 / H1 / 15min…）。 */
   const [localSym, setLocalSym] = useState('');
   const [localTf, setLocalTf] = useState('D1');
   /**
@@ -304,7 +293,7 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange);
   }, [railOpen]);
 
-  /** 本地模式下真正在看的那一对品种/周期。周期不在这个品种里就退回它有的第一个 */
+  /** 研究台本地数据的品种/周期。周期不在这个品种里就退回它有的第一个 */
   const localPick = useMemo(() => {
     const inst = local?.instruments.find((i) => i.symbol === localSym);
     if (!inst) return null;
@@ -315,10 +304,9 @@ export default function App() {
   /**
    * 「当前在看什么」的标识。
    *
-   * 本地模式下由本地那一对决定，交易所那套不能参与 —— 否则图表、缓存、
-   * 每一条跟着 key 走的逻辑都会被两份数据互相顶掉。
+   * 日内台只展示交易所行情，研究台使用独立的分析数据，不会切换日内行情源。
    */
-  const marketKey = localOn && localPick ? `${localPick.symbol}:${localPick.tf}` : `${contract}:${interval}`;
+  const marketKey = `${contract}:${interval}`;
 
   // 只有归属当前币种和周期的数据才交给界面。切币那一帧旧数据还在 state 里，
   // 这一层直接挡掉，图表和右侧面板就不可能显示上一个币种的价格。
@@ -356,26 +344,20 @@ export default function App() {
   /**
    * 这份数据还归不归当前这一屏。
    *
-   * 切币种、退出本地模式的那几帧里，图上的旧数据还在，它的视口回调会来催「再要一页」。
-   * 只按 localOn 挡是不够的：刚从本地切回行情时 market 里还是 AGT_USDT:H1，
-   * 一催就拿着本地品种名去打交易所的 /api/candles。
+   * 切币种的那几帧里，图上的旧数据还在，它的视口回调会来催「再要一页」。
    */
   const isCurrentMarket = useCallback((key: string) => {
-    const want = localOn && localPick ? `${localPick.symbol}:${localPick.tf}` : `${contract}:${interval}`;
-    return key === want;
-  }, [localOn, localPick, contract, interval]);
+    return key === `${contract}:${interval}`;
+  }, [contract, interval]);
 
   /**
    * 把能拿的历史一路补到底。
    *
    * 拖动只是再催一次：正在补的时候直接返回，不重复开一轮。
-   * 补到交易所到头、本地上限、或者切了币种为止，中间不停 ——
+   * 补到交易所到头或者切了币种为止，中间不停 ——
    * 以前一页一页等拖动事件催，用户不动历史就停在原地。
    */
   const backfillOlder = useCallback(async () => {
-    // 本地数据没有「往交易所再翻一页」这回事：key 是 AGT_USDT:H1 这种文件名，
-    // 打到 /api/candles 只会拿回错误或者另一套行情。整段跳过。
-    if (localOn) return;
     const key = marketRef.current.key;
     if (!key || marketRef.current.bars.length === 0) return;
     if (!isCurrentMarket(key)) return;
@@ -458,7 +440,7 @@ export default function App() {
       if (pumpGenRef.current === gen) pumpingKeyRef.current = '';
       setBackfilling(false);
     }
-  }, [push, localOn, isCurrentMarket]);
+  }, [push, isCurrentMarket]);
 
   /** 图表催历史。写成稳定的回调，否则每次渲染都会重新订阅视口 */
   const needOlder = useCallback(() => { void backfillOlder(); }, [backfillOlder]);
@@ -472,8 +454,6 @@ export default function App() {
    * 最后一根还在走的时候顺手覆盖成最新的。
    */
   const resyncTail = useCallback(async () => {
-    // 本地文件只在换品种/周期时读一次；「尾部落后」这个判据是给推送断流写的，这里不适用
-    if (localOn) return;
     const key = marketRef.current.key;
     if (!key || marketRef.current.bars.length === 0) return;
     if (!isCurrentMarket(key)) return;
@@ -487,7 +467,7 @@ export default function App() {
         return m.added === 0 && m.patched === 0 ? prev : { ...prev, bars: m.bars };
       });
     } catch { /* 补不回来不影响看盘，下一轮再看 */ }
-  }, [localOn, isCurrentMarket]);
+  }, [isCurrentMarket]);
 
   /**
    * 尾部看门狗：最后一根落后超过 3 个周期就补一次。
@@ -496,8 +476,6 @@ export default function App() {
    * 比如 Gate 断过、这枚币很久没成交、或者订阅没接上。
    */
   useEffect(() => {
-    // 本地模式没有「推送断流」这回事，而且 interval 是交易所那套周期名，不是本地文件的
-    if (localOn) return;
     const step = intervalSeconds(interval);
     const t = window.setInterval(() => {
       const list = marketRef.current.bars;
@@ -505,7 +483,7 @@ export default function App() {
       if (Date.now() / 1000 - list[list.length - 1]!.time > step * 3) void resyncTail();
     }, 15_000);
     return () => window.clearInterval(t);
-  }, [interval, localOn, resyncTail]);
+  }, [interval, resyncTail]);
 
   // ---------- 只读数据 ----------
 
@@ -531,7 +509,7 @@ export default function App() {
       const d = await jget<LocalDirInfo>('/api/data/dir');
       // 整个对象留着：品种、文件数、周期显示名、读不出来的原因，两个页面都要用
       setLocal(d);
-      if (!d.dir) { setLocalOn(false); return; }
+      if (!d.dir) return;
       // 记住的品种还在就留着，不在就跳到第一个
       setLocalSym((cur) => {
         if (d.instruments.some((i) => i.symbol === cur)) return cur;
@@ -585,7 +563,6 @@ export default function App() {
       const next: LocalDirInfo = { ...r, exists: true, count: r.count ?? r.instruments.length };
       setLocal(next);
       setLocalSym(r.instruments[0]?.symbol ?? '');
-      setLocalOn(r.instruments.length > 0);
       if (r.instruments.length === 0) {
         push('err', '这个目录里没有认得的 K 线文件', r.warning ?? '文件名要写成「品种_周期.parquet」');
       } else {
@@ -598,19 +575,6 @@ export default function App() {
     }
   }, [push]);
 
-  /**
-   * 切到本地数据那张图。
-   *
-   * 目录里一个品种都没有时不切：切过去只能是一张空图，用户会以为是加载失败。
-   */
-  const useLocalData = useCallback(() => {
-    if (!local || local.instruments.length === 0) {
-      push('err', '还没有可用的本地数据', '先选一个放着「品种_周期.parquet」的目录');
-      return;
-    }
-    setLocalOn(true);
-  }, [local, push]);
-
   const loadMarket = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
     const seq = ++marketSeqRef.current;
@@ -620,30 +584,6 @@ export default function App() {
     const cached = marketCacheRef.current.get(key) ?? null;
     if (cached) setMarket({ key, ...cached });
     setLoading(!cached);
-
-    // 本地数据模式：交易所那条路整段跳过。本地文件没有合约参数（没有乘数、费率），
-    // info 留空 —— 下单面板本来就会在没有合约时禁用，不会拿本地价去交易所下单。
-    if (localOn) {
-      try {
-        const lv = await jget<LevelsResponse>(
-          '/api/levels?source=local&symbol=' + encodeURIComponent(name) + '&tf=' + encodeURIComponent(tf) + '&limit=500',
-        );
-        // 本地文件是一次读完的：只拿一页的话，往回拖就得再分页，
-        // 而分页这条路是给交易所写的（见 backfillOlder）。上限就是内存里的 MAX_BARS。
-        const opened = await jget<LocalBars>(
-          '/api/data/bars?symbol=' + encodeURIComponent(name) + '&tf=' + encodeURIComponent(tf) + '&limit=' + MAX_BARS,
-        );
-        if (seq !== marketSeqRef.current) return;
-        setMarket({ key, info: null, bars: opened.bars, levels: lv });
-        setHistoryEnd(opened.exhausted);
-        if (opened.exhausted) noMoreOlderRef.current = true;
-      } catch (e) {
-        if (seq === marketSeqRef.current) push('err', '本地数据读不了', (e as Error).message);
-      } finally {
-        if (seq === marketSeqRef.current) setLoading(false);
-      }
-      return;
-    }
 
     try {
       const levelsPromise = jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${tf}&limit=500`)
@@ -672,32 +612,7 @@ export default function App() {
     } finally {
       if (seq === marketSeqRef.current) setLoading(false);
     }
-  }, [push, localOn]);
-
-  /**
-   * 退出本地模式：回到交易所实时行情，本地那套选择留着（下次点回来还是这个品种）。
-   *
-   * 这里不用手动 loadMarket —— localOn 一变，上面那条 effect 就会拿新闭包去拉。
-   * （以前它自己再拉一次：闭包还是 localOn=true 的那版，等于退不出去；
-   * 现在那条 effect 自己也依赖 localOn，不存在这个问题。）
-   */
-  const exitLocal = useCallback(() => { setLocalOn(false); }, []);
-
-  /**
-   * 在「本地数据」条上换品种 / 周期。
-   *
-   * 条上有得选就说明用户要看的是本地这张图：顺手把本地模式打开，
-   * 否则选了之后图还是交易所行情，看着就是「下拉没反应」。
-   */
-  const pickLocalSymbol = useCallback((s: string) => {
-    if (!s) return;
-    setLocalSym(s);
-    setLocalOn(true);
-  }, []);
-  const pickLocalTf = useCallback((tf: string) => {
-    setLocalTf(tf);
-    setLocalOn(true);
-  }, []);
+  }, [push]);
 
   const loadLevelsOnly = useCallback(async (name: string, tf: string) => {
     const key = `${name}:${tf}`;
@@ -861,24 +776,9 @@ export default function App() {
   useEffect(() => { void loadLocal(); }, [loadLocal]);
 
   useEffect(() => { void loadConfig(); void loadTickers(); }, [loadConfig, loadTickers]);
-  // 交易所那条路：本地模式下整段让位。不让位的话，切进本地模式时这条会拿
-  // 合约名（BTC_USDT）+ 交易所周期（15m）去打 /api/levels?source=local，必然读不到
   useEffect(() => {
-    if (localOn) return;
     void loadMarket(contract, interval);
-  }, [contract, interval, localOn, loadMarket]);
-
-  // 本地模式下，品种/周期一变就换图。用 localPick 而不是 localTf：
-  // 换品种时周期会被兜底，兜出来的那个才是真正要加载的
-  useEffect(() => {
-    if (!localOn || !localPick) return;
-    void loadMarket(localPick.symbol, localPick.tf);
-  }, [localOn, localPick, loadMarket]);
-
-  /** 本地模式下图表上的「周期」按钮换成文件里实际有的那些 */
-  const localTfs = useMemo(() => {
-    return local?.instruments.find((i) => i.symbol === localSym)?.timeframes ?? [];
-  }, [local, localSym]);
+  }, [contract, interval, loadMarket]);
 
   /**
    * 首屏数据一落地就补历史，不等用户拖动。
@@ -1170,11 +1070,8 @@ export default function App() {
 
   const ticker = useMemo(() => tickers.find((t) => t.contract === contract), [tickers, contract]);
   /**
-   * 图上的价格精度。
-   *
-   * 交易所那条路有合约元数据（最小变动价）；本地文件没有，info 是空的。
-   * 以前本地模式退回 0.1：拿 BTC 的精度去画 0.074 的 AGT，K 线「撑开」的门槛和价格轴
-   * 的最小跨度都变成 0.1，整张图被压成一条直线。现在按本地数据最后一根收盘价估一个。
+   * 图上的价格精度优先使用交易所的合约元数据。
+   * 元数据暂时不可用时，根据当前行情最新价估算。
    */
   const priceRound = info?.priceRound ?? guessPriceRound(levels?.last ?? 0);
   // 持仓卡里会同时列出别的合约。价格精度按各自的最小变动位算，
@@ -1237,8 +1134,6 @@ export default function App() {
           exchange={config?.exchangeLabel ?? 'Gate'}
           env={config?.env ?? 'live'}
           ticker={ticker}
-          // 本地模式下顶栏换成本地这个品种：不然顶上是 BTC 的价，图上是 AGT 的 0.074
-          local={localOn && localPick ? { symbol: localPick.symbol, tf: localPick.tf, price: levels?.last ?? 0 } : null}
           view={view}
           onView={setView}
           aiOn={aiOn}
@@ -1257,37 +1152,17 @@ export default function App() {
 
         <ContractRail
           tickers={tickers}
-          // 本地模式下图上画的是本地那个品种，左栏就高亮它；否则会出现
-          // 「高亮 BTC、图上是 AGT」这种自相矛盾
-          current={localOn && localPick ? localPick.symbol : contract}
-          // 左栏是交易所的合约表：本地模式下点它就是要看这个币的实时行情，
-          // 顺手退出本地模式。不退出的话这一下点了没反应（交易所那条路在本地模式下是关着的）
-          onSelect={(name) => { setContract(name); setRailOpen(false); if (localOn) setLocalOn(false); }}
+          current={contract}
+          onSelect={(name) => { setContract(name); setRailOpen(false); }}
           showTradable={config?.env === 'testnet'}
           onClose={() => setRailOpen(false)}
         />
         {railOpen && <div className="rail-scrim" onClick={() => setRailOpen(false)} />}
 
         <main className="center">
-          <LocalBar
-            dir={local?.dir ?? ''}
-            instruments={local?.instruments ?? []}
-            files={local?.files ?? 0}
-            count={local?.count ?? 0}
-            warning={local?.warning ?? ''}
-            on={localOn}
-            canPick={canPickLocal}
-            symbol={localSym}
-            tf={localPick?.tf ?? 'D1'}
-            onSymbol={pickLocalSymbol}
-            onTf={pickLocalTf}
-            onUse={useLocalData}
-            onPickDir={(d) => void pickLocalDir(d)}
-            onExit={exitLocal}
-          />
           <ChartPane
-            contract={localOn ? (localPick?.symbol ?? contract) : contract}
-            interval={localOn ? (localPick?.tf ?? interval) : interval}
+            contract={contract}
+            interval={interval}
             bars={bars}
             // 历史位一起交给图：这次没算出来但还留着的那几条，画淡一点
             zones={[...(levels?.zones ?? []), ...(levels?.historyZones ?? [])]}
@@ -1304,13 +1179,10 @@ export default function App() {
             resetKey={marketKey}
             loading={loading}
             historyEnd={historyEnd}
-            // 本地文件读完之后不叫「交易所到头了」，那句话得换
-            historyEndHint={localOn ? '已到本地文件中最早的一根 · 换更大的周期，或者换一个数据目录' : undefined}
             backfilling={backfilling}
             onNeedOlder={needOlder}
-            // 本地模式下周期按钮只能给文件里真有的那几个，点了也没有的周期等于把人骗到空白图上
-            intervals={localOn ? localTfs : config?.intervals}
-            onIntervalChange={localOn ? setLocalTf : setInterval}
+            intervals={config?.intervals}
+            onIntervalChange={setInterval}
             onManualLevels={onManualLevels}
             canClose={armed && Boolean(token)}
             onClosePosition={(name, dir) => { void closeFromChart(name, dir); }}
@@ -1320,8 +1192,7 @@ export default function App() {
           <LevelsStrip
             zones={levels?.zones ?? []}
             manual={manualLevels}
-            // 本地模式下 ticker 是交易所那个合约的价，拿它算「离现价多远」会算出几百个点
-            price={localOn ? (levels?.last ?? 0) : (ticker?.last || levels?.last || 0)}
+            price={ticker?.last || levels?.last || 0}
             priceRound={priceRound}
             atr={levels?.atr ?? 0}
             levelsError={levelsError}
@@ -1335,8 +1206,7 @@ export default function App() {
            * 切回来还是刚才看到的那一屏。display:none 由浏览器给。
            */
           <main className="research-main" hidden={view !== 'research'}>
-            {/* 研究台里换品种/周期只换「选中的那个」，不把日内台硬切到本地数据：
-                研究是研究，看盘是看盘，别在背后把正在看的那张图换掉 */}
+            {/* 研究台的品种和周期独立于日内台的交易所行情。 */}
             <ResearchDesk
               canPick={canPickLocal}
               dir={local}

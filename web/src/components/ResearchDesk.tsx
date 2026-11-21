@@ -201,7 +201,7 @@ export default function ResearchDesk({
         </p>
       )}
 
-      {/* 数据源和参数：和日内台的「本地数据」条读的是同一份目录 */}
+      {/* 本地目录和分析参数仅供研究台使用。 */}
       <div className="panel">
         <div className="panel-head">
           <h3>本地数据</h3>
