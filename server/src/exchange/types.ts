@@ -106,6 +106,8 @@ export interface XOrder {
  */
 export interface XTrigger {
   id: string;
+  /** UTA TP/SL displays as separate rows but is cancelled as one strategy order. */
+  cancel_id?: string;
   initial: {
     contract: string;
     size: number;

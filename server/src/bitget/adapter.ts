@@ -12,15 +12,10 @@ import type { WebSocketServer } from 'ws';
 /**
  * Bitget 的适配器：把它的接口和口径翻成项目内部那套（见 exchange/types.ts）。
  *
- * 三个换算必须记住，错了不会报错，只会算错账：
- *
- *   1. **张 ↔ 币**。Bitget 下单收的是「币数量」，Gate 收的是「张」。
- *      1 张 = sizeMultiplier 个币，所以往外发要乘、往里收要除。
- *   2. **方向**。单向持仓（one_way_mode）下 side 就是买/卖，平仓靠 reduceOnly=YES；
- *      双向持仓（hedge_mode）下 side 表示"哪一边"、tradeSide 表示开/平，
- *      平仓仍使用持仓方向的 side（平多 buy + close，平空 sell + close）。两种都按账户实际模式翻。
- *   3. **止盈止损**。Bitget 用 planType=pos_profit / pos_loss 的持仓止盈止损单，
- *      比 Gate 那套 price_orders + auto_size 干净，翻回来还是那副形状。
+ *   1. **张 ↔ 币**。UTA 接口下单和持仓读币数量，内部统一用合约张数。
+ *      1 张 = sizeMultiplier 个币，所以发请求时乘、读回时除。
+ *   2. **方向**。单向模式靠 signed size 和 reduceOnly 区分，双向模式使用 posSide。
+ *   3. **账户模式**。私有账户、持仓、委托及策略止盈止损都走 UTA v3 API。
  */
 
 const LIMIT = 1000;
@@ -115,10 +110,127 @@ export function bitgetOrderSide(
   return direction === 'long' ? 'buy' : 'sell';
 }
 
+/** UTA v3 hedge-mode orders use the actual trade side when closing positions. */
+export function bitgetUtaOrderSide(
+  posMode: 'one_way_mode' | 'hedge_mode',
+  direction: 'long' | 'short',
+  reduce: boolean,
+): 'buy' | 'sell' {
+  if (posMode === 'hedge_mode' && reduce) return direction === 'long' ? 'sell' : 'buy';
+  return bitgetOrderSide(posMode, direction, reduce);
+}
+
 /** XOrder.size is signed by the Bitget v2 side field in both position modes. */
 export function signedBitgetOrderSize(side: 'buy' | 'sell', sizeCoin: number, multiplier: number): number {
   const size = multiplier > 0 ? sizeCoin / multiplier : sizeCoin;
   return side === 'sell' ? -size : size;
+}
+
+export function mapBitgetPosition(raw: RawPosition, multiplier: number): XPosition | null {
+  const symbol = String(raw.symbol ?? '');
+  const total = num(raw.total);
+  if (!symbol || !(multiplier > 0) || !(Math.abs(total) > 0)) return null;
+
+  const holdSide = String(raw.posSide ?? '').toLowerCase();
+  const short = holdSide === 'short' || (holdSide !== 'long' && total < 0);
+  const holdMode = String(raw.holdMode ?? '').toLowerCase();
+  const hedge = holdMode === 'hedge_mode';
+  const mark = num(raw.markPrice);
+  const size = Math.abs(total) / multiplier;
+
+  return {
+    contract: nameOf(symbol),
+    size: String(hedge ? size : short ? -size : size),
+    mode: hedge ? (short ? 'dual_short' : 'dual_long') : 'single',
+    leverage: String(num(raw.leverage)),
+    margin_mode: String(raw.marginMode ?? ''),
+    entry_price: String(num(raw.avgPrice)),
+    mark_price: String(mark),
+    liq_price: String(num(raw.liquidationPrice)),
+    unrealised_pnl: String(num(raw.unrealisedPnl)),
+    realised_pnl: String(num(raw.curRealisedPnl)),
+    value: String(Math.abs(total) * mark),
+  };
+}
+
+export function mapBitgetUtaOrder(raw: RawOrder, multiplier: number): XOrder {
+  const sizeCoin = num(raw.qty ?? raw.size);
+  const filled = num(raw.cumExecQty ?? raw.baseVolume);
+  const side = String(raw.side ?? '').toLowerCase();
+  const tradeSide = String(raw.tradeSide ?? '').toLowerCase();
+  const hedgeClose = String(raw.holdMode ?? '').toLowerCase() === 'hedge_mode' && tradeSide === 'close';
+  const posSide = String(raw.posSide ?? '').toLowerCase();
+  const quantity = multiplier > 0 ? sizeCoin / multiplier : sizeCoin;
+  // The app treats signed size as position direction for hedge-mode close orders.
+  const signed = hedgeClose && (posSide === 'long' || posSide === 'short')
+    ? (posSide === 'short' ? -quantity : quantity)
+    : signedBitgetOrderSize(side === 'sell' ? 'sell' : 'buy', sizeCoin, multiplier);
+  const status = stateOf(raw);
+  const reduceOnly = String(raw.reduceOnly ?? '').toLowerCase() === 'yes';
+
+  return {
+    id: String(raw.orderId ?? ''),
+    contract: nameOf(String(raw.symbol ?? '')),
+    size: String(signed),
+    left: String(multiplier > 0 ? Math.max(0, sizeCoin - filled) / multiplier : Math.max(0, sizeCoin - filled)),
+    price: String(num(raw.price)),
+    fill_price: String(num(raw.avgPrice ?? raw.priceAvg)),
+    status,
+    finish_as: status === 'finished'
+      ? String(raw.orderStatus ?? '').toLowerCase() === 'filled' ? 'filled' : 'cancelled'
+      : '',
+    is_reduce_only: tradeSide === 'close' || reduceOnly,
+    create_time: Math.round(num(raw.createdTime ?? raw.cTime ?? raw.uTime) / 1000),
+    tif: String(raw.timeInForce ?? raw.force ?? 'gtc').toLowerCase(),
+  };
+}
+
+export function mapBitgetStrategyTriggers(raw: RawOrder, multiplier: number): XTrigger[] {
+  const id = String(raw.orderId ?? '');
+  const symbol = String(raw.symbol ?? '');
+  const rawPositionSide = String(raw.posSide ?? '').toLowerCase();
+  const side = String(raw.side ?? '').toLowerCase();
+  const positionSide = rawPositionSide === 'long' || rawPositionSide === 'short'
+    ? rawPositionSide
+    : side === 'sell' ? 'long' : side === 'buy' ? 'short' : '';
+  const status = String(raw.status ?? '').toLowerCase();
+  if (!id || !symbol || (positionSide !== 'long' && positionSide !== 'short')) return [];
+  if (status && status !== 'pending' && status !== 'submitting') return [];
+
+  const direction = positionSide as 'long' | 'short';
+  const size = num(raw.qty);
+  const common: XTrigger['initial'] = {
+    contract: nameOf(symbol),
+    size: multiplier > 0 ? size / multiplier : size,
+    price: '0',
+    tif: 'ioc',
+    reduce_only: true,
+    close: false,
+    auto_size: direction === 'long' ? 'close_long' : 'close_short',
+  };
+  const createTime = Math.round(num(raw.createdTime) / 1000);
+  const output: XTrigger[] = [];
+
+  for (const [kind, priceField] of [['stop', 'stopLoss'], ['target', 'takeProfit']] as const) {
+    const price = num(raw[priceField]);
+    if (!(price > 0)) continue;
+    const stop = kind === 'stop';
+    output.push({
+      id: `${kind}:${id}`,
+      cancel_id: id,
+      initial: { ...common },
+      trigger: {
+        strategy: 0,
+        price_type: 0,
+        price: String(price),
+        rule: direction === 'long' ? (stop ? 2 : 1) : (stop ? 1 : 2),
+        expiration: 0,
+      },
+      create_time: createTime,
+    });
+  }
+
+  return output;
 }
 
 /** 合约表里的原始条目 → 项目内部的合约形状 */
@@ -177,6 +289,8 @@ export class BitgetExchange implements Exchange {
   private table: { at: number; list: XContract[]; raw: Map<string, RawContract> } | null = null;
   private tableBusy: Promise<void> | null = null;
   private oneCache = new Map<string, { at: number; c: XContract; raw: RawContract }>();
+  private settingsCache: { at: number; value: RawAccount } | null = null;
+  private settingsBusy: Promise<RawAccount | null> | null = null;
   /** 合约 → 保证金模式。下单必须带，读不到就按账户默认 */
   private marginModes = new Map<string, 'crossed' | 'isolated'>();
   private posMode: 'one_way_mode' | 'hedge_mode' | '' = '';
@@ -385,28 +499,42 @@ export class BitgetExchange implements Exchange {
 
   // ---------- 账户与持仓 ----------
 
+  private async accountSettings(): Promise<RawAccount | null> {
+    if (this.settingsCache && Date.now() - this.settingsCache.at < 60_000) return this.settingsCache.value;
+    if (this.settingsBusy) return this.settingsBusy;
+    this.settingsBusy = bgPrivate<RawAccount>('GET', '/api/v3/account/settings')
+      .then((value) => {
+        this.settingsCache = { at: Date.now(), value };
+        return value;
+      })
+      .catch(() => this.settingsCache?.value ?? null)
+      .finally(() => { this.settingsBusy = null; });
+    return this.settingsBusy;
+  }
+
   async account(): Promise<XAccount> {
     this.requireKeys();
-    // UTA balances live on the v3 account-assets endpoint. The legacy v2 mix account
-    // endpoint can succeed but report zero after the account is switched to UTA.
-    const a = await bgPrivate<RawAccount>('GET', '/api/v3/account/assets');
-    // Keep using the legacy futures snapshot only for position/margin mode metadata;
-    // it is not authoritative for balances and should not block UTA balance reads.
-    const futures = await bgPrivate<RawAccount>(
-      'GET', '/api/v2/mix/account/account',
-      { symbol: 'BTCUSDT', productType: PRODUCT, marginCoin: 'USDT' },
-    ).catch(() => null);
-    const mode = String(futures?.posMode ?? '');
+    const [assets, settings] = await Promise.all([
+      bgPrivate<RawAccount>('GET', '/api/v3/account/assets'),
+      this.accountSettings(),
+    ]);
+    const mode = String(settings?.holdMode ?? '');
     if (mode === 'one_way_mode' || mode === 'hedge_mode') {
       this.posMode = mode;
       this.posModeAt = Date.now();
     }
-    const mm = String(futures?.marginMode ?? '');
-    if (mm === 'crossed' || mm === 'isolated') {
-      // 账户默认模式：单个合约还不知道时用它兜底
-      if (!this.marginModes.has('__default__')) this.marginModes.set('__default__', mm);
+    const symbolConfigs = Array.isArray(settings?.symbolConfigList)
+      ? settings.symbolConfigList as RawAccount[]
+      : [];
+    for (const symbolConfig of symbolConfigs) {
+      const name = nameOf(String(symbolConfig.symbol ?? ''));
+      const marginMode = String(symbolConfig.marginMode ?? '');
+      if (String(symbolConfig.category ?? '') === PRODUCT && name
+        && (marginMode === 'crossed' || marginMode === 'isolated')) {
+        this.marginModes.set(name, marginMode);
+      }
     }
-    return bitgetAccountSnapshot(a);
+    return bitgetAccountSnapshot(assets);
   }
 
   private async currentPosMode(): Promise<'one_way_mode' | 'hedge_mode'> {
@@ -419,43 +547,26 @@ export class BitgetExchange implements Exchange {
     this.requireKeys();
     // 先把合约表拿下来：下面每一行都要按乘数换算张数，逐个去问太慢
     await this.refreshTable().catch(() => undefined);
-    const list = await bgPrivate<RawPosition[]>(
-      'GET', '/api/v2/mix/position/all-position',
-      { productType: PRODUCT, marginCoin: 'USDT' },
+    const data = await bgPrivate<{ list?: RawPosition[] }>(
+      'GET', '/api/v3/position/current-position',
+      { category: PRODUCT },
     );
-    const rows = Array.isArray(list) ? list : [];
+    const rows = Array.isArray(data?.list) ? data.list : [];
     const out: XPosition[] = [];
     for (const p of rows) {
-      const sym = String(p.symbol ?? '');
-      if (!sym) continue;
-      const name = nameOf(sym);
-      if (contract && name !== contract) continue;
-      const total = num(p.total);
-      if (!(Math.abs(total) > 0)) continue;
-      const mult = await this.multiplierOf(name).catch(() => 0);
-      if (!(mult > 0)) continue;
-      const hold = String(p.holdSide ?? p.posSide ?? '').toLowerCase();
-      const hedge = String(p.posMode ?? p.holdMode ?? '') === 'hedge_mode';
-      // 单向持仓时方向只能从符号或 holdSide 里看，两个都要认
-      const short = hold === 'short' || (hold !== 'long' && total < 0);
-      const sizeContracts = Math.abs(total) / mult;
-      const mark = num(p.markPrice);
-      const mm = String(p.marginMode ?? '');
-      if (mm === 'crossed' || mm === 'isolated') this.marginModes.set(name, mm);
-      out.push({
-        contract: name,
-        // Gate 的单向持仓把方向藏在符号里，这里保持一致；双向持仓靠 mode 区分
-        size: String(hedge ? sizeContracts : (short ? -sizeContracts : sizeContracts)),
-        mode: hedge ? (short ? 'dual_short' : 'dual_long') : 'single',
-        leverage: String(num(p.leverage)),
-        margin_mode: mm,
-        entry_price: String(num(p.openPriceAvg ?? p.openAvgPrice ?? p.avgPrice)),
-        mark_price: String(mark),
-        liq_price: String(num(p.liquidationPrice)),
-        unrealised_pnl: String(num(p.unrealizedPL)),
-        realised_pnl: String(num(p.totalProfits ?? p.achievedProfits)),
-        value: String(Math.abs(total) * mark),
-      });
+      const name = nameOf(String(p.symbol ?? ''));
+      if (!name || (contract && name !== contract)) continue;
+      const multiplier = await this.multiplierOf(name).catch(() => 0);
+      const row = mapBitgetPosition(p, multiplier);
+      if (!row) continue;
+      const mode = String(p.holdMode ?? '');
+      if (mode === 'one_way_mode' || mode === 'hedge_mode') {
+        this.posMode = mode;
+        this.posModeAt = Date.now();
+      }
+      const marginMode = String(p.marginMode ?? '');
+      if (marginMode === 'crossed' || marginMode === 'isolated') this.marginModes.set(name, marginMode);
+      out.push(row);
     }
     return out;
   }
@@ -463,39 +574,27 @@ export class BitgetExchange implements Exchange {
   // ---------- 委托 ----------
 
   private toOrder(raw: RawOrder, name: string, mult: number): XOrder {
-    const sizeCoin = num(raw.size);
-    const filled = num(raw.baseVolume ?? raw.cumExecQty);
-    const side = String(raw.side ?? '').toLowerCase();
-    const tradeSide = String(raw.tradeSide ?? '').toLowerCase();
-    // v2 双向模式平仓仍用持仓方向的 side；tradeSide=close 才表示平仓。
-    // 单向模式 side 则是实际买卖方向。两种情况都直接按 side 的正负映射。
-    const signed = signedBitgetOrderSize(side === 'sell' ? 'sell' : 'buy', sizeCoin, mult);
-    const left = Math.max(0, sizeCoin - filled);
-    const state = stateOf(raw);
-    return {
-      id: String(raw.orderId ?? ''),
-      contract: name,
-      size: String(signed),
-      left: String(mult > 0 ? left / mult : left),
-      price: String(num(raw.price)),
-      fill_price: String(num(raw.priceAvg)),
-      status: state,
-      finish_as: state === 'finished' ? 'filled' : '',
-      is_reduce_only: tradeSide === 'close' || String(raw.reduceOnly ?? '').toUpperCase() === 'YES',
-      create_time: Math.round(num(raw.cTime ?? raw.uTime) / 1000),
-      tif: String(raw.force ?? 'gtc').toLowerCase(),
-    };
+    return mapBitgetUtaOrder({ ...raw, symbol: name }, mult);
   }
 
   async openOrders(contract?: string): Promise<XOrder[]> {
     this.requireKeys();
     await this.refreshTable().catch(() => undefined);
-    const params: Record<string, string | number> = { productType: PRODUCT };
-    if (contract) params.symbol = symbolOf(contract);
-    const data = await bgPrivate<Record<string, unknown>>(
-      'GET', '/api/v2/mix/order/orders-pending', params,
-    );
-    const list = (data?.entrustedList ?? []) as RawOrder[];
+    const list: RawOrder[] = [];
+    let cursor = '';
+    for (let pageNumber = 0; pageNumber < 4; pageNumber += 1) {
+      const params: Record<string, string | number> = { category: PRODUCT, limit: 100 };
+      if (contract) params.symbol = symbolOf(contract);
+      if (cursor) params.cursor = cursor;
+      const page = await bgPrivate<{ list?: RawOrder[]; cursor?: string }>(
+        'GET', '/api/v3/trade/unfilled-orders', params,
+      );
+      const pageRows = Array.isArray(page?.list) ? page.list : [];
+      list.push(...pageRows);
+      const next = String(page?.cursor ?? '');
+      if (!next || next === cursor || pageRows.length === 0) break;
+      cursor = next;
+    }
     const out: XOrder[] = [];
     for (const raw of list) {
       const sym = String(raw.symbol ?? '');
@@ -520,8 +619,8 @@ export class BitgetExchange implements Exchange {
     if (!name) return null;
     const mult = await this.multiplierOf(name).catch(() => 0);
     const raw = await bgPrivate<RawOrder>(
-      'GET', '/api/v2/mix/order/detail',
-      { symbol: symbolOf(name), productType: PRODUCT, orderId: id },
+      'GET', '/api/v3/trade/order-info',
+      { orderId: id },
     ).catch(() => null);
     return raw && raw.orderId ? this.toOrder(raw, name, mult) : null;
   }
@@ -563,34 +662,25 @@ export class BitgetExchange implements Exchange {
     let side: 'buy' | 'sell';
     const body: Record<string, unknown> = {
       symbol: sym,
-      productType: PRODUCT,
-      marginCoin: 'USDT',
-      size: fixed(contracts * mult, volumePlace),
+      category: PRODUCT,
+      qty: fixed(contracts * mult, volumePlace),
       orderType: isMarket ? 'market' : 'limit',
+      marginMode: await this.marginModeFor(name, mult),
     };
 
-    if (posMode === 'hedge_mode') {
-      // 双向持仓：side 表示持仓方向；开/平由 tradeSide 决定，不能把 close 的 side 反转。
-      side = bitgetOrderSide(posMode, dir, reduce);
-      body.tradeSide = reduce ? 'close' : 'open';
-    } else {
-      side = bitgetOrderSide(posMode, dir, reduce);
-      if (reduce) body.reduceOnly = 'YES';
-    }
+    side = bitgetUtaOrderSide(posMode, dir, reduce);
     body.side = side;
+    if (posMode === 'hedge_mode') body.posSide = dir;
+    if (reduce && posMode === 'one_way_mode') body.reduceOnly = 'yes';
 
     if (!isMarket) {
       body.price = fixed(price, pricePlace);
       const force = String(spec.tif ?? 'gtc').toLowerCase();
-      body.force = force === 'poc' ? 'post_only' : force === 'ioc' || force === 'fok' ? force : 'gtc';
+      body.timeInForce = force === 'poc' ? 'post_only' : force === 'ioc' || force === 'fok' ? force : 'gtc';
     }
-    // 市价单不带 force：Bitget 只对限价单认这个参数
-
-    // 保证金模式必须带：有持仓时按持仓上的那个，否则用我们设过的那个
-    body.marginMode = await this.marginModeFor(name, mult);
 
     const data = await bgPrivate<Record<string, unknown>>(
-      'POST', '/api/v2/mix/order/place-order', {}, body,
+      'POST', '/api/v3/trade/place-order', {}, body,
     );
     const id = String(data?.orderId ?? '');
     if (!id) {
@@ -601,8 +691,8 @@ export class BitgetExchange implements Exchange {
     const guess: XOrder = {
       id,
       contract: name,
-      // 明细查询失败时按实际下单 side 回退；单向平仓的买卖方向与持仓方向相反。
-      size: String((side === 'sell' ? -1 : 1) * contracts),
+      // hedge mode's side describes the position through posSide; retain that position sign.
+      size: String((posMode === 'hedge_mode' ? (dir === 'short' ? -1 : 1) : (side === 'sell' ? -1 : 1)) * contracts),
       left: String(contracts),
       price: isMarket ? '0' : String(price),
       fill_price: '0',
@@ -610,7 +700,7 @@ export class BitgetExchange implements Exchange {
       finish_as: '',
       is_reduce_only: reduce,
       create_time: Math.round(Date.now() / 1000),
-      tif: String(body.force ?? 'gtc'),
+      tif: String(body.timeInForce ?? 'gtc'),
     };
     const detail = await this.order(id).catch(() => null);
     return detail ?? guess;
@@ -637,10 +727,9 @@ export class BitgetExchange implements Exchange {
     if (!name) {
       throw new GateError(404, 'ORDER_NOT_FOUND', '找不到这张委托，可能已经成交或撤掉了', 'Bitget');
     }
-    await bgPrivate('POST', '/api/v2/mix/order/cancel-order', {}, {
+    await bgPrivate('POST', '/api/v3/trade/cancel-order', {}, {
+      category: PRODUCT,
       symbol: symbolOf(name),
-      productType: PRODUCT,
-      marginCoin: 'USDT',
       orderId: id,
     });
   }
@@ -650,48 +739,17 @@ export class BitgetExchange implements Exchange {
   async triggers(): Promise<XTrigger[]> {
     this.requireKeys();
     await this.refreshTable().catch(() => undefined);
-    const data = await bgPrivate<Record<string, unknown>>(
-      'GET', '/api/v2/mix/order/orders-plan-pending',
-      { productType: PRODUCT, planType: 'profit_loss' },
+    const list = await bgPrivate<RawOrder[]>(
+      'GET', '/api/v3/trade/unfilled-strategy-orders',
+      { category: PRODUCT, type: 'tpsl' },
     );
-    const list = (data?.entrustedList ?? []) as RawOrder[];
     const out: XTrigger[] = [];
     for (const raw of list) {
       const sym = String(raw.symbol ?? '');
       if (!sym) continue;
       const name = nameOf(sym);
       const mult = await this.multiplierOf(name).catch(() => 0);
-      const hold = String(raw.posSide ?? raw.holdSide ?? '').toLowerCase();
-      const side = String(raw.side ?? '').toLowerCase();
-      const dir: 'long' | 'short' = hold === 'short' ? 'short'
-        : hold === 'long' ? 'long'
-          : side === 'sell' ? 'long' : 'short';
-      const plan = String(raw.planType ?? '').toLowerCase();
-      const isLoss = plan === 'pos_loss';
-      // Gate 的 rule：1 = 价格 >= 触发价，2 = 价格 <= 触发价
-      const rule = (dir === 'long') === isLoss ? 2 : 1;
-      const sizeCoin = num(raw.size);
-      out.push({
-        id: String(raw.orderId ?? ''),
-        initial: {
-          contract: name,
-          size: mult > 0 ? sizeCoin / mult : sizeCoin,
-          price: '0',
-          tif: 'ioc',
-          reduce_only: true,
-          close: false,
-          auto_size: dir === 'long' ? 'close_long' : 'close_short',
-        },
-        trigger: {
-          strategy: 0,
-          price_type: 0,
-          price: String(num(raw.triggerPrice)),
-          rule,
-          // Bitget 的持仓止盈止损不会自己过期，所以没有到期时刻
-          expiration: 0,
-        },
-        create_time: Math.round(num(raw.cTime ?? raw.uTime) / 1000),
-      });
+      out.push(...mapBitgetStrategyTriggers(raw, mult));
     }
     return out;
   }
@@ -707,39 +765,31 @@ export class BitgetExchange implements Exchange {
     // 多头止损是「跌到某价」（rule 2），多头止盈是「涨到某价」（rule 1）；空头反过来
     const isLoss = (dir === 'long') === (rule === 2);
     const posMode = await this.currentPosMode();
-    // 单向持仓时 holdSide 用 buy / sell 表示仓位方向，双向持仓直接用 long / short
-    const holdSide = posMode === 'hedge_mode' ? dir : (dir === 'long' ? 'buy' : 'sell');
     const price = Number(spec.trigger.price);
     if (!(price > 0)) throw new GateError(400, 'BAD_INPUT', '触发价不合法', 'Bitget');
 
     const body: Record<string, unknown> = {
       symbol: sym,
-      productType: PRODUCT,
-      marginCoin: 'USDT',
-      planType: isLoss ? 'pos_loss' : 'pos_profit',
-      triggerPrice: fixed(price, pricePlace),
-      // Gate 的 price_type 0 就是「最新成交价」，对应 Bitget 的 fill_price
-      triggerType: 'fill_price',
-      // 0 = 到价后市价平，和 Gate 那边 tif=ioc / price=0 一个意思
-      executePrice: '0',
-      holdSide,
+      category: PRODUCT,
+      type: 'tpsl',
+      side: dir === 'long' ? 'sell' : 'buy',
+      tpslMode: 'full',
+      reduceOnly: 'yes',
+      marginMode: await this.marginModeFor(name, await this.multiplierOf(name)),
+      ...(posMode === 'hedge_mode' ? { posSide: dir } : {}),
+      ...(isLoss
+        ? { stopLoss: fixed(price, pricePlace), slTriggerBy: 'market', slOrderType: 'market' }
+        : { takeProfit: fixed(price, pricePlace), tpTriggerBy: 'market', tpOrderType: 'market' }),
     };
-    // 张数按当前持仓给：持仓止盈止损是「平这一边全部」，给全量最贴近原意
-    const sides = await this.positions(name).catch(() => [] as XPosition[]);
-    const mine = sides.find((s) => (s.mode.includes('short') ? 'short' : 'long') === dir
-      && Math.abs(Number(s.size)) > 0);
-    if (mine) {
-      const mult = await this.multiplierOf(name);
-      body.size = fixed(Math.abs(Number(mine.size)) * mult, info.size_place ?? 0);
-    }
 
-    const data = await bgPrivate<Record<string, unknown>>(
-      'POST', '/api/v2/mix/order/place-tpsl-order', {}, body,
+    const data = await bgPrivate<{ orderId?: string }>(
+      'POST', '/api/v3/trade/place-strategy-order', {}, body,
     );
     const id = String(data?.orderId ?? '');
     if (!id) throw new GateError(502, 'BAD_RESPONSE', 'Bitget 没有回止盈止损单号', 'Bitget');
     return {
       id,
+      cancel_id: id,
       initial: { ...spec.initial },
       trigger: { ...spec.trigger, price: String(price) },
       create_time: Math.round(Date.now() / 1000),
@@ -748,9 +798,8 @@ export class BitgetExchange implements Exchange {
 
   async cancelTrigger(id: string): Promise<void> {
     this.requireKeys();
-    await bgPrivate('POST', '/api/v2/mix/order/cancel-plan-order', {}, {
-      orderIdList: [{ orderId: id }],
-      productType: PRODUCT,
+    await bgPrivate('POST', '/api/v3/trade/cancel-strategy-order', {}, {
+      orderId: id,
     });
   }
 
@@ -762,35 +811,21 @@ export class BitgetExchange implements Exchange {
     this.requireKeys();
     const sym = symbolOf(name);
     const marginMode = opts.cross ? 'crossed' : 'isolated';
-    await bgPrivate('POST', '/api/v2/mix/account/set-margin-mode', {}, {
-      symbol: sym,
-      productType: PRODUCT,
-      marginCoin: 'USDT',
-      marginMode,
-    });
     const base: Record<string, unknown> = {
+      category: PRODUCT,
       symbol: sym,
-      productType: PRODUCT,
-      marginCoin: 'USDT',
       leverage: String(opts.lev),
+      marginMode: opts.cross ? 'cross' : 'isolated',
     };
-    let r: Record<string, unknown> | null = null;
-    try {
-      r = await bgPrivate<Record<string, unknown>>('POST', '/api/v2/mix/account/set-leverage', {}, base);
-    } catch (e) {
-      /**
-       * 逐仓要按方向分开设（holdSide）。一单一单设会失败，这里两边都设一遍 ——
-       * 两边都失败才算真失败，把第一句原话带出去。
-       */
-      if (opts.cross) throw e;
-      for (const holdSide of ['long', 'short']) {
-        r = await bgPrivate<Record<string, unknown>>(
-          'POST', '/api/v2/mix/account/set-leverage', {}, { ...base, holdSide },
-        );
-      }
+    const posMode = await this.currentPosMode();
+    if (!opts.cross) {
+      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, { ...base, posSide: 'long' });
+      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, { ...base, posSide: 'short' });
+    } else {
+      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, base);
     }
     this.marginModes.set(name, marginMode);
-    const lev = num(r?.crossMarginLeverage ?? r?.longLeverage, opts.lev);
+    const lev = opts.lev;
     return {
       leverage: lev || opts.lev,
       crossLeverageLimit: opts.cross ? lev || opts.lev : 0,

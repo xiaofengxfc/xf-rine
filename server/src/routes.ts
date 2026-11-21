@@ -1714,6 +1714,7 @@ router.get('/orders', wrap(async (req, res) => {
 
 interface Trigger {
   id: string;
+  cancelId: string;
   contract: string;
   /** auto_size 直接写明平哪一边。空字符串表示认不出来（交易所网页上挂的、老的 isclose 单） */
   direction: Direction | '';
@@ -1763,6 +1764,7 @@ async function readTriggers(contract?: string): Promise<Trigger[]> {
     const createTime = unixSeconds(o.create_time);
     return {
       id: String(o.id),
+      cancelId: String(o.cancel_id ?? o.id),
       contract: String(initial.contract ?? ''),
       direction: auto.includes('long') ? 'long' : auto.includes('short') ? 'short' : '',
       protective: closeAll || auto !== '',
@@ -1864,13 +1866,16 @@ async function cancelSide(contract: string, dirs: Direction[], contractFlat: boo
   } catch (e) {
     out.errors.push(`读触发单失败: ${errText(e)}`);
   }
+  const canceledIds = new Set<string>();
   for (const t of triggers) {
     // 认不出平哪一边的整边平仓单（isclose），只有在这个合约要清干净时才敢动
     const mine = t.direction ? dirs.includes(t.direction) : t.closeAll && flatAfter;
     if (!mine) continue;
+    if (canceledIds.has(t.cancelId)) continue;
+    canceledIds.add(t.cancelId);
     try {
-      await exchange().cancelTrigger(t.id);
-      out.triggers.push(t.id);
+      await exchange().cancelTrigger(t.cancelId);
+      out.triggers.push(t.cancelId);
     } catch (e) {
       out.errors.push(`撤触发单 ${t.id}: ${errText(e)}`);
     }
@@ -1907,9 +1912,12 @@ async function clearOrphanTriggers(contract: string, dir: Direction): Promise<st
   const sides = await readSides(contract).catch(() => [] as Side[]);
   if (sides.some((s) => s.direction === dir && s.size > 0)) return [];
   const out: string[] = [];
+  const canceledIds = new Set<string>();
   for (const t of (await readTriggers(contract)).filter((x) => x.protective && x.direction === dir)) {
-    await exchange().cancelTrigger(t.id);
-    out.push(t.id);
+    if (canceledIds.has(t.cancelId)) continue;
+    canceledIds.add(t.cancelId);
+    await exchange().cancelTrigger(t.cancelId);
+    out.push(t.cancelId);
   }
   return out;
 }
@@ -2395,10 +2403,13 @@ async function applyBracket(contract: string, dir: Direction, stopRaw: number, t
   const existing = (await readTriggers(contract)).filter(
     (t) => t.protective && (t.direction === dir || (t.direction === '' && t.closeAll && !otherOpen)),
   );
+  const canceledIds = new Set<string>();
   for (const t of existing) {
+    if (canceledIds.has(t.cancelId)) continue;
+    canceledIds.add(t.cancelId);
     try {
-      await exchange().cancelTrigger(t.id);
-      canceled.push(t.id);
+      await exchange().cancelTrigger(t.cancelId);
+      canceled.push(t.cancelId);
     } catch (e) {
       errors.push(`撤旧单 ${t.id}: ${e instanceof GateError ? `${e.label} ${e.detail}` : String(e)}`);
     }
@@ -2575,7 +2586,9 @@ router.post('/reverse-position', wrap(async (req, res) => {
 
 router.delete('/price-order/:id', wrap(async (req, res) => {
   requireArm(req);
-  await exchange().cancelTrigger(String(req.params.id));
+  const displayId = String(req.params.id);
+  const trigger = (await readTriggers()).find((item) => item.id === displayId);
+  await exchange().cancelTrigger(trigger?.cancelId ?? displayId);
   res.json({ ok: true });
 }));
 
