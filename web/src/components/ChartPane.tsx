@@ -18,24 +18,17 @@ import { DrawingManager, defaultStyleFor, type DrawingKind, type DrawingLabel } 
 import type { Account, Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib/api.ts';
 import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
-import { pendingOrderLines } from '../lib/orderLines.ts';
-import { chartZoneLineStyle, selectChartZones } from '../lib/chartLevelStyle.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 import { useCandleStyle } from '../lib/chartStyle.ts';
+import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
 
-/** 真实持仓成本 */
-const HOLDING = '#ffcf4d';
-/** 强平价：仓位被交易所接管的那个价，比成本线更该看见 */
-const LIQ = '#ff7a45';
-/** 还挂着的限价单 */
-const PENDING = '#b58bff';
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
 const SPARSE_SHARE = 0.6;
 /** 太少不看：刚开局几十根说明不了什么 */
@@ -1134,199 +1127,21 @@ export default function ChartPane({
     return () => cancelAnimationFrame(id);
   }, [bars, resetKey, refreshSparse]);
 
-  /**
-   * 这批横线画出来要用的内容签名。
-   *
-   * 私有数据每 3 秒换一批数组、档位每 45 秒换一个对象，内容却常常一模一样。
-   * 没有这道闸，每隔几秒就要把这批线全删了重画一遍：一次刷新几十次模型更新，
-   * 而且在重画前后轴上会短暂少几行字 —— 慢一点的机器上看着就是「画面抽一下」。
-   * 只把真正会画出来的字段拼进来：价格、方向、保护单的价和规则、档位要显示的那几个数。
-   */
-  const levelSig = [
-    positions.map((p) => [
-      p.contract, p.direction, p.entryPrice, p.size, p.liqPrice, p.leverage, p.marginMode,
-      positionLiquidationPrice(p, account, stale ? 0 : markPrice),
-    ].join(',')).join(';'),
-    pendingOrderLines(orders).map((o) => o.id + '@' + o.price + 'x' + o.size).join(';'),
-    priceOrders.map((o) => o.id + '@' + o.triggerPrice + ':' + o.triggerRule + ':' + o.direction).join(';'),
-    // 中心价按最小变动价取整再比：引擎给的是浮点数，差 0.0001 不该触发整批重画
-    zones.map((z) => [
-      z.history ? 'h' : 'c', z.zone_type, fmtPrice(z.center, priceRound),
-      z.p_touch, z.p_hold, z.n_events, z.tf_count,
-    ].join(',')).join(';'),
-  ].join('|');
-
-  // ---- 图上的横线：持仓均价、挂着的限价单、止损止盈、支撑阻力 ----
-  useEffect(() => {
-    /**
-     * 这批横线挂在「现在看得见的那条序列」上，不能固定挂在 K 线上。
-     *
-     * 库里的价位线是跟着序列画的：序列一 visible=false，它的整批价位线就都不画，
-     * 连轴上的价签和线中间那行字也一起没了（CustomPriceLinePaneView /
-     * CustomPriceLinePriceAxisView 开头都先看 series.visible()）。
-     * 成交稀疏的合约会自动切成折线，那时 K 线序列是藏着的 —— 横线挂在它上面，
-     * 整批标注就一起消失，用户看到的就是「支撑阻力有时候不见了」。
-     * 手动画线是 primitive，不受这条规则管，所以只有这批标注会没。
-     */
-    const owner = drawMode === 'line'
-      ? lineRef.current
-      : candleStyle === 'american' ? barRef.current : priceRef.current;
-    if (!owner) return;
-
-    // 两条序列都清一遍：换画法时上一批挂在另一条上，只清看得见那条会留下孤儿，
-    // 下次切回来它们跟着一起显出来 —— 同一档在图上画了两遍
-    const both: (ISeriesApi<'Candlestick'> | ISeriesApi<'Bar'> | ISeriesApi<'Line'>)[] = [];
-    if (priceRef.current) both.push(priceRef.current);
-    if (barRef.current) both.push(barRef.current);
-    if (lineRef.current) both.push(lineRef.current);
-    for (const s of both) {
-      for (const line of levelLinesRef.current) s.removePriceLine(line);
-    }
-    levelLinesRef.current = [];
-
-    const all = barsRef.current;
-    const last = all[all.length - 1]?.close ?? 0;
-
-    interface Item {
-      price: number;
-      /** 越小越排在前面：顺序只决定画线的先后，不再决定谁有资格写字 */
-      rank: number;
-      color: string;
-      width: 1 | 2;
-      style: LineStyle;
-      title: string;
-      axisLabelVisible?: boolean;
-    }
-
-    const items: Item[] = [];
-
-    for (const p of positions) {
-      if (!p.entryPrice || !p.size) continue;
-      items.push({
-        price: p.entryPrice,
-        rank: 1,
-        color: HOLDING,
-        width: 2,
-        style: LineStyle.Solid,
-        title: positions.length > 1 ? (p.direction === 'long' ? '多单均价' : '空单均价') : '持仓均价',
-      });
-    }
-
-    // 强平价：真到这儿仓位就不归你管了。交易所没报这个价就不画。
-    for (const p of positions) {
-      const liqPrice = positionLiquidationPrice(p, account, stale ? 0 : markPrice);
-      if (!(liqPrice > 0)) continue;
-      const estimated = !(p.liqPrice > 0);
-      items.push({
-        price: liqPrice,
-        rank: 1.2,
-        color: LIQ,
-        width: 1,
-        style: LineStyle.Dashed,
-        title: (estimated ? '预估' : '')
-          + (positions.length > 1 ? (p.direction === 'long' ? '多单强平' : '空单强平') : '强平价')
-          + (estimated ? ' ≈ ' + fmtPrice(liqPrice, priceRound) : ''),
-      });
-    }
-
-    /**
-     * 止损止盈：这一边挂着的保护单。
-     *
-     * 和限价单一样是虚线 —— 它们都是「打算」，触发之前不是既成事实。
-     * 双向持仓时同一合约可能有两条止损，标题里写清是哪一边，不然两条红线分不清谁是谁。
-     */
-    for (const p of positions) {
-      const b = bracketOf(priceOrders, p.contract, p.direction);
-      const many = positions.length > 1;
-      if (b.stop) {
-        items.push({
-          price: b.stop.triggerPrice,
-          rank: 1.05,
-          color: 'rgba(255,95,109,0.85)',
-          width: 2,
-          style: LineStyle.Dashed,
-          title: (many ? (p.direction === 'long' ? '多单止损 ' : '空单止损 ') : '止损 ')
-            + fmtPrice(b.stop.triggerPrice, priceRound),
-        });
-      }
-      if (b.target) {
-        items.push({
-          price: b.target.triggerPrice,
-          rank: 1.06,
-          color: 'rgba(46,211,160,0.85)',
-          width: 2,
-          style: LineStyle.Dashed,
-          title: (many ? (p.direction === 'long' ? '多单止盈 ' : '空单止盈 ') : '止盈 ')
-            + fmtPrice(b.target.triggerPrice, priceRound),
-        });
-      }
-    }
-
-    // 挂着的限价单：成交之前它只是一个打算，用虚线跟已成交的持仓区分
-    for (const o of pendingOrderLines(orders)) {
-      items.push({
-        price: o.price,
-        rank: 1.5,
-        color: PENDING,
-        width: 2,
-        style: LineStyle.Dashed,
-        title: o.label,
-      });
-    }
-
-    // 当前位按离现价远近排，每侧最多两条；历史位仅在当前位不足时补位。
-    // 一律画实线：这版算法算出来的强度分没有上限（1.x 到 3.x 都常见），
-    // 拿「分数够不够」决定虚实，结果几乎全是淡虚线 —— 就是「支撑阻力看不见了」。
-    const byNear = selectChartZones(zones, last);
-    byNear.forEach((z, i) => {
-      const appearance = chartZoneLineStyle({
-        type: z.zone_type,
-        history: z.history === true,
-        priceLabel: fmtPrice(z.center, priceRound),
-        pTouch: z.p_touch,
-        pHold: z.p_hold,
-      });
-      items.push({
-        price: z.center,
-        rank: 3 + i * 0.01,
-        color: appearance.color,
-        width: appearance.width,
-        style: LineStyle.Solid,
-        title: appearance.title,
-        // 历史位与当前位同色、同粗、实线，只隐藏历史位文字和轴价格标签。
-        axisLabelVisible: appearance.axisLabelVisible,
-      });
-    });
-
-    items.sort((a, b) => a.rank - b.rank);
-
-    /** 当前位显示简短概率标注；历史位仅保留同色参考线。 */
-    for (const it of items) {
-      // 算不出坐标的价位（NaN、字段缺失）画上去也不会显示，还会把轴上的价签顶掉
-      if (!Number.isFinite(it.price)) continue;
-      try {
-        levelLinesRef.current.push(owner.createPriceLine({
-          price: it.price,
-          color: it.color,
-          lineWidth: it.width,
-          lineStyle: it.style,
-          axisLabelVisible: it.axisLabelVisible ?? true,
-          title: it.title,
-        }));
-      } catch (err) {
-        // 一条画不上不能连累后面几条，更不能冒泡到 React 把整页拆了
-        console.warn('[chart] 一条横线没画上', it.title, err);
-      }
-    }
-    // 依赖用的是内容签名，不是数组本身：数组每几秒就换一个，内容却往往是同一份。
-    // storageKey 也在依赖里：切币种、切周期会把整张图重建（见上面建图那段），
-    // 新图上一条横线都没有；只等 zones 变的话，档位请求慢一拍或者失败一次，
-    // 标注就一直不回来。drawMode 同理：换画法要换一条序列挂。
-    // 读的是上面那些闭包变量，签名保证内容变了才会重跑。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    // narrow 也在依赖里：转屏 / 分屏之后标注要按新宽度重画一遍
-  }, [levelSig, priceRound, candleStyle, drawMode, storageKey, narrow]);
-
+  useChartPriceLines({
+    refs: { price: priceRef, bar: barRef, line: lineRef, lines: levelLinesRef, bars: barsRef },
+    positions,
+    orders,
+    priceOrders,
+    zones,
+    account,
+    markPrice,
+    stale: Boolean(stale),
+    priceRound,
+    candleStyle,
+    drawMode,
+    storageKey,
+    narrow,
+  });
   /**
    * 右侧价格轴的小数位跟着合约的最小变动价走。
    * 原来是写死的「1000 以上留 1 位」，ETH 这种 0.01 一跳的合约，

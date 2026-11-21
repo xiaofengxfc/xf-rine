@@ -14,14 +14,8 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
-import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
-import com.getcapacitor.JSObject;
-import com.getcapacitor.Plugin;
-import com.getcapacitor.PluginCall;
-import com.getcapacitor.PluginMethod;
-import com.getcapacitor.annotation.CapacitorPlugin;
 
 /**
  * 壳。
@@ -29,12 +23,10 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  * 两件事原来都没做，手机上看就是「上面一条黑边、内容被顶下去」：
  *
  *   1. **没开 edge-to-edge**。窗口还是「给系统栏让位」的模式，WebView 从状态栏下面才开始，
- *      所以页面画到不了屏幕最上面。targetSdk 已经是 36，Android 15 起本来就该是铺满的，
- *      但窗口层的 decorFitsSystemWindows 仍然是 true，得自己关掉。
+ *      所以页面画到不了屏幕最上面。窗口层的 decorFitsSystemWindows 仍然是 true，得自己关掉。
  *
- *   2. **系统栏尺寸没传给页面**。配置里写了 SystemBars 插件，可那个包根本没装，
- *      window.Capacitor.Plugins.SystemBars 是 undefined，CSS 里的 --safe-area-inset-*
- *      一直是 0。这里自己算好，直接塞进 CSS 变量 —— 页面那套 --inset-* 已经优先读它。
+ *   2. **系统栏尺寸要传给页面**。本地 SystemBars 插件负责主题图标，窗口内边距由这里计算后
+ *      写入 CSS 变量 —— 页面那套 --inset-* 已经优先读它。
  *
  * 铺满 + 让位这两步必须成对出现：只铺满不让位，顶部工具栏会钻到状态栏底下；
  * 只让位不铺满，就是现在这样一条黑边。
@@ -165,62 +157,4 @@ public class MainActivity extends BridgeActivity {
         if (insets != null) applyInsets(insets);
     }
 
-    /**
-     * 状态栏图标的深浅。
-     *
-     * 页面那边（web/src/lib/theme.ts）一直按 cap.Plugins.SystemBars 去找这个插件，
-     * 但工程里从来没装过 @capacitor/system-bars —— 于是「深色页面配浅色图标」这条一直没生效。
-     * 这里补一个同名的原生插件，页面代码一个字都不用改。
-     */
-    @CapacitorPlugin(name = "SystemBars")
-    public static class SystemBarsPlugin extends Plugin {
-        /**
-         * 系统栏尺寸（CSS 像素）。
-         *
-         * 页面启动时主动来问一次 —— 光靠壳那边往页面里 push 不行：
-         * 页面加载、刷新都会清掉写在 <html> 上的内联变量，而 push 可能早就跑完了。
-         * 由页面来取，什么时候加载都能拿到当下的真值。
-         */
-        @PluginMethod
-        public void getInsets(PluginCall call) {
-            View decor = getActivity().getWindow().getDecorView();
-            WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(decor);
-            float density = getActivity().getResources().getDisplayMetrics().density;
-            if (density <= 0) density = 1f;
-            JSObject out = new JSObject();
-            if (insets == null) {
-                out.put("top", 0); out.put("right", 0); out.put("bottom", 0); out.put("left", 0);
-            } else {
-                Insets bars = insets.getInsets(
-                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
-                );
-                Insets gestures = insets.getInsets(WindowInsetsCompat.Type.systemGestures());
-                out.put("top", bars.top / density);
-                out.put("right", bars.right / density);
-                out.put("bottom", Math.max(bars.bottom, gestures.bottom) / density);
-                out.put("left", bars.left / density);
-            }
-            call.resolve(out);
-        }
-
-        @PluginMethod
-        public void setStyle(PluginCall call) {
-            String style = call.getString("style", "DARK");
-            // LIGHT = 浅色底 → 用深色图标
-            final boolean light = "LIGHT".equalsIgnoreCase(style);
-            /**
-             * 插件方法是跑在 Capacitor 的插件线程上的，不是 UI 线程。
-             * 直接改系统栏外观会抛 CalledFromWrongThreadException，整个进程崩掉 ——
-             * 这个坑第一次打包装上去就踩到了（页面一启动切主题就闪退）。
-             * 必须切回 UI 线程再动 View。
-             */
-            getActivity().runOnUiThread(() -> {
-                Window window = getActivity().getWindow();
-                WindowInsetsControllerCompat ctl = WindowCompat.getInsetsController(window, window.getDecorView());
-                ctl.setAppearanceLightStatusBars(light);
-                ctl.setAppearanceLightNavigationBars(light);
-            });
-            call.resolve();
-        }
-    }
 }

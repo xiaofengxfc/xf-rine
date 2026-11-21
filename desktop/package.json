@@ -9,7 +9,8 @@
   "scripts": {
     "bundle": "node tools/bundle.mjs",
     "dist": "node tools/bundle.mjs && node tools/builder.mjs",
-    "start": "electron ."
+    "start": "electron .",
+    "check:runtime": "node --test tests/*.test.cjs"
   },
   "devDependencies": {
     "electron": "^45.2.3",

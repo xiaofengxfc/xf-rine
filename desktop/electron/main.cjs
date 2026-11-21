@@ -14,9 +14,10 @@
 const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
-const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
+const { envHas, readEnvNumber, setEnvLine, withNetworkDefaults } = require('./environment.cjs');
+const { pickPort } = require('./port-selection.cjs');
 
 /**
  * 冒烟模式：只启动服务端、等它健康，然后退出。用来在没有人工点击的机器上验证安装包。
@@ -122,25 +123,8 @@ function readEnvText() {
   }
 }
 
-function envHas(text, name) {
-  return new RegExp('^\\s*' + name + '\\s*=', 'm').test(text);
-}
-
-function readEnvNumber(text, name) {
-  const m = new RegExp('^\\s*' + name + '\\s*=\\s*(\\d+)', 'm').exec(text);
-  return m ? Number(m[1]) : 0;
-}
-
-function readEnvString(text, name) {
-  const m = new RegExp('^\\s*' + name + '\\s*=\\s*(\\S+)', 'm').exec(text);
-  return m ? m[1] : '';
-}
-
 function writeEnvLine(name, value) {
-  const text = readEnvText();
-  const line = name + '=' + value;
-  const re = new RegExp('^\\s*' + name + '\\s*=.*$', 'm');
-  const next = re.test(text) ? text.replace(re, line) : (text.replace(/\s*$/, '') + (text.trim() ? '\n' : '') + line + '\n');
+  const next = setEnvLine(readEnvText(), name, value);
   try {
     fs.writeFileSync(envFile(), next, 'utf8');
   } catch (e) {
@@ -157,75 +141,19 @@ function writeEnvLine(name, value) {
  * 已经有值的一律不覆盖：用户自己改过的设置不能被升级冲掉。
  */
 function ensureEnv() {
-  let text = readEnvText();
-  const add = [];
-  if (!envHas(text, 'HOST')) add.push('HOST=0.0.0.0');
-  if (!envHas(text, 'REMOTE_TOKEN')) add.push('REMOTE_TOKEN=' + randomBytes(9).toString('base64url'));
-  if (add.length) {
-    text = text.replace(/\s*$/, '') + (text.trim() ? '\n' : '') + add.join('\n') + '\n';
+  const current = readEnvText();
+  const token = envHas(current, 'REMOTE_TOKEN') ? '' : randomBytes(9).toString('base64url');
+  const settings = withNetworkDefaults(current, token);
+  if (settings.text !== current) {
     try {
-      fs.writeFileSync(envFile(), text, 'utf8');
+      fs.writeFileSync(envFile(), settings.text, 'utf8');
       log('[main] 已生成配置文件：' + envFile());
     } catch (e) {
       log('[main] 写配置文件失败：' + e.message);
     }
   }
-  serverHost = readEnvString(readEnvText(), 'HOST') || '0.0.0.0';
+  serverHost = settings.host;
 }
-
-// ---------- 端口 ----------
-
-/**
- * 有人在听吗？
- *
- * 只靠「绑得上」判断不行，Windows 上会骗人：别的程序绑了 127.0.0.1:8787，
- * 这里绑 0.0.0.0:8787 照样成功，两个进程同时监听，而 127.0.0.1 的请求
- * 会优先给更具体的那个 —— 页面于是连到了别人（比如开发环境的服务端）。
- * 连一下才分得清：能连上就是有人。
- */
-function portTaken(port) {
-  return new Promise((resolve) => {
-    const s = net.connect({ port, host: '127.0.0.1' });
-    s.setTimeout(900);
-    s.once('connect', () => { s.destroy(); resolve(true); });
-    s.once('timeout', () => { s.destroy(); resolve(false); });
-    s.once('error', () => resolve(false));
-  });
-}
-
-async function portFree(port, host) {
-  if (await portTaken(port)) return false;
-  return await new Promise((resolve) => {
-    const s = net.createServer();
-    s.unref();
-    s.once('error', () => resolve(false));
-    s.listen(port, host, () => s.close(() => resolve(true)));
-  });
-}
-
-/**
- * 挑一个能用的端口。
- *
- * 不用写死 8787：用户可能同时开着开发环境，别的程序也可能正好占了。
- * 上次用过的端口写在 .env 里，优先接着用 —— 手机端填的地址跟端口绑在一起，
- * 每次启动换一个的话，手机上那串就白填了。
- */
-async function pickPort(preferred, skip = new Set()) {
-  if (preferred && !skip.has(preferred) && (await portFree(preferred, serverHost))) return preferred;
-  for (const p of [8787, 8788, 8789, 8790, 8791, 8792]) {
-    if (!skip.has(p) && (await portFree(p, serverHost))) return p;
-  }
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.unref();
-    s.once('error', reject);
-    s.listen(0, serverHost, () => {
-      const p = s.address().port;
-      s.close(() => resolve(p));
-    });
-  });
-}
-
 // ---------- 服务端进程 ----------
 
 function spawnServer() {
@@ -305,7 +233,7 @@ async function startServer() {
   const preferred = readEnvNumber(readEnvText(), 'PORT');
   const skip = new Set();
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    serverPort = await pickPort(attempt === 0 ? preferred : 0, skip);
+    serverPort = await pickPort(attempt === 0 ? preferred : 0, skip, serverHost);
     if (attempt === 0 && serverPort !== preferred) {
       // 记住这次挑到的端口，下次接着用；手机端填的地址才不会每天都变
       writeEnvLine('PORT', String(serverPort));

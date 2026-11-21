@@ -768,9 +768,16 @@ server/          Node + TypeScript，Express
   src/ai.ts            OpenAI 兼容调用、提示词、容错解析、多角色决策协议（移植自 TradingAgents）
   src/aiStrategy.ts    策略配置、当日亏损基准、确定性风控闸门（张数在这里算）
   src/aiRunner.ts      执行循环：定时器、冷却、熔断、决策日志、发单
-  src/routes.ts        HTTP 接口，含风控校验
+  src/routes.ts        API 组合、行情、研究与共享缓存
+  src/tradeRoutes.ts   账户、委托、仓位和交易接口
+  src/systemRoutes.ts  配置、备份、诊断和反馈接口
+  src/aiTradingRoutes.ts AI 策略执行和决策接口
   scripts/             命令行体检脚本
 web/             React + Vite + lightweight-charts
+  src/hooks/useMarketFeed.ts     行情、WebSocket 与 K 线历史
+  src/hooks/useTradingSession.ts 私有账户数据和交易解锁状态
+  src/hooks/useDeskNavigation.ts 台面导航、原生返回与抽屉状态
+  src/hooks/useUserPreferences.ts 本地行情与仓位偏好
   src/components/ChartPane.tsx   图表、画图工具、价位线
   src/components/NewsCard.tsx    新闻雷达卡片
   src/components/AiCard.tsx      AI 分析卡片（只出方向，不下单）
@@ -785,6 +792,7 @@ web/             React + Vite + lightweight-charts
 
 ```bash
 pnpm check:ai                        # AI 交易链路自检：闸门、多角色协议、执行器、熔断，全程离线
+pnpm check:sidecar-http              # Python 引擎 HTTP 契约检查，不需要数值依赖
 pnpm check:levels                    # 默认 BTC_USDT 15m
 pnpm check:levels SOL_USDT 1h        # 换个合约和周期
 ```

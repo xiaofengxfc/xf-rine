@@ -1,10 +1,9 @@
 import { fmtPct, fmtPrice } from '../lib/format.ts';
 import type { Ticker } from '../lib/api.ts';
 import { toggleTheme, useTheme } from '../lib/theme.ts';
+import type { View } from '../lib/navigation.ts';
 
 /** 页面切换：日内看盘、研究分析、AI 交易和策略。 */
-export type View = 'desk' | 'research' | 'ai' | 'quant';
-
 interface Props {
   ticker: Ticker | undefined;
   env: 'testnet' | 'live';
