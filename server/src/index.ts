@@ -4,6 +4,7 @@ import { WebSocketServer } from 'ws';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
+import { allowedOrigin, isLoopbackAddress } from './httpSecurity.js';
 import { config, keyHint, restBaseUrl, envLabel, exchangeLabel, ENV_PATH, lanEnabled, lanUrls, moduleDir } from './config.js';
 import { router } from './routes.js';
 // 行情连接跟着所选交易所走：Gate 一套、Bitget 一套，对页面是同一个协议
@@ -28,27 +29,12 @@ app.use(express.json({ limit: '256kb' }));
  * 但不能回 *：本机这个端口后面是下单、平仓、改密钥，而浏览器对 127.0.0.1 的
  * 请求没有同源保护以外的任何防线 —— 别人的网页只要发一个跨域请求就能打到
  * /api/trade/arm 和 /api/order（还有 /api/config/keys）。所以只回显「自己人」的源：
- * 同源、回环地址（桌面窗口 / 本地 Vite / Capacitor 都是这个），或者和请求 Host 一致
- * （局域网里直接用 IP 打开页面）。别的源一律不给头，写操作直接 403。
+ * 回环地址（桌面窗口 / 本地 Vite / Capacitor 都是这个），或者与请求 Host 相同的局域网 IP 字面量。
+ * 别的源一律不给头，写操作直接 403。
  */
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
-
-function allowedOrigin(req: express.Request): string {
-  const origin = String(req.header('origin') ?? '');
-  // 没有 Origin：同源导航、命令行、桌面端主进程发的请求，不需要这个头
-  if (!origin || origin === 'null') return '';
-  let u: URL;
-  try { u = new URL(origin); } catch { return ''; }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
-  const host = u.hostname.toLowerCase();
-  if (LOOPBACK_HOSTS.has(host)) return origin;
-  if (u.host.toLowerCase() === String(req.header('host') ?? '').toLowerCase()) return origin;
-  return '';
-}
-
 app.use('/api', (req, res, next) => {
   const origin = String(req.header('origin') ?? '');
-  const allowed = allowedOrigin(req);
+  const allowed = allowedOrigin(origin, String(req.header('host') ?? ''));
   if (allowed) {
     res.setHeader('Access-Control-Allow-Origin', allowed);
     res.setHeader('Vary', 'Origin');
@@ -65,8 +51,6 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
-
-const isLoopbackAddr = (a: string): boolean => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 
 /** 定长比较，别让「一位一位试」从响应时间里读出答案 */
 function tokenOk(given: string): boolean {
@@ -96,7 +80,7 @@ const requireToken = process.env.XFRINE_REQUIRE_TOKEN === '1';
  * 手机上连本机也要拦，那种情形由上面的 requireToken 打开。
  */
 app.use('/api', (req, res, next) => {
-  if (!requireToken && (!lanEnabled() || isLoopbackAddr(req.socket.remoteAddress ?? ''))) {
+  if (!requireToken && (!lanEnabled() || isLoopbackAddress(req.socket.remoteAddress ?? ''))) {
     next();
     return;
   }
@@ -159,7 +143,7 @@ const wss = new WebSocketServer({
   server,
   path: '/ws',
   verifyClient: (info, cb) => {
-    if (!requireToken && (!lanEnabled() || isLoopbackAddr(info.req.socket.remoteAddress ?? ''))) return cb(true);
+    if (!requireToken && (!lanEnabled() || isLoopbackAddress(info.req.socket.remoteAddress ?? ''))) return cb(true);
     let token = '';
     try {
       token = new URL(info.req.url ?? '/', 'http://localhost').searchParams.get('token') ?? '';

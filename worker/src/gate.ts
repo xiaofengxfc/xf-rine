@@ -315,10 +315,13 @@ export function gateClient(cfg: GateConfig): Client {
     },
 
     async setLeverage(name, leverage, mode) {
-      // 保证金模式只能在全仓/逐仓之间切，且和杠杆绑在一起改：先改模式，改不动也不阻断
-      await call('POST', '/futures/usdt/positions/' + encodeURIComponent(name) + '/margin', { mode, leverage }, undefined, { private: true })
-        .catch(() => undefined);
-      await call('POST', '/futures/usdt/positions/' + encodeURIComponent(name) + '/leverage', { leverage }, undefined, { private: true });
+      // Gate 用 leverage=0 表示全仓，杠杆倍数放在 cross_leverage_limit；
+      // 单独先切模式会吞掉失败，再设置正杠杆会把请求改成逐仓。
+      const cross = mode === 'cross';
+      await call('POST', '/futures/usdt/positions/' + encodeURIComponent(name) + '/leverage', {
+        leverage: cross ? 0 : leverage,
+        cross_leverage_limit: cross ? leverage : undefined,
+      }, undefined, { private: true });
     },
 
     async marketClose(name, direction, size) {

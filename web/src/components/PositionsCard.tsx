@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
-  jsend,
-  type Account, type CanceledTrades, type CloseResult, type OpenOrder, type Position, type PriceOrder,
+  jget, jsend,
+  type Account, type CanceledTrades, type CloseResult, type ContractInfo, type OpenOrder, type Position, type PriceOrder,
 } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtPct, fmtUsd, fmtTime } from '../lib/format.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { multiplierOf, pnlFromCost, pnlOf } from '../lib/position.ts';
+import { floorToSizeStep, isOnSizeStep } from '../lib/sizing.ts';
 import {
   bracketOf as findBracket, dirLabel, protectionState, triggerKind, type Dir,
 } from '../lib/protective.ts';
@@ -38,6 +39,12 @@ interface BracketEdit {
 
 const keyOf = (contract: string, dir: Dir) => contract + ':' + dir;
 
+function cleanDecimalInput(value: string): string {
+  const cleaned = value.replace(/[^0-9.]/g, '');
+  const point = cleaned.indexOf('.');
+  return point < 0 ? cleaned : cleaned.slice(0, point + 1) + cleaned.slice(point + 1).replace(/\./g, '');
+}
+
 /** 平仓顺带撤掉的东西，写成一句能读的话 */
 function cleanupText(c: CanceledTrades | undefined): string {
   const parts: string[] = [];
@@ -59,10 +66,23 @@ export default function PositionsCard({
   const [tab, setTab] = useState<'pos' | 'ord' | 'trig'>('pos');
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const [confirmReverse, setConfirmReverse] = useState<string | null>(null);
-  const [adding, setAdding] = useState<{ key: string; size: string } | null>(null);
+  const [adding, setAdding] = useState<{ key: string; size: string; step: number } | null>(null);
   const [edit, setEdit] = useState<BracketEdit | null>(null);
-  const [orderEdit, setOrderEdit] = useState<{ id: string; price: string; size: string } | null>(null);
+  const [orderEdit, setOrderEdit] = useState<{ id: string; contract: string; maxSize: number; step: number; price: string; size: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+
+  async function contractInfo(contract: string): Promise<ContractInfo> {
+    return jget<ContractInfo>('/api/contracts/' + encodeURIComponent(contract));
+  }
+
+  function sizeRules(info: ContractInfo) {
+    const step = info.sizeStep && info.sizeStep > 0 ? info.sizeStep : 1;
+    return {
+      step,
+      min: info.sizeMin > 0 ? info.sizeMin : step,
+      max: info.sizeMax > 0 ? floorToSizeStep(info.sizeMax, step) : 0,
+    };
+  }
 
   // 仓没了就把对着它弹的确认收掉，别让人对着旧数字点确认
   useEffect(() => {
@@ -144,13 +164,32 @@ export default function PositionsCard({
     } finally { setBusy(null); }
   }
 
+  async function startAddPosition(p: Position) {
+    const k = keyOf(p.contract, p.direction);
+    setBusy('info-add-' + k);
+    try {
+      const rules = sizeRules(await contractInfo(p.contract));
+      let size = floorToSizeStep(Math.abs(p.size) / 2, rules.step);
+      if (size < rules.min) size = rules.min;
+      if (rules.max > 0 && size > rules.max) size = rules.max;
+      setAdding({ key: k, size: String(size), step: rules.step });
+    } catch (e) {
+      onToast('err', '读取合约参数失败', (e as Error).message);
+    } finally { setBusy(null); }
+  }
+
   async function addPosition(p: Position) {
     if (!token || !adding) return;
-    const qty = Math.round(Number(adding.size));
-    if (!(qty > 0)) { onToast('err', '张数不对', '填一个正整数'); return; }
+    const qty = Number(adding.size);
     const k = keyOf(p.contract, p.direction);
     setBusy('add-' + k);
     try {
+      const rules = sizeRules(await contractInfo(p.contract));
+      if (!Number.isFinite(qty) || qty < rules.min || (rules.max > 0 && qty > rules.max)
+        || !isOnSizeStep(qty, rules.step)) {
+        onToast('err', '张数不对', `张数需在 ${rules.min}${rules.max > 0 ? ` 至 ${rules.max}` : ''} 之间，并按 ${rules.step} 张递增`);
+        return;
+      }
       const r = await jsend<{ order: { id: string; status: string; fillPrice: number } }>(
         'POST', '/api/add-position',
         { contract: p.contract, direction: p.direction, size: qty },
@@ -225,10 +264,17 @@ export default function PositionsCard({
   async function saveOrderEdit() {
     if (!token || !orderEdit) return;
     const price = Number(orderEdit.price) || 0;
-    const size = Math.round(Number(orderEdit.size)) || 0;
+    const size = Number(orderEdit.size);
     if (!(price > 0)) { onToast('err', '价格不对', '填一个大于 0 的限价'); return; }
     setBusy('amend-' + orderEdit.id);
     try {
+      const left = orderEdit.maxSize;
+      const rules = sizeRules(await contractInfo(orderEdit.contract));
+      if (!Number.isFinite(size) || size < rules.min || size > left
+        || (rules.max > 0 && size > rules.max) || !isOnSizeStep(size, rules.step)) {
+        onToast('err', '张数不对', `张数需在 ${rules.min} 至 ${Math.min(left, rules.max || left)} 之间，并按 ${rules.step} 张递增`);
+        return;
+      }
       const r = await jsend<{ replaced: { oldId: string; id: string; price: number; size: number; status: string } }>(
         'POST', '/api/order/' + orderEdit.id + '/amend',
         { price, size },
@@ -239,6 +285,23 @@ export default function PositionsCard({
       onRefresh();
     } catch (e) {
       onToast('err', '改单失败', (e as Error).message);
+    } finally { setBusy(null); }
+  }
+
+  async function startOrderEdit(o: OpenOrder) {
+    setBusy('info-amend-' + o.id);
+    try {
+      const info = await contractInfo(o.contract);
+      setOrderEdit({
+        id: o.id,
+        contract: o.contract,
+        maxSize: Math.abs(o.left ?? o.size),
+        step: info.sizeStep && info.sizeStep > 0 ? info.sizeStep : 1,
+        price: o.price > 0 ? String(o.price) : '',
+        size: String(Math.abs(o.left ?? o.size)),
+      });
+    } catch (e) {
+      onToast('err', '读取合约参数失败', (e as Error).message);
     } finally { setBusy(null); }
   }
 
@@ -450,14 +513,17 @@ export default function PositionsCard({
 
                       {adding && adding.key === k ? (
                         <div className="pos-acts two">
-                          <input
-                            className="input sm"
-                            inputMode="numeric"
-                            placeholder="张数"
-                            value={adding.size}
-                            onChange={(ev) => setAdding({ key: k, size: ev.target.value.replace(/[^0-9]/g, '') })}
-                          />
-                          <button className={'btn ' + (isLong ? 'long' : 'short')} disabled={busy === 'add-' + k} onClick={() => addPosition(p)}>
+                          <div className="field">
+                            <label>张数（步进 {adding.step}）</label>
+                            <input
+                              className="input sm"
+                              inputMode="decimal"
+                              placeholder="张数"
+                              value={adding.size}
+                              onChange={(ev) => setAdding({ ...adding, size: cleanDecimalInput(ev.target.value) })}
+                            />
+                          </div>
+                          <button className={'btn ' + (isLong ? 'long' : 'short')} disabled={!armed || busy === 'add-' + k} onClick={() => addPosition(p)}>
                             {busy === 'add-' + k ? '提交中…' : '市价加仓'}
                           </button>
                         </div>
@@ -465,11 +531,11 @@ export default function PositionsCard({
                         <div className="pos-acts">
                           <button
                             className="btn ghost"
-                            disabled={!armed}
                             title={armed ? '按市价在这一边加张数' : '先解锁交易'}
-                            onClick={() => setAdding({ key: k, size: String(Math.max(1, Math.round(Math.abs(p.size) / 2))) })}
+                            disabled={!armed || busy === 'info-add-' + k}
+                            onClick={() => void startAddPosition(p)}
                           >
-                            加仓
+                            {busy === 'info-add-' + k ? '读取参数…' : '加仓'}
                           </button>
                           <button className="btn ghost" disabled={!armed} title={armed ? '平掉这一边，再反向开同样的张数' : '先解锁交易'} onClick={() => setConfirmReverse(k)}>
                             反手
@@ -502,18 +568,18 @@ export default function PositionsCard({
                       />
                     </div>
                     <div className="field">
-                      <label>剩余张数（≤ {Math.abs(o.left || o.size)}）</label>
+                      <label>剩余张数（≤ {Math.abs(o.left ?? o.size)}，步进 {orderEdit.step}）</label>
                       <input
                         className="input sm"
-                        inputMode="numeric"
+                        inputMode="decimal"
                         value={orderEdit.size}
-                        onChange={(ev) => setOrderEdit({ ...orderEdit, size: ev.target.value.replace(/[^0-9]/g, '') })}
+                        onChange={(ev) => setOrderEdit({ ...orderEdit, size: cleanDecimalInput(ev.target.value) })}
                       />
                     </div>
                   </div>
                   <div className="edit-note">先按新条件验一遍，验过了才撤旧单重挂 —— 委托号会变。</div>
                   <div className="acts">
-                    <button className="btn accent" disabled={busy === 'amend-' + o.id} onClick={saveOrderEdit}>
+                    <button className="btn accent" disabled={!armed || busy === 'amend-' + o.id} onClick={saveOrderEdit}>
                       {busy === 'amend-' + o.id ? '改单中…' : '保存并重挂'}
                     </button>
                     <button className="btn ghost" onClick={() => setOrderEdit(null)}>取消</button>
@@ -525,8 +591,8 @@ export default function PositionsCard({
                     {o.contract.replace('_USDT', '')}{' '}
                     {/* 显示「还剩多少」：部分成交后真正会成交的是剩余量，改单也按它算 */}
                     <span className={o.size > 0 ? 'up' : 'down'}>
-                      {o.size > 0 ? '买' : '卖'} {Math.abs(o.left || o.size)}
-                      {Math.abs(o.left || o.size) !== Math.abs(o.size) && (
+                      {o.size > 0 ? '买' : '卖'} {Math.abs(o.left ?? o.size)}
+                      {Math.abs(o.left ?? o.size) !== Math.abs(o.size) && (
                         <span className="dim"> / 共 {Math.abs(o.size)}</span>
                       )}
                     </span>{' '}
@@ -537,15 +603,11 @@ export default function PositionsCard({
                   <span style={{ display: 'flex', gap: 2 }}>
                     <button
                       className="x edit"
-                      title="改价 / 改量"
-                      disabled={!armed}
-                      onClick={() => setOrderEdit({
-                        id: o.id,
-                        price: o.price > 0 ? String(o.price) : '',
-                        size: String(Math.abs(o.left || o.size)),
-                      })}
+                      title={o.left === 0 ? '没有剩余张数，不能改单' : '改价 / 改量'}
+                      disabled={!armed || o.left === 0 || busy === 'info-amend-' + o.id}
+                      onClick={() => void startOrderEdit(o)}
                     >
-                      ✎
+                      {busy === 'info-amend-' + o.id ? '…' : '✎'}
                     </button>
                     <button className="x" title="撤单" disabled={!armed} onClick={() => cancelOrder(o.id)}>×</button>
                   </span>

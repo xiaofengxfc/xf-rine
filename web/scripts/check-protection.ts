@@ -74,6 +74,7 @@ check(fmtLeft(-1000) === '已过期', '时长：负数该说已过期，得到 '
 {
   const rows: PriceOrder[] = [
     // 多头：rule 2 = 止损，rule 1 = 止盈
+    { ...order(2, 0, 'long'), id: 'condition', contract: 'BTC_USDT', protective: false },
     { ...order(2, 0, 'long'), id: 'a', contract: 'BTC_USDT' },
     { ...order(1, 0, 'long'), id: 'b', contract: 'BTC_USDT' },
     // 空头：rule 1 = 止损（价格涨上去才平），这张没有对应的止盈

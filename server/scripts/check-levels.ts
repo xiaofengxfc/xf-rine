@@ -141,8 +141,9 @@ for (const z of zones) {
   }
 }
 
-// 4) 距离带：只输出 0.5~5 ATR 之间的位（和回测口径一致）
-for (const z of zones) {
+// 4) 引擎按最后一根已收盘 K 线筛选 0.5~5 ATR 距离带，与回测口径一致。
+// 上面的 zones 已按未收盘 K 线的最新价重算距离，价格跨过边界时不应反向判引擎失败。
+for (const z of r.zones) {
   const d = Math.abs(z.distance_atr);
   if (d < 0.5 - 1e-6 || d > 5 + 1e-6) failures.push('距离带：' + z.center + ' 距现价 ' + d.toFixed(2) + ' ATR 越界');
 }

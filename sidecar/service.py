@@ -86,8 +86,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_ok(self) -> bool:
         want = self.server.token  # type: ignore[attr-defined]
-        if not want:
-            return True
+        if len(want) < 16:
+            return False
         given = self.headers.get("x-sidecar-token", "")
         # 定长比较，别让口令从响应时间里一位一位被试出来
         if len(given) != len(want):
@@ -275,8 +275,11 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--token", default=os.environ.get("XFRINE_SIDECAR_TOKEN", ""))
     args = ap.parse_args(argv)
+    token = str(args.token or "").strip()
+    if len(token) < 16:
+        ap.error("访问口令长度不足（至少 16 个字符）；请通过 --token 或 XFRINE_SIDECAR_TOKEN 提供")
 
-    server = SidecarServer((args.host, args.port), Handler, token=args.token)
+    server = SidecarServer((args.host, args.port), Handler, token=token)
     port = server.server_address[1]
 
     def _bye(*_a) -> None:

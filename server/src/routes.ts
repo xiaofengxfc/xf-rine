@@ -10,6 +10,7 @@ import type {
 } from './exchange/types.js';
 import { isSizeOnStep } from './exchange/size.js';
 import { netFetch, proxyState, refreshProxy } from './net.js';
+import { isLoopbackAddress } from './httpSecurity.js';
 import type { Bar } from './bar.js';
 import type { Direction, MtfGroup, Zone } from './sr/types.js';
 import { stabilizeZones, zoneKey } from './sr/memory.js';
@@ -193,8 +194,7 @@ function mergeInto(s: BarSeries, add: Bar[]): void {
 
 /** 会带出密钥或者会动真钱的接口，只认本机回环地址 */
 function requireLocal(req: Request, what: string): void {
-  const ip = req.socket.remoteAddress ?? '';
-  if (!/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(ip)) {
+  if (!isLoopbackAddress(req.socket.remoteAddress ?? '')) {
     throw new GateError(403, 'LOCAL_ONLY', `${what}只允许本机访问`);
   }
 }
@@ -1132,8 +1132,7 @@ router.post('/ai/analyze', wrap(async (req, res) => {
 }));
 
 router.post('/ai/test', wrap(async (req, res) => {
-  const ip = req.socket.remoteAddress ?? '';
-  if (!/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(ip)) {
+  if (!isLoopbackAddress(req.socket.remoteAddress ?? '')) {
     throw new GateError(403, 'LOCAL_ONLY', '测试连接只允许本机访问');
   }
   const body = req.body ?? {};
@@ -1157,7 +1156,7 @@ router.get('/ai/snapshot', wrap(async (req, res) => {
 router.get('/config', (req, res) => {
   // 手机端要填的地址和口令。口令只回本机 —— 本机都打不开页面的话，也没有理由知道它。
   const remote = remoteAccess();
-  const local = /127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(req.socket.remoteAddress ?? '');
+  const local = isLoopbackAddress(req.socket.remoteAddress ?? '');
   res.json({
     /**
      * 这个请求是不是从这台电脑上发出来的。
@@ -1909,7 +1908,8 @@ async function cancelSide(contract: string, dirs: Direction[], contractFlat: boo
  * 那时候的触发单是有主的，覆盖语义归 /api/bracket 管。
  */
 async function clearOrphanTriggers(contract: string, dir: Direction): Promise<string[]> {
-  const sides = await readSides(contract).catch(() => [] as Side[]);
+  // 查询失败时不能把「不知道有没有仓」当成空仓，否则可能撤掉现有仓位的保护单。
+  const sides = await readSides(contract);
   if (sides.some((s) => s.direction === dir && s.size > 0)) return [];
   const out: string[] = [];
   const canceledIds = new Set<string>();
@@ -2120,7 +2120,8 @@ async function ensureMarginMode(
 ) {
   // 只要这个合约上还有仓（哪一边都算），交易所就不让改模式 —— 硬试只会让加仓失败一场。
   // 所以跳过并把现状说出去，页面照着提示：这一单是照着交易所现有的模式开的。
-  const sides = await readSides(contract).catch(() => [] as Side[]);
+  // 持仓查询失败时不能假定为空仓并改杠杆，必须停止后续开仓。
+  const sides = await readSides(contract);
   if (sides.some((s) => s.size > 0)) {
     return { applied: false as const, mode, why: '这个合约上还有持仓，模式沿用交易所现状' };
   }

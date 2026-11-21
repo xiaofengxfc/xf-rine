@@ -722,7 +722,7 @@ export default function App() {
     if (!pos) { push('err', '这个合约上没有持仓', contract); return; }
     // 这一边现有的触发单按价格在多空之间分：多头止损在下、止盈在上，空头反过来。
     // 价格顺序就是语义 —— 交易所的触发单里没有「这是止损」这个字段。
-    const mine = priceOrders.filter((o) => o.contract === contract && o.direction === pos.direction);
+    const mine = priceOrders.filter((o) => o.contract === contract && o.direction === pos.direction && o.protective);
     const below = mine.filter((o) => o.triggerPrice < pos.markPrice).map((o) => o.triggerPrice);
     const above = mine.filter((o) => o.triggerPrice > pos.markPrice).map((o) => o.triggerPrice);
     const stopList = pos.direction === 'long' ? below : above;

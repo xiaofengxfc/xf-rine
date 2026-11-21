@@ -68,7 +68,7 @@ export function protectionState(b: SideBracket, now = Date.now()): ProtectionSta
 }
 
 export function bracketOf(priceOrders: PriceOrder[], contract: string, dir: Dir): SideBracket {
-  const rows = priceOrders.filter((o) => o.contract === contract && o.direction === dir);
+  const rows = priceOrders.filter((o) => o.protective && o.contract === contract && o.direction === dir);
   return {
     stop: rows.find((o) => triggerKind(o, dir) === 'stop') ?? null,
     target: rows.find((o) => triggerKind(o, dir) === 'target') ?? null,

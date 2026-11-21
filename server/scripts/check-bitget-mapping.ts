@@ -2,6 +2,7 @@
 import {
   bitgetAccountSnapshot,
   bitgetMarginMode,
+  bitgetLeveragePayloads,
   bitgetOrderSide,
   bitgetUtaOrderSide,
   mapBitgetPosition,
@@ -13,6 +14,8 @@ import {
 const checks: [string, unknown, unknown][] = [
   ['map cross margin mode to Bitget value', bitgetMarginMode(true), 'crossed'],
   ['map isolated margin mode to Bitget value', bitgetMarginMode(false), 'isolated'],
+  ['UTA one-way isolated leverage omits position side', JSON.stringify(bitgetLeveragePayloads('BTC_USDT', 5, false, 'one_way_mode')), JSON.stringify([{ category: 'USDT-FUTURES', symbol: 'BTCUSDT', leverage: '5', marginMode: 'isolated' }])],
+  ['UTA hedge isolated leverage configures both position sides', JSON.stringify(bitgetLeveragePayloads('BTC_USDT', 5, false, 'hedge_mode')), JSON.stringify([{ category: 'USDT-FUTURES', symbol: 'BTCUSDT', leverage: '5', marginMode: 'isolated', posSide: 'long' }, { category: 'USDT-FUTURES', symbol: 'BTCUSDT', leverage: '5', marginMode: 'isolated', posSide: 'short' }])],
   ['hedge open long', bitgetOrderSide('hedge_mode', 'long', false), 'buy'],
   ['hedge close long keeps position side', bitgetOrderSide('hedge_mode', 'long', true), 'buy'],
   ['hedge open short', bitgetOrderSide('hedge_mode', 'short', false), 'sell'],

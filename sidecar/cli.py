@@ -19,6 +19,13 @@ import json
 import os
 import sys
 
+# CLI 输出会通过管道交给其他工具；固定 UTF-8，避免 Windows 控制台默认编码破坏 JSON 中文。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - 旧解释器或不可重配置的流
+        pass
+
 _BASE = os.path.dirname(os.path.abspath(__file__))
 if _BASE not in sys.path:
     sys.path.insert(0, _BASE)

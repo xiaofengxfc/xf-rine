@@ -69,6 +69,22 @@ export function bitgetMarginMode(cross: boolean): 'crossed' | 'isolated' {
   return cross ? 'crossed' : 'isolated';
 }
 
+export function bitgetLeveragePayloads(
+  name: string,
+  leverage: number,
+  cross: boolean,
+  posMode: 'one_way_mode' | 'hedge_mode',
+): Record<string, unknown>[] {
+  const base = {
+    category: PRODUCT,
+    symbol: symbolOf(name),
+    leverage: String(leverage),
+    marginMode: bitgetMarginMode(cross),
+  };
+  if (cross || posMode === 'one_way_mode') return [base];
+  return [{ ...base, posSide: 'long' }, { ...base, posSide: 'short' }];
+}
+
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -813,20 +829,10 @@ export class BitgetExchange implements Exchange {
     leverage: number; crossLeverageLimit: number; mode: 'cross' | 'isolated';
   }> {
     this.requireKeys();
-    const sym = symbolOf(name);
-    const marginMode = bitgetMarginMode(opts.cross);
-    const base: Record<string, unknown> = {
-      category: PRODUCT,
-      symbol: sym,
-      leverage: String(opts.lev),
-      marginMode,
-    };
     const posMode = await this.currentPosMode();
-    if (!opts.cross) {
-      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, { ...base, posSide: 'long' });
-      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, { ...base, posSide: 'short' });
-    } else {
-      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, base);
+    const marginMode = bitgetMarginMode(opts.cross);
+    for (const body of bitgetLeveragePayloads(name, opts.lev, opts.cross, posMode)) {
+      await bgPrivate('POST', '/api/v3/account/set-leverage', {}, body);
     }
     this.marginModes.set(name, marginMode);
     const lev = opts.lev;
