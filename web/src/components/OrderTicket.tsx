@@ -84,6 +84,7 @@ export default function OrderTicket({
   const last = contract?.price ?? 0;
   const mark = contract?.markPrice ?? 0;
   const priceRound = contract?.priceRound ?? 0.1;
+  const baseCurrency = contract?.name.split('_')[0] || '币';
   // 最小量和增量按交易所原值展示，不能把合法的小数张数向上取成整数。
   const sizeStep = contract?.sizeStep && contract.sizeStep > 0 ? contract.sizeStep : 1;
   const sizeMin = contract?.sizeMin && contract.sizeMin > 0 ? contract.sizeMin : sizeStep;
@@ -91,11 +92,11 @@ export default function OrderTicket({
   const sizeMax = contract?.sizeMax && contract.sizeMax > 0
     ? floorToSizeStep(contract.sizeMax, sizeStep)
     : 0;
-  /** N 张折成多少个币：一个币的数量常常要到小数点后好几位，别四舍五入成一串 0 */
+  /** N 张折成多少基础币，保留交易所支持的最多 12 位数量精度 */
   const qtyOf = (n: number): string => {
     const v = n * mult;
     if (!(v > 0)) return '—';
-    return v.toLocaleString('en-US', { maximumFractionDigits: 8 });
+    return v.toLocaleString('en-US', { maximumFractionDigits: 12 });
   };
   // 杠杆上限跟着合约走。切到上限更低的合约时，原来的 50x 必须夹回去：
   // 不夹的话摘要会按交易所根本不接受的杠杆算保证金，设置杠杆那一步也会静默失败，
@@ -174,10 +175,10 @@ export default function OrderTicket({
     const margin = fmtUsd(avail * (p / 100));
     if (avail <= 0) return '可用余额是 0，先入金或者把别的仓平掉';
     if (r.size <= 0) {
-      return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）低于最低成交量 ${sizeMin} 张`;
+      return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）低于最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`;
     }
     return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）可开 ${r.size} 张，约 ${fmtUsd(r.usedMargin)} USDT 保证金`;
-  }, [pctPreview, avail, lev, sizeMin]);
+  }, [pctPreview, avail, lev, sizeMin, baseCurrency]);
 
   // 没自己改过张数，就让比例说了算（换价、换杠杆、换比例都跟着变）
   useEffect(() => {
@@ -265,7 +266,7 @@ export default function OrderTicket({
      */
     if (priceMode === 'limit' && !(priceUsed > 0)) return '限价还没填：先填一个价格再下单';
     if (!Number.isFinite(size) || size <= 0) return '张数不合法';
-    if (size < sizeMin) return `张数至少 ${sizeMin}`;
+    if (size < sizeMin) return `至少 ${sizeMin} 张（${qtyOf(sizeMin)} ${baseCurrency}）`;
     if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
     if (!isOnSizeStep(size, sizeStep)) return `张数必须按 ${sizeStep} 张递增`;
     if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
@@ -283,10 +284,10 @@ export default function OrderTicket({
   /** 比例算出来的张数被夹住时，把账写清楚：想要多少、能下多少、为什么 */
   const sizingNote = (() => {
     if (sizing.clamped === 'afford' && priceUsed > 0) {
-      return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连 ${sizeMin} 张都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
+      return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
     }
     if (sizing.clamped === 'min') {
-      return `${posPct}% 的可用余额预算低于最低成交量 ${sizeMin} 张；不会自动超出所选比例。`;
+      return `${posPct}% 的可用余额预算低于最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）；不会自动超出所选比例。`;
     }
     if (sizing.clamped === 'max') {
       return `按 ${posPct}% 能开 ${floorToSizeStep(sizing.raw, sizeStep)} 张，但合约上限是 ${sizeMax} 张，已经夹回去。`;
@@ -394,7 +395,7 @@ export default function OrderTicket({
 
         <div className="field">
           <label>
-            张数（{mult ? fmtUsd(mult, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} 币/张）
+            张数（{mult ? fmtUsd(mult, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} {baseCurrency}/张）
             <span className="dim"> · 按 {posPct}% 可用余额算得 {sizing.size} 张</span>
           </label>
           <div className="size-wrap">
@@ -404,7 +405,7 @@ export default function OrderTicket({
               aria-label="下单张数"
               placeholder={`最小 ${sizeMin}`}
               // 桌面端悬停时浏览器也会弹一句，和下面那张卡片说的是同一件事
-              title={`最低 ${sizeMin} 张 = ${qtyOf(sizeMin)} 币`}
+              title={`最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`}
               value={sizeStr}
               onChange={(e) => {
                 const cleaned = e.target.value.replace(/[^0-9.]/g, '');
@@ -423,7 +424,7 @@ export default function OrderTicket({
               * 手机键盘弹起来只占下半屏，写在上面的提示不会被挡住。
               */}
             <div className="size-tip">
-              最低 <b>{sizeMin}</b> 张 = {qtyOf(sizeMin)} 币
+              最低下单量 <b>{qtyOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张）
               {priceUsed > 0 && mult > 0 && (
                 <>
                   {' · '}名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT
@@ -437,10 +438,10 @@ export default function OrderTicket({
            *
            * 浮层只在悬停/聚焦时出来，手机上一松手就没了 —— 「最低多少」这件事
            * 不能只存在一瞬间。这一行一直在输入框下面，写的是这个合约交易所
-           * 真正给的最低成交数量，以及它折成多少个币。
+           * 真正给的最低成交数量，以及它折成多少基础币。
            */}
           <div className="size-min-line">
-            最低 <b>{sizeMin}</b> 张 = {qtyOf(sizeMin)} 币 · 步进 {sizeStep}
+            最低下单量 <b>{qtyOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张 · 步进 {sizeStep}）
             {priceUsed > 0 && mult > 0 && <>（名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT）</>}
             {sizeMax > 0 && <span className="dim"> · 最多 {sizeMax} 张</span>}
           </div>
