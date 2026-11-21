@@ -2590,18 +2590,26 @@ let tradableCache: { env: string; exchange: string; at: number; names: Set<strin
  * 当前环境可交易的合约名单。实盘就是主网全量（返回 null 表示不做限制）；
  * 测试网要去测试网自己的公开接口拿 —— 它只上架了几十个。
  */
-async function tradableNames(): Promise<Set<string> | null> {
-  if (config.env !== 'testnet') return null;
-  if (tradableCache.env === config.env && tradableCache.exchange === config.exchange
+async function tradableNames(
+  selectedExchange = config.exchange,
+  selectedEnv = config.env,
+  adapter = exchange(),
+): Promise<Set<string> | null> {
+  if (selectedEnv !== 'testnet') return null;
+  if (tradableCache.env === selectedEnv && tradableCache.exchange === selectedExchange
     && Date.now() - tradableCache.at < 5 * 60_000) return tradableCache.names;
   try {
-    const names = await exchange().tradableNames();
+    const names = await adapter.tradableNames();
     // null = 这家不做限制（Bitget 的模拟盘和实盘是同一套合约）
     if (!names) return null;
-    tradableCache = { env: config.env, exchange: config.exchange, at: Date.now(), names };
+    if (config.env === selectedEnv && config.exchange === selectedExchange) {
+      tradableCache = { env: selectedEnv, exchange: selectedExchange, at: Date.now(), names };
+    }
     return names;
   } catch {
-    return tradableCache.names; // 拿不到就别拦，让交易所自己报错
+    return tradableCache.env === selectedEnv && tradableCache.exchange === selectedExchange
+      ? tradableCache.names
+      : null; // 拿不到就别拦，让交易所自己报错
   }
 }
 
@@ -2611,16 +2619,24 @@ interface TickerRow {
 }
 
 /** 全部行情也是一大坨，拉一次十几秒。缓存起来，页面每 12 秒问一次就直接给上次的，后台换新的 */
-let tickerCache: { at: number; exchange: string; rows: TickerRow[] } | null = null;
-let tickerBusy: Promise<void> | null = null;
+let tickerCache: { at: number; exchange: string; env: string; rows: TickerRow[] } | null = null;
+const tickerBusy = new Map<string, Promise<void>>();
 
 function refreshTickers(): Promise<void> {
-  if (tickerBusy) return tickerBusy;
-  tickerBusy = (async () => {
+  const selectedExchange = config.exchange;
+  const selectedEnv = config.env;
+  const scope = `${selectedExchange}:${selectedEnv}`;
+  const pending = tickerBusy.get(scope);
+  if (pending) return pending;
+
+  const adapter = exchange();
+  let task: Promise<void>;
+  task = (async () => {
     const [list, tradable] = await Promise.all([
-      exchange().tickers(60_000, 45_000),
-      tradableNames().catch(() => null),
+      adapter.tickers(60_000, 45_000),
+      tradableNames(selectedExchange, selectedEnv, adapter).catch(() => null),
     ]);
+    if (config.exchange !== selectedExchange || config.env !== selectedEnv) return;
     /**
      * 合约表还没到位时价格精度会是 0，页面上价格就成了整数（63570 而不是 63570.0）。
      * 刚启动、或者刚换过交易所（旧表已经判为无效）时都会碰上，这里最多等它 3 秒。
@@ -2631,10 +2647,12 @@ function refreshTickers(): Promise<void> {
         new Promise<void>((done) => { const t = setTimeout(done, 3000); t.unref?.(); }),
       ]);
     }
+    if (config.exchange !== selectedExchange || config.env !== selectedEnv) return;
     const roundOf = new Map(contractsNow().map((c) => [c.name, Number(c.order_price_round)]));
     tickerCache = {
       at: Date.now(),
-      exchange: config.exchange,
+      exchange: selectedExchange,
+      env: selectedEnv,
       rows: list
         .filter((t) => Number(t.last) > 0)
         .map((t) => ({
@@ -2657,13 +2675,16 @@ function refreshTickers(): Promise<void> {
       const why = e instanceof Error ? e.message : String(e);
       console.error('[tickers] 拉全量行情失败：' + why.slice(0, 200));
     })
-    .finally(() => { tickerBusy = null; });
-  return tickerBusy;
+    .finally(() => {
+      if (tickerBusy.get(scope) === task) tickerBusy.delete(scope);
+    });
+  tickerBusy.set(scope, task);
+  return task;
 }
 
 router.get('/tickers', wrap(async (_req, res) => {
   // 换过交易所：手上这份是另一家的行情，不能给出去
-  if (tickerCache && tickerCache.exchange !== config.exchange) tickerCache = null;
+  if (tickerCache && (tickerCache.exchange !== config.exchange || tickerCache.env !== config.env)) tickerCache = null;
   if (!tickerCache) {
     // 冷启动最多等 10 秒。再久就先把空列表给出去 —— 页面每 12 秒会再问一次，
     // 让第一屏挂在这儿一分钟，看起来就是「币种一直加载不出来」。
@@ -2672,7 +2693,7 @@ router.get('/tickers', wrap(async (_req, res) => {
       new Promise<void>((done) => { const t = setTimeout(done, 10_000); t.unref?.(); }),
     ]);
   } else if (Date.now() - tickerCache.at > 15_000) void refreshTickers();
-  res.json(tickerCache?.exchange === config.exchange ? tickerCache.rows : []);
+  res.json(tickerCache?.exchange === config.exchange && tickerCache.env === config.env ? tickerCache.rows : []);
 }));
 
 export type { Direction };

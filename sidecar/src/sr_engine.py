@@ -236,9 +236,10 @@ class SREngine:
             "p_hold": round(p_hold, 4) if p_hold is not None else None,
             "p_effective": round(p_eff, 4) if p_eff is not None else None,
             # --- 价格与几何 ---
-            "center": round(z.center, 4),
-            "low": round(z.low, 4),
-            "high": round(z.high, 4),
+            # 不能固定保留 4 位小数：低价合约的价格区间会被舍入成 0。
+            "center": float(z.center),
+            "low": float(z.low),
+            "high": float(z.high),
             "zone_type": z.kind,
             "zone_label": "支撑带" if z.kind == "support" else "压力带",
             "distance_pct": round(z.dist_pct, 2),

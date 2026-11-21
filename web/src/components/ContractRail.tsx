@@ -60,9 +60,7 @@ export default function ContractRail({ tickers, current, onSelect, showTradable 
     if (needle) list = list.filter((t) => t.contract.includes(needle));
     if (tab === 'up') list = list.filter((t) => t.change24h > 0).sort((a, b) => b.change24h - a.change24h);
     if (tab === 'down') list = list.filter((t) => t.change24h < 0).sort((a, b) => a.change24h - b.change24h);
-    // 正在看的那个币可能被这 120 行挤掉，栏里就没有高亮了。
-    // 试过把它钉到最前面，但那会打乱「跌幅榜」的排序，扫一眼就乱了，所以不钉。
-    return list.slice(0, 120);
+    return list;
   }, [tickers, q, tab]);
 
   useEffect(() => { saveRail({ q, tab, scroll: scrollRef.current }); }, [q, tab]);
