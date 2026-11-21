@@ -193,7 +193,7 @@ pnpm install
 pnpm pack:win
 ```
 
-产物：`desktop/release/XunFeng-1.0.4-Setup.exe`（约 120 MB）。双击安装，桌面和开始菜单里出现「巡风」。
+产物：`desktop/release/XunFeng-<version>-Setup.exe`。双击安装，桌面和开始菜单里出现「巡风」。
 
 装进去的是一个壳，不是把页面拷一份进去：Electron 自带 Node，服务端被 esbuild 打成一个
 2.8 MB 的 `server.cjs`，前端产物放在 `resources/web-dist`。启动时主进程先把服务端拉起来，

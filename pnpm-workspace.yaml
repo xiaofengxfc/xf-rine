@@ -3,3 +3,5 @@ packages:
   - web
   - desktop
   - mobile
+allowBuilds:
+  electron-winstaller: true
