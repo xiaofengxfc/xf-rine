@@ -49,6 +49,12 @@ const CHANNEL_TF: Record<string, string> = {
   '1h': '1H', '4h': '4H', '1d': '1D',
 };
 
+/** candle 频道 → 周期秒数。用来把推送的时间戳吸附到周期起点 */
+const CANDLE_STEP: Record<string, number> = {
+  candle1m: 60, candle5m: 300, candle15m: 900, candle30m: 1800,
+  candle1H: 3600, candle4H: 14400, candle1D: 86_400,
+};
+
 /** BTC_USDT → BTCUSDT */
 function symbolOf(name: string): string {
   return String(name ?? '').toUpperCase().replace(/_/g, '');
@@ -326,10 +332,19 @@ export class BitgetMarketHub {
     if (!channel || data.length === 0) return;
 
     if (channel.startsWith('candle')) {
+      const step = CANDLE_STEP[channel] ?? 0;
       for (const row of data) {
         if (!Array.isArray(row)) continue;
-        const t = Math.round(Number(row[0]) / 1000);
-        if (!Number.isFinite(t) || t <= 0) continue;
+        const raw = Math.round(Number(row[0]) / 1000);
+        if (!Number.isFinite(raw) || raw <= 0) continue;
+        /**
+         * Bitget 推的「正在走的那根」时间戳是**当前分钟**，不是周期起点：
+         * 订阅 5m 时，20:29 会来一根 time=20:29 的帧。页面按时间合并，
+         * 于是 5 分钟图里每分钟多出一根「幽灵 K 线」—— 图上一段一段断开、
+         * 每多一根就触发一次跟随位移和价格轴重算，看着就是上下抽搐。
+         * 统一吸附到周期网格再广播。
+         */
+        const t = step > 0 ? Math.floor(raw / step) * step : raw;
         this.broadcast({
           type: 'candle',
           contract,

@@ -506,9 +506,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
   line-height: 1.7;
+  /* 窄屏上这一行会顶到图的右边：允许换行，别让它被裁掉半截 */
+  max-width: calc(100% - 20px);
+  flex-wrap: wrap;
 }
 .chart-badge .up { color: var(--up); }
 .chart-badge .down { color: var(--down); }
+/* 「这一根是什么形态」：和 O/H/L/C 一起显示，但用一条细线隔开，别混成一组读数 */
+.badge-sep { width: 1px; height: 10px; background: var(--line); }
+.badge-pattern { display: inline-flex; align-items: baseline; gap: 5px; color: var(--text-1); }
+.badge-pattern em { font-style: normal; font-weight: 600; }
+.badge-pattern.bull em { color: var(--up); }
+.badge-pattern.bear em { color: var(--down); }
 
 /* 图上的持仓摘要：已盈亏、止损止盈，以及打到那里各平出多少钱。
    纯展示，不接收鼠标 —— 挡在 K 线上方，但拖动、缩放、画线都照常。 */
@@ -616,6 +625,41 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
 }
 .levels-strip.dragging { cursor: grabbing; user-select: none; }
+
+/* 最近形态：图上箭头只标位置，形态名和看涨/看跌在这一行写清楚 */
+.patterns-strip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 5px;
+  border-top: 1px solid var(--line-soft);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.patterns-strip::-webkit-scrollbar { display: none; }
+.ps-label {
+  flex: none;
+  font-size: 10px; color: var(--text-2); letter-spacing: 0.04em;
+}
+.ps-item {
+  flex: none;
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 1px 8px 2px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-2);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.6;
+}
+.ps-item .ps-time { color: var(--text-2); }
+.ps-item .ps-name { color: var(--text-0); font-weight: 600; }
+.ps-item .ps-dir { font-weight: 600; }
+.ps-item.bull { border-color: color-mix(in srgb, var(--up) 35%, transparent); }
+.ps-item.bear { border-color: color-mix(in srgb, var(--down) 35%, transparent); }
+.ps-item.bull .ps-dir { color: var(--up); }
+.ps-item.bear .ps-dir { color: var(--down); }
+
 
 .lv {
   position: relative;

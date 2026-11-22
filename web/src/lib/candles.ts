@@ -89,6 +89,42 @@ export function mergeOlder(prev: Bar[], older: Bar[], maxBars: number): OlderMer
   };
 }
 
+/**
+ * 一根 K 线能不能画。
+ *
+ * 交易所偶尔会推来字段缺失/为 null 的帧，Number(undefined) 变成 NaN 之后，
+ * lightweight-charts 会把它当成一个「有时间、没价格」的点：横轴上占一格，
+ * 画面上什么都没有。表现出来就是 K 线中间空了一段，最新那根离右边越来越远。
+ * 这种根一律不进图表、也不进形态识别 —— 宁可少一根，也别留一个画不出来的洞。
+ */
+export function isUsableBar(b: Bar): boolean {
+  return Number.isFinite(b.time)
+    && Number.isFinite(b.open) && Number.isFinite(b.high)
+    && Number.isFinite(b.low) && Number.isFinite(b.close)
+    && b.open > 0 && b.high > 0 && b.low > 0 && b.close > 0
+    && b.high >= b.low;
+}
+
+/** 过滤掉画不出来的 K 线。已经是干净数据时原样返回，不拷贝 */
+export function usableBars(bars: Bar[]): Bar[] {
+  let ok = true;
+  for (const b of bars) {
+    if (!isUsableBar(b)) { ok = false; break; }
+  }
+  return ok ? bars : bars.filter(isUsableBar);
+}
+
+/**
+ * 把时间吸附到周期网格。
+ *
+ * Bitget 推的「正在走的那根」时间戳是当前分钟，不是周期起点：订阅 5m 时，
+ * 20:29 会来一根 time=20:29 的帧。不吸附的话，5 分钟图里每分钟多出一根
+ * 「幽灵 K 线」—— 图断续、视口和价格轴每根都被带偏一次。
+ */
+export function snapTime(time: number, step: number): number {
+  return step > 0 && Number.isFinite(time) ? Math.floor(time / step) * step : time;
+}
+
 /** 每个周期一根 K 线多少秒。判断「最新一根落后了几根」要用它 */
 export const INTERVAL_SEC: Record<string, number> = {
   '10s': 10, '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
@@ -233,12 +269,22 @@ export function mergeNewer(prev: Bar[], page: Bar[], maxBars: number): TailMerge
   for (const b of normalizeBars(page)) {
     const old = byTime.get(b.time);
     if (old) {
-      if (old.open !== b.open || old.high !== b.high || old.low !== b.low
-        || old.close !== b.close || old.volume !== b.volume || old.turnover !== b.turnover) patched += 1;
+      const same = old.open === b.open && old.high === b.high && old.low === b.low
+        && old.close === b.close && old.volume === b.volume && old.turnover === b.turnover;
+      /**
+       * 值没变就保留旧对象，不要用新对象顶掉。
+       *
+       * 图表和形态扫描都是按对象身份判断「哪一段变了」的：一次重连补课只修正最后一根，
+       * 却把整页 300 根都换成新对象的话，两边都会认不出前缀 —— 图表整段重绘、
+       * 形态扫描退回整段重算（库引擎 2 万根要一秒），表现就是卡一下、闪一下。
+       */
+      if (same) continue;
+      patched += 1;
+      byTime.set(b.time, b);
     } else {
       added += 1;
+      byTime.set(b.time, b);
     }
-    byTime.set(b.time, b);
   }
   if (added === 0 && patched === 0) return { bars: prev, added: 0, patched: 0 };
   const merged = [...byTime.values()].sort((x, y) => x.time - y.time);

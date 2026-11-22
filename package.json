@@ -11,6 +11,7 @@
     "check:sizing": "pnpm -F web check:sizing",
     "check:paint": "pnpm -F server exec tsx ../web/scripts/check-paint.ts",
     "check:candles": "pnpm -F server exec tsx ../web/scripts/check-candles.ts",
+    "check:patterns": "pnpm -F server exec tsx ../web/scripts/check-patterns.ts",
     "check:viewport": "pnpm -F server exec tsx ../web/scripts/check-viewport.ts",
     "check:errors": "pnpm -F server exec tsx scripts/check-errors.ts",
     "check:protect": "pnpm -F server exec tsx ../web/scripts/check-protection.ts",

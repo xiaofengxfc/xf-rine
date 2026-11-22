@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   BarSeries,
@@ -10,7 +10,10 @@ import {
   CrosshairMode,
   LineStyle,
   TickMarkType,
+  createSeriesMarkers,
   type IChartApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
   type Time,
   type IPriceLine,
   type ISeriesApi,
@@ -33,6 +36,8 @@ import { fmtDate, fmtMoney, fmtPct, fmtPrice, fmtVolume } from '../lib/format.ts
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 import { useCandleStyle } from '../lib/chartStyle.ts';
 import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
+import { scanPatterns, thinHits, type PatternHit, type PatternScan } from '../lib/patterns.ts';
+import PatternsStrip from './PatternsStrip.tsx';
 
 /**
  * 坐标轴上的字用等宽字体。
@@ -95,6 +100,17 @@ function readMode(): ChartMode {
     return v === 'candle' || v === 'line' ? v : 'auto';
   } catch { return 'auto'; }
 }
+
+/**
+ * 形态标注默认开着。关掉之后图上不画箭头、下面那条列表也一起收起来 ——
+ * 只收一半的话，关掉开关还能在列表里看到东西，会让人以为开关没生效。
+ */
+const PATTERNS_KEY = 'xf-rine:chart:patterns';
+function readPatterns(): boolean {
+  try { return localStorage.getItem(PATTERNS_KEY) !== '0'; } catch { return true; }
+}
+/** 形态关掉时复用的空数组：不要每次渲染都新建一个，下游的 effect 会跟着白跑 */
+const EMPTY_HITS: PatternHit[] = [];
 
 /** Position-tool labels are localized and identify their long/short side. */
 function formatPositionLabel(label: DrawingLabel): string | undefined {
@@ -258,6 +274,19 @@ export default function ChartPane({
   const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const dmRef = useRef<DrawingManager | null>(null);
+  /**
+   * 形态标记有三套，分别挂在 K 线 / 美国线 / 收盘价折线上。
+   *
+   * 库不会画「隐藏序列」上的标记：只挂 K 线一套的话，切到折线画法（成交稀疏的
+   * 合约会自动切过去）箭头就全没了。所以三条序列各挂一套，只往当前可见的那条上放。
+   */
+  const markersRef = useRef<{
+    price: ISeriesMarkersPluginApi<Time>;
+    bar: ISeriesMarkersPluginApi<Time>;
+    line: ISeriesMarkersPluginApi<Time>;
+  } | null>(null);
+  /** 上一次真正写进图表的箭头签名。形态集合没变就不重建（见下面箭头那条 effect） */
+  const markerSigRef = useRef('');
   const levelLinesRef = useRef<IPriceLine[]>([]);
 
   const barsRef = useRef<Bar[]>(bars);
@@ -310,11 +339,26 @@ export default function ChartPane({
    */
   const collectRef = useRef<() => void>(() => {});
   const lastKeyRef = useRef<string>('');
+  /**
+   * 图上已经写进去的是哪一版 K 线（bar 对象数组）。
+   *
+   * 增量写入只从「上次写到的那根」往后走，中间被补回来或被修正的 K 线永远补不上：
+   * 图上那段一直缺着，而视口是按 bars.length 算的 —— 最新那根于是停在左边，
+   * 右边空出一大块，现价线落在空白处。靠它发现「尾部之外变过」，整段重画。
+   */
+  const drawnSrcRef = useRef<Bar[] | null>(null);
   /** 图上最后一根 K 线的时间。update() 不接受比它更早的时间，必须自己挡。 */
   const lastTimeRef = useRef<number | null>(null);
   /** 图上最左边那根的时间和总根数，用来识别「往前补了一段历史」 */
   const firstTimeRef = useRef<number | null>(null);
   const countRef = useRef(0);
+  /**
+   * 视口是不是「贴着最新那一根」。
+   *
+   * 贴着才跟随新 K 线；往回翻历史时一律不动 —— 这是「K 线不乱飘」的关键。
+   * 由可见区间的订阅更新（见下面视口那段）。
+   */
+  const followRef = useRef(true);
   /** 画图用的那版 K 线（平价线已撑开）。同一份数据只算一次，别每秒拷两万根 */
   const paintRef = useRef<{
     src: Bar[] | null;
@@ -380,6 +424,7 @@ export default function ChartPane({
 
   /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
   const [mode, setMode] = useState<ChartMode>(readMode);
+  const [showPatterns, setShowPatterns] = useState(readPatterns);
   const candleStyle = useCandleStyle();
   const flatShare = sparse ? sparse.flat / Math.max(1, sparse.count) : 0;
   const drawMode: 'candle' | 'line' = candleStyle === 'american' ? 'candle' : mode === 'auto'
@@ -390,6 +435,49 @@ export default function ChartPane({
     setMode(next);
     try { localStorage.setItem(MODE_KEY, next); } catch { /* 存不了就算了 */ }
   }, []);
+  const pickPatterns = useCallback((next: boolean) => {
+    setShowPatterns(next);
+    try { localStorage.setItem(PATTERNS_KEY, next ? '1' : '0'); } catch { /* 存不了就算了 */ }
+  }, []);
+
+  /**
+   * 形态识别。
+   *
+   * 拿原始 K 线算，不是撑开过的画图版：撑开改的是 high/low，而影线比例正是
+   * 这几条规则要量的东西 —— 拿画图版去算，平价线会被硬撑成「有下影线」。
+   *
+   * 增量扫描：实时行情每次只动最后一根，从第一根没变的 K 线往前退几根重算就行。
+   *
+   * 结果按「品种:周期」各存一份：只留一份的话，切到别的币再切回来（缓存里是两万根）
+   * 会因为对不上而退回整段重算 —— 库引擎扫两万根要一秒，界面会明显卡一下。
+   */
+  const patternScansRef = useRef(new Map<string, PatternScan>());
+  const scanKey = `${research ? 'research:' : ''}${contract}:${interval}`;
+  const patternHits = useMemo<PatternHit[]>(() => {
+    if (!showPatterns) return EMPTY_HITS;
+    const scans = patternScansRef.current;
+    const scan = scanPatterns(scans.get(scanKey) ?? null, bars);
+    scans.set(scanKey, scan);
+    // 只留最近 6 个，别让切过的每个品种都攥着两万根
+    if (scans.size > 6) {
+      const oldest = scans.keys().next().value;
+      if (oldest && oldest !== scanKey) scans.delete(oldest);
+    }
+    return scan.hits;
+  }, [bars, showPatterns, scanKey]);
+  /**
+   * 画到图上的那批：在识别结果上再做一次稀疏化（至少隔 3 根），
+   * 否则 5m 上「吞没」能把一屏标满。角标、箭头、图下列表都用这一份，口径一致。
+   */
+  const shownHits = useMemo(() => thinHits(patternHits), [patternHits]);
+  /** 十字线停在哪根，就按时间找它的形态。走 ref：那个回调建图时只挂一次 */
+  const patternMapRef = useRef<Map<number, PatternHit>>(new Map());
+  const patternMap = useMemo(() => {
+    const map = new Map<number, PatternHit>();
+    for (const h of shownHits) map.set(h.time, h);
+    return map;
+  }, [shownHits]);
+  patternMapRef.current = patternMap;
   const [tool, setTool] = useState<DrawingKind | null>(null);
   /** 视口已经贴到最左边那根了。到头说明只在贴边时才显示，不然一开页面就挂在图上 */
   const [atEdge, setAtEdge] = useState(false);
@@ -397,6 +485,8 @@ export default function ChartPane({
   const [closing, setClosing] = useState<string | null>(null);
   const [legend, setLegend] = useState<{
     o: number | null; h: number | null; l: number | null; c: number; v: number; turnover: boolean; t: number;
+    /** 这一根识别出的形态。没有命中就是 null，角标里不占位置 */
+    pattern: PatternHit | null;
   } | null>(null);
   /** 右键菜单：贴着鼠标的位置画，带了它取到的那根 K 线所在的价格 */
   const [menu, setMenu] = useState<{ x: number; y: number; price: number; time: number | null } | null>(null);
@@ -471,6 +561,14 @@ export default function ChartPane({
         minBarSpacing: 2,
         // 刻度按本机时区写，和右键菜单、画线标签用同一套时间
         tickMarkFormatter: (time: Time, type: TickMarkType) => localTick(Number(time), type),
+        /**
+         * 关掉库的「来一根新 K 线就整体左移」。
+         *
+         * 它的默认行为是：只要最后一根在可视区内，每来一根就把窗口整体挪一根 ——
+         * 人往回翻着看历史（最后一根还看得见）时，图也会自己动，看着就是「K 线到处乱飘」。
+         * 改成自己判断：只有视口真贴着最右边时才跟随（见数据 effect 里的 followRef）。
+         */
+        shiftVisibleRangeOnNewBar: false,
         // 不夹左右边界：可以浏览数据外区域，也可以拖进最新 K 线右侧的未来空白。
         fixLeftEdge: false,
         fixRightEdge: false,
@@ -559,6 +657,7 @@ export default function ChartPane({
         v: v?.value ?? 0,
         turnover: volumeBar?.time === time && volumeBar.turnover != null,
         t: time,
+        pattern: patternMapRef.current.get(time) ?? null,
       });
     });
 
@@ -578,6 +677,17 @@ export default function ChartPane({
         }));
       }
       return snapOut;
+    };
+
+    /**
+     * 形态箭头。三条序列各挂一套（原因见 markersRef），换币种/换周期整张图重建时一起重建。
+     * autoScale 关掉：箭头贴着影线画，不该把价格轴撑开 —— 否则出现一个信号，
+     * 整张图就往下缩一下，看着像画面自己跳了。
+     */
+    const markers = {
+      price: createSeriesMarkers(price, [], { autoScale: false }),
+      bar: createSeriesMarkers(bar, [], { autoScale: false }),
+      line: createSeriesMarkers(line, [], { autoScale: false }),
     };
 
     const dm = new DrawingManager(chart, price, {
@@ -717,6 +827,9 @@ export default function ChartPane({
     lineRef.current = line;
     volRef.current = vol;
     dmRef.current = dm;
+    markersRef.current = markers;
+    // 新图还没有箭头：签名作废，让箭头那条 effect 重新挂一遍
+    markerSigRef.current = '';
 
     return () => {
       for (const u of unsubs) u();
@@ -732,6 +845,10 @@ export default function ChartPane({
       window.removeEventListener('pointercancel', onUp, true);
       gestureRef.current = false;
       pendingViewRef.current = null;
+      markers.price.detach();
+      markers.bar.detach();
+      markers.line.detach();
+      markersRef.current = null;
       dm.destroy();
       chart.remove();
       chartRef.current = null;
@@ -753,6 +870,7 @@ export default function ChartPane({
        * 生产构建不双挂时看不出来，开发时研究台一进来就是空图。
        */
       lastKeyRef.current = '';
+      drawnSrcRef.current = null;
     };
     // onManualLevels 有意不放进依赖：它是每次渲染新建的箭头函数
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -913,6 +1031,7 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+      drawnSrcRef.current = bars;
       /**
        * 优先恢复上次看到的那一段，记的是**时间**不是下标。
        *
@@ -937,7 +1056,18 @@ export default function ChartPane({
             {
               fromTime: saved.fromTime as number,
               toTime: saved.toTime as number,
-              margin: Number.isFinite(saved.margin) ? saved.margin as number : DEFAULT_RIGHT_MARGIN,
+              /**
+               * 右留白按默认值收口，不照抄存档。
+               *
+               * 存档里的 margin 是「上次视口右边多出几根」。它可能来自一次误拖：
+               * 恢复之后最新那根就停在离右边十几二十根的位置，看起来像 K 线被推到了左边，
+               * 现价线和最新那根对不上。用户真要往未来看，拖一下就是了 ——
+               * 整段都在未来区的视口另走 futureFrom/futureTo，那条路照旧。
+               */
+              margin: Math.min(
+                DEFAULT_RIGHT_MARGIN,
+                Number.isFinite(saved.margin) ? Math.max(0, Math.round(saved.margin as number)) : DEFAULT_RIGHT_MARGIN,
+              ),
               pastFrom: saved.pastFrom,
               pastTo: saved.pastTo,
             },
@@ -972,6 +1102,16 @@ export default function ChartPane({
         const from = Math.max(0, clean.length - count);
         chart.timeScale().setVisibleLogicalRange({ from, to: clean.length - 1 + DEFAULT_RIGHT_MARGIN });
       }
+      /**
+       * 首次铺数据时可见区间的订阅还没挂上（视口那条 effect 在后面），这里直接按当前区间
+       * 判一次「是不是贴着右边」。不判的话，切币种后会沿用上一个币种的跟随状态：
+       * 上一个币种往回翻过，新币种来的 K 线就一根都不跟了。
+       */
+      try {
+        const range = chart.timeScale().getVisibleLogicalRange();
+        followRef.current = !!range
+          && range.to >= clean.length - 1 + DEFAULT_RIGHT_MARGIN - 4;
+      } catch { /* 区间读不到就保持原值 */ }
     };
 
     /**
@@ -1037,6 +1177,7 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+      drawnSrcRef.current = bars;
 
       /**
        * 原来就停在最新那一屏：补进历史之后也停在最新那一屏。
@@ -1135,10 +1276,31 @@ export default function ChartPane({
       }
 
 
+      /**
+       * 尾部之外的数据变了：中间补上了漏掉的 K 线，或者某根的值被修正了。
+       *
+       * 「最后一根没变、根数变多」那种洞，下面有一条单独的判断；可这条判断只认
+       * 「最后一根还是那一根」。重连补课通常同时带来中间那段和一根新的 —— 于是
+       * 增量从 applied 往后写，中间补回来的那几根被跳过，图上永远缺着。
+       * 实时行情只动最后两根，所以这里绝大多数时候一眼就过。
+       */
+      const drawn = drawnSrcRef.current;
+      if (drawn && drawn !== bars) {
+        const limit = Math.min(drawn.length, bars.length);
+        let diff = 0;
+        while (diff < limit && drawn[diff] === bars[diff]) diff += 1;
+        if (diff < limit - 2) {
+          redraw(cleanBars);
+          return;
+        }
+      }
+
       // 拿到的是一份比图上更旧的快照（REST 有缓存，可能落后于 WebSocket 推来的那根），
       // 增量写不进去，整段重画 —— 但仍然不碰视口。
       const newest = cleanBars[cleanBars.length - 1]!;
       const applied = lastTimeRef.current;
+      /** 这一轮是不是真来了一根新的（只是最后一根在走不算） */
+      const appended = applied != null && newest.time > applied;
       if (applied != null && newest.time < applied) {
         redraw(cleanBars);
         return;
@@ -1174,9 +1336,40 @@ export default function ChartPane({
         writeVol(b);
         lastTimeRef.current = b.time;
       }
+      /**
+       * 写完之后对一次账：序列里的点数和数据根数必须一样。
+       *
+       * 增量是一根一根 update() 上去的，中间被库拒收一根（时间重复、值不合法）不会有任何声音；
+       * 而视口是按数据长度算的 —— 序列少几根，最新那根就离右边远几根，几轮下来"漂"出一大片空白，
+       * 现价线落在空白处，看着就是 K 线和现价对不上。发现对不上就整段重画，一次补齐。
+       */
+      if (price.data().length !== cleanBars.length) {
+        redraw(cleanBars);
+        return;
+      }
+      /**
+       * 新 K 线到了、而且人正贴着最右边：把窗口一次性对齐到「最后一根 + 默认留白」。
+       *
+       * 库的自动位移关掉了（见建图那段），所以不主动对齐的话，新 K 线会先在右侧留白里
+       * 一根根往外长，六根之后就长到视口外面去了。这里只在「确实贴边」时动手：
+       * 往回翻历史的人，一根都不动。手势期间也不动（松手后由 settle 统一处理）。
+       */
+      if (appended && followRef.current && !gestureRef.current) {
+        const range = chart.timeScale().getVisibleLogicalRange();
+        if (range) {
+          const width = Math.max(4, range.to - range.from);
+          try {
+            chart.timeScale().setVisibleLogicalRange({
+              from: cleanBars.length - 1 + DEFAULT_RIGHT_MARGIN - width,
+              to: cleanBars.length - 1 + DEFAULT_RIGHT_MARGIN,
+            });
+          } catch { /* 区间不合法就算了 */ }
+        }
+      }
       // 这两个也一起更新：不更新的话，下一次「左边是不是动过」会拿旧值比，判断全乱
       firstTimeRef.current = cleanBars[0]!.time;
       countRef.current = cleanBars.length;
+      drawnSrcRef.current = bars;
     } catch (err) {
       // 任何写图表的异常都不能冒泡到 React，否则整页变黑
       console.warn('[chart] 写入 K 线失败，改为整段重设', err);
@@ -1184,6 +1377,48 @@ export default function ChartPane({
     }
     // theme 也在依赖里：换主题要按新配色重画一遍（见上面那段）
   }, [bars, resetKey, storageKey, theme]);
+
+  /**
+   * 形态箭头跟着 K 线和主题刷新。
+   *
+   * 必须排在写 K 线那条 effect 后面：同一个 commit 里 effect 按声明顺序执行，
+   * 先有 K 线再挂箭头；反过来的话，新建的图会先收到一批「时间点还没数据」的箭头。
+   */
+  useEffect(() => {
+    const plugins = markersRef.current;
+    if (!plugins) return;
+    const c = chartColors(theme);
+    const american = candleStyle === 'american';
+    const target = american ? plugins.bar : drawMode === 'line' ? plugins.line : plugins.price;
+    /**
+     * 行情每 300ms 换一次 bars，但形态集合几乎不动。两万根里稀疏化后也有几千个箭头，
+     * 每帧重建一遍是白烧 CPU —— 算个便宜的签名，没变就直接返回。
+     */
+    let hash = shownHits.length;
+    for (const h of shownHits) {
+      hash = (hash * 31 + h.time + h.id.length + (h.direction === 'bull' ? 1 : 0)) | 0;
+    }
+    const targetTag = target === plugins.bar ? 'b' : target === plugins.line ? 'l' : 'p';
+    const sig = [
+      theme, storageKey, targetTag, shownHits.length,
+      shownHits[0]?.time ?? 0, shownHits[shownHits.length - 1]?.time ?? 0, hash,
+    ].join('|');
+    if (sig === markerSigRef.current) return;
+    markerSigRef.current = sig;
+    const list: SeriesMarker<Time>[] = shownHits.map((h) => ({
+      time: h.time as UTCTimestamp,
+      // 看涨在下方用绿箭头，看跌在上方用红箭头：和「进出场」的方向感一致
+      position: h.direction === 'bull' ? 'belowBar' : 'aboveBar',
+      shape: h.direction === 'bull' ? 'arrowUp' : 'arrowDown',
+      color: h.direction === 'bull' ? c.up : c.down,
+      size: 1,
+    }));
+    // 另外两套清空：切回 K 线时不能留下上一次的箭头
+    for (const p of [plugins.price, plugins.bar, plugins.line]) if (p !== target) p.setMarkers([]);
+    target.setMarkers(list);
+    // storageKey 也是依赖：切周期会重建图表，新图要把同一批箭头重新挂上；
+    // 画法（drawMode）决定了该挂在哪条序列上
+  }, [shownHits, theme, storageKey, drawMode, candleStyle]);
 
   // ---- 视口记忆；往回拖到底时向上要一页更早的 K 线 ----
   useEffect(() => {
@@ -1239,6 +1474,11 @@ export default function ChartPane({
 
       // 贴到最左边了：到头说明这时候才有意义
       setAtEdge(r.from < 1.5);
+      /**
+       * 贴着最右边才算「跟随」：允许 4 根的余量，缩放后取整不会把跟随判丢。
+       * 一旦人往回拖，这里立刻变 false，后面来新 K 线一根都不动。
+       */
+      followRef.current = countRef.current > 0 && r.to >= countRef.current - 1 + DEFAULT_RIGHT_MARGIN - 4;
 
       // 离最左边还有两屏的距离就先要：贴到边缘再要，得干等交易所一秒多。
       // 研究台的数据是一次给全的，没有「更早一页」，那边不接这个回调。
@@ -1382,6 +1622,16 @@ export default function ChartPane({
             {m === 'auto' ? '自动' : m === 'candle' ? 'K线' : '折线'}
           </button>
         ))}
+        <div className="tool-divider" />
+        <button
+          className={`tool-btn ${showPatterns ? 'on' : ''}`}
+          title={showPatterns
+            ? '正在标形态：看涨在 K 线下方（绿箭头）、看跌在上方（红箭头）。点一下关掉'
+            : '在 K 线上标出识别到的经典形态，并注明看涨还是看跌'}
+          onClick={() => pickPatterns(!showPatterns)}
+        >
+          形态
+        </button>
         {!research && (<>
         <div className="tool-divider" />
         {TOOLS.map((t) => (
@@ -1441,6 +1691,15 @@ export default function ChartPane({
             <span className="down">L {legend.l == null ? '—' : fmtPrice(legend.l, priceRound)}</span>
             <span>C {fmtPrice(legend.c, priceRound)}</span>
             <span>V {fmtVolume(legend.v)}{legend.turnover ? ' USDT' : ''}</span>
+            {legend.pattern && (
+              <>
+                <span className="badge-sep" aria-hidden="true" />
+                <span className={`badge-pattern ${legend.pattern.direction}`}>
+                  {legend.pattern.name}
+                  <em>{legend.pattern.direction === 'bull' ? '看涨' : '看跌'}</em>
+                </span>
+              </>
+            )}
           </div>
         )}
         {historyEnd && atEdge && (
@@ -1576,6 +1835,8 @@ export default function ChartPane({
         )}
         {loading && <div className="loading">加载中…</div>}
       </div>
+
+      {showPatterns && <PatternsStrip hits={shownHits} />}
     </>
   );
 }

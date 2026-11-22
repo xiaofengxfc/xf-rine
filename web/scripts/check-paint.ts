@@ -6,7 +6,7 @@
  */
 import {
   INTERVAL_SEC, isFlatBar, isNoTradeBar, mergeNewer, mergeOlder, normalizeBars, paintBars,
-  paintBarsIncrementally, sparseStats, upsertBar,
+  paintBarsIncrementally, snapTime, sparseStats, upsertBar,
   type Bar,
 } from '../src/lib/candles.ts';
 import { backfill } from '../src/lib/backfill.ts';
@@ -45,6 +45,26 @@ ok('无成交：平价 + 零量 + 开收相等', () => {
   if (!isNoTradeBar(bar(60, 5, 5, 5, 5, 0))) throw new Error('零成交平价应算无成交');
   if (isNoTradeBar(bar(60, 5, 5, 5, 5, 3))) throw new Error('有量就不是无成交');
   if (isNoTradeBar(bar(60, 5, 6, 5, 5, 0))) throw new Error('有影线不是无成交');
+});
+
+// ---- 周期吸附 ----
+ok('周期吸附：不在网格上的推送时间归到周期起点', () => {
+  const t = 20 * 3600 + 29 * 60;
+  eq(snapTime(t, 300), 20 * 3600 + 25 * 60, '5m 的 20:29 → 20:25');
+  eq(snapTime(1234.9, 60), 1200, '1m 向下取整');
+  eq(snapTime(10, 0), 10, 'step 为 0 时原样返回');
+});
+
+ok('mergeNewer：值没变的根保留原对象（避免图表/形态扫描整段重算）', () => {
+  const prev = [bar(60, 10, 11, 9, 10.5), bar(120, 10.5, 11, 10, 10.8)];
+  const page = prev.map((b) => ({ ...b }));
+  if (mergeNewer(prev, page, 100).bars !== prev) throw new Error('没有变化时应返回原数组');
+  const changed = prev.map((b) => ({ ...b }));
+  changed[1] = { ...changed[1]!, close: changed[1]!.close + 1 };
+  const out = mergeNewer(prev, changed, 100);
+  if (out.bars[0] !== prev[0]) throw new Error('没变的根被换掉了');
+  if (out.bars[1] === prev[1]) throw new Error('变了的根没有换新对象');
+  if (out.patched !== 1) throw new Error('patched 应为 1');
 });
 
 // ---- paintBars ----

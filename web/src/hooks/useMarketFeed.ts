@@ -9,7 +9,7 @@ import {
   type WsMessage,
 } from '../lib/api.ts';
 import { backfill } from '../lib/backfill.ts';
-import { intervalSeconds, mergeNewer, mergeOlder, upsertBar } from '../lib/candles.ts';
+import { intervalSeconds, isUsableBar, mergeNewer, mergeOlder, snapTime, upsertBar, usableBars } from '../lib/candles.ts';
 import { wsUrl } from '../lib/endpoint.ts';
 
 export interface MarketSnap {
@@ -109,7 +109,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       if (sequence !== marketSeqRef.current) return;
       const { levels, error: levelsError } = levelsResult;
       const live = pendingLiveRef.current.key === key ? pendingLiveRef.current.bars : [];
-      const bars = mergeNewer(candles.bars, live, MAX_BARS).bars;
+      const bars = mergeNewer(usableBars(candles.bars), usableBars(live), MAX_BARS).bars;
       if (pendingLiveRef.current.key === key) pendingLiveRef.current = { key: '', bars: [] };
       const cache = marketCacheRef.current;
       cache.delete(key);
@@ -170,7 +170,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
           const page = await jget<{ bars: Bar[]; exhausted?: boolean }>(
             `/api/candles?contract=${name}&interval=${timeframe}&limit=${OLDER_PAGE}&before=${before}`,
           );
-          return { bars: page.bars, exhausted: page.exhausted === true };
+          return { bars: usableBars(page.bars), exhausted: page.exhausted === true };
         },
         onPage: (next) => {
           if (stale()) return;
@@ -225,7 +225,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       if (marketRef.current.key !== key) return;
       setMarket((current) => {
         if (current.key !== key) return current;
-        const merged = mergeNewer(current.bars, page.bars, MAX_BARS);
+        const merged = mergeNewer(current.bars, usableBars(page.bars), MAX_BARS);
         return merged.added === 0 && merged.patched === 0 ? current : { ...current, bars: merged.bars };
       });
     } catch {
@@ -288,8 +288,14 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
 
         const incoming = message.bar;
         const key = `${contract}:${interval}`;
+        /**
+         * 推来的时间可能不是周期起点（Bitget 的「正在走的那根」给的是当前分钟）。
+         * 这里再吸附一次：不吸附的话，20:29 的帧会在 5 分钟图里另起一根，
+         * 多出来的「幽灵 K 线」让图断续，也把视口和价格轴一起带偏。
+         */
+        const time = snapTime(Number(incoming.time), intervalSeconds(interval));
         const bar: Bar = {
-          time: incoming.time,
+          time,
           open: incoming.open,
           high: incoming.high,
           low: incoming.low,
@@ -297,10 +303,13 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
           volume: incoming.volume,
           turnover: incoming.turnover,
         };
+        // 推来的帧字段缺失时 Number(undefined) 会变成 NaN。这种根进了图表就是一个
+        // 「有时间、没价格」的空槽：横轴占位、画面空白，最新那根被推得越来越靠左。
+        if (!isUsableBar(bar)) return;
         const currentMarket = marketRef.current;
         const currentLast = currentMarket.bars[currentMarket.bars.length - 1];
         if (pendingLiveRef.current.key === key
-          && (currentMarket.key !== key || !currentLast || incoming.time >= currentLast.time)) {
+          && (currentMarket.key !== key || !currentLast || bar.time >= currentLast.time)) {
           upsertBar(pendingLiveRef.current.bars, bar, TAIL_PAGE);
         }
         if (currentMarket.key !== key || currentMarket.bars.length === 0) return;
@@ -309,9 +318,9 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
           if (current.key !== key || current.bars.length === 0) return current;
           const bars = current.bars.slice();
           const last = bars[bars.length - 1]!;
-          if (last.time === incoming.time) bars[bars.length - 1] = bar;
-          else if (incoming.time > last.time) {
-            if (incoming.time - last.time > intervalSeconds(interval)) void resyncTail();
+          if (last.time === bar.time) bars[bars.length - 1] = bar;
+          else if (bar.time > last.time) {
+            if (bar.time - last.time > intervalSeconds(interval)) void resyncTail();
             bars.push(bar);
           } else {
             return current;
