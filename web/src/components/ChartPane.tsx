@@ -27,7 +27,7 @@ import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
-import { fmtDate, fmtMoney, fmtPct, fmtPrice } from '../lib/format.ts';
+import { fmtDate, fmtMoney, fmtPct, fmtPrice, fmtVolume } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 import { useCandleStyle } from '../lib/chartStyle.ts';
 import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
@@ -350,7 +350,9 @@ export default function ChartPane({
   const [atEdge, setAtEdge] = useState(false);
   /** 图上那一步「确认平掉」按了没有。按合约+方向记，双向持仓时两边各管各的 */
   const [closing, setClosing] = useState<string | null>(null);
-  const [legend, setLegend] = useState<{ o: number | null; h: number | null; l: number | null; c: number; v: number; t: number } | null>(null);
+  const [legend, setLegend] = useState<{
+    o: number | null; h: number | null; l: number | null; c: number; v: number; turnover: boolean; t: number;
+  } | null>(null);
   /** 右键菜单：贴着鼠标的位置画，带了它取到的那根 K 线所在的价格 */
   const [menu, setMenu] = useState<{ x: number; y: number; price: number; time: number | null } | null>(null);
 
@@ -473,6 +475,9 @@ export default function ChartPane({
       const d = (param.seriesData.get(price) ?? param.seriesData.get(bar)) as { open: number; high: number; low: number; close: number } | undefined;
       const frame = param.seriesData.get(line) as { value: number } | undefined;
       const v = param.seriesData.get(vol) as { value: number } | undefined;
+      const time = Number(param.time);
+      const volumeIndex = firstIndexAtOrAfter(barsRef.current, time);
+      const volumeBar = barsRef.current[volumeIndex];
       // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
       if (!d && !frame) { setLegend(null); return; }
       setLegend({
@@ -481,7 +486,8 @@ export default function ChartPane({
         l: d ? d.low : null,
         c: d ? d.close : frame!.value,
         v: v?.value ?? 0,
-        t: Number(param.time),
+        turnover: volumeBar?.time === time && volumeBar.turnover != null,
+        t: time,
       });
     });
 
@@ -810,9 +816,10 @@ export default function ChartPane({
      * 深浅两套的浓淡不一样：同样的 0.28 落在白底上等于没画。
      */
     const volColor = (b: Bar) => (b.close >= b.open ? colorsRef.current.volumeUp : colorsRef.current.volumeDown);
+    const volumeValue = (b: Bar) => b.turnover ?? b.volume;
     const writeVol = (b: Bar) => vol.update({
       time: b.time as UTCTimestamp,
-      value: b.volume,
+      value: volumeValue(b),
       color: volColor(b),
     });
     const fullLoad = () => {
@@ -822,7 +829,7 @@ export default function ChartPane({
       line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
-        value: b.volume,
+        value: volumeValue(b),
         color: volColor(b),
       })));
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
@@ -931,7 +938,7 @@ export default function ChartPane({
       line.setData(lineData(clean));
       vol.setData(clean.map((b) => ({
         time: b.time as UTCTimestamp,
-        value: b.volume,
+        value: volumeValue(b),
         color: volColor(b),
       })));
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
@@ -1324,7 +1331,7 @@ export default function ChartPane({
             <span className="up">H {legend.h == null ? '—' : fmtPrice(legend.h, priceRound)}</span>
             <span className="down">L {legend.l == null ? '—' : fmtPrice(legend.l, priceRound)}</span>
             <span>C {fmtPrice(legend.c, priceRound)}</span>
-            <span>V {Math.round(legend.v)}</span>
+            <span>V {fmtVolume(legend.v)}{legend.turnover ? ' USDT' : ''}</span>
           </div>
         )}
         {historyEnd && atEdge && (

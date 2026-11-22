@@ -295,6 +295,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
           low: incoming.low,
           close: incoming.close,
           volume: incoming.volume,
+          turnover: incoming.turnover,
         };
         const currentMarket = marketRef.current;
         const currentLast = currentMarket.bars[currentMarket.bars.length - 1];

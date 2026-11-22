@@ -30,6 +30,16 @@ export const compact = (v: number): string => {
   return v.toFixed(0);
 };
 
+/** Chart volume values may be fractional coin quantities or large USDT turnover. */
+export const fmtVolume = (v: number): string => {
+  if (!Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+  if (abs >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return v.toLocaleString('en-US', { maximumSignificantDigits: 5, maximumFractionDigits: 8 });
+};
+
 export const fmtTime = (unix: number): string =>
   new Date(unix * 1000).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 

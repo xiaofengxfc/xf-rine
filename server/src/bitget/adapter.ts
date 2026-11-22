@@ -483,6 +483,7 @@ export class BitgetExchange implements Exchange {
           l: String(r?.[3] ?? '0'),
           c: String(r?.[4] ?? '0'),
           v: Number(r?.[5] ?? 0),
+          turnover: r?.[6] == null ? undefined : Number(r[6]),
         });
       }
       if (!Number.isFinite(oldest)) break;

@@ -469,6 +469,7 @@ async function fetchPage(contract: string, interval: string, limit: number, step
       low: Number(c.l),
       close: Number(c.c),
       volume: Number(c.v),
+      turnover: c.turnover ?? (c.sum == null ? undefined : Number(c.sum)),
     }))
     .filter((b) => !before || b.time < before)
     .sort((x, y) => x.time - y.time);

@@ -234,7 +234,7 @@ export function mergeNewer(prev: Bar[], page: Bar[], maxBars: number): TailMerge
     const old = byTime.get(b.time);
     if (old) {
       if (old.open !== b.open || old.high !== b.high || old.low !== b.low
-        || old.close !== b.close || old.volume !== b.volume) patched += 1;
+        || old.close !== b.close || old.volume !== b.volume || old.turnover !== b.turnover) patched += 1;
     } else {
       added += 1;
     }

@@ -9,6 +9,7 @@ export interface GateCandle {
   l: string;
   c: string;
   v: number;
+  a?: string;
   w?: boolean;
 }
 
@@ -199,6 +200,7 @@ export class MarketHub {
           low: Number(c.l),
           close: Number(c.c),
           volume: Number(c.v),
+          turnover: c.a == null ? undefined : Number(c.a),
           closed: c.w === true,
         },
       });

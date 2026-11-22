@@ -104,7 +104,7 @@ export interface Ticker {
 }
 
 export interface Bar {
-  time: number; open: number; high: number; low: number; close: number; volume: number;
+  time: number; open: number; high: number; low: number; close: number; volume: number; turnover?: number;
 }
 
 /**
@@ -407,7 +407,7 @@ export interface NewsDigest {
 
 
 export interface LiveBar {
-  time: number; open: number; high: number; low: number; close: number; volume: number; closed: boolean;
+  time: number; open: number; high: number; low: number; close: number; volume: number; turnover?: number; closed: boolean;
 }
 
 /** 服务端 /ws 推下来的东西 */

@@ -220,6 +220,7 @@ export class BitgetMarketHub {
             low: Number(row[3]),
             close: Number(row[4]),
             volume: Number(row[5]),
+            turnover: row[6] == null ? undefined : Number(row[6]),
             // 推送里没有「这根走完没有」，交给页面按时间判断
             closed: false,
           },

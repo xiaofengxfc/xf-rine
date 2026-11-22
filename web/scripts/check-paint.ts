@@ -10,6 +10,7 @@ import {
   type Bar,
 } from '../src/lib/candles.ts';
 import { backfill } from '../src/lib/backfill.ts';
+import { fmtVolume } from '../src/lib/format.ts';
 
 const bar = (time: number, o: number, h: number, l: number, c: number, v = 1): Bar => (
   { time, open: o, high: h, low: l, close: c, volume: v }
@@ -171,6 +172,20 @@ ok('mergeNewer：更早的历史一根都不丢', () => {
   const m = mergeNewer(base, [bar(240, 1.8, 2.05, 1, 2.02)], 100);
   eq(m.bars.length, 3, '根数');
   eq(m.bars[0]!.time, 60, '最老一根');
+});
+
+ok('mergeNewer：原始量不变时也更新成交额', () => {
+  const previous = [{ ...base[2]!, turnover: 100 }];
+  const next = [{ ...base[2]!, turnover: 125.5 }];
+  const merged = mergeNewer(previous, next, 100);
+  eq(merged.patched, 1, '成交额变化计入补丁');
+  eq(merged.bars[0]!.volume, base[2]!.volume, '原始成交量不变');
+  eq(merged.bars[0]!.turnover, 125.5, '更新计价币成交额');
+});
+
+ok('成交额格式：小数不取整，较大值缩写', () => {
+  eq(fmtVolume(0.0276), '0.0276', '小数成交额');
+  eq(fmtVolume(1_234_567), '1.23M', '大额缩写');
 });
 
 ok('实时缓冲：按时间更新、插入并保留最新容量', () => {

@@ -159,6 +159,9 @@ export interface XCandle {
   l: string;
   c: string;
   v: number;
+  /** 成交额，USDT 永续合约为 USDT 计价 */
+  turnover?: number;
+  /** Gate 原始成交额字段，Bitget 适配器映射到 turnover */
   sum?: string;
 }
 

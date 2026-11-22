@@ -11,4 +11,6 @@ export interface Bar {
   low: number;
   close: number;
   volume: number;
+  /** 计价币成交额。图表展示用，不替代算法使用的原始 volume */
+  turnover?: number;
 }
