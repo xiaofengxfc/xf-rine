@@ -1,7 +1,23 @@
 import type { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
 import { WebSocket as UndiciWS } from 'undici';
-import { wsDispatcher } from '../net.js';
+import { wsDispatcherFor, wsRouteOrder } from '../net.js';
+import { isStale, routeOnTrouble, type NetRoute } from '../wsRoute.js';
+
+/** 官方行情地址。诊断时可以用 XF_WS_URL 指到别处（例如自建镜像） */
+const WS_LIVE = (process.env.XF_WS_URL ?? '').trim() || 'wss://ws.bitget.com/v2/ws/public';
+/** 时间相关的阈值也留了出口：本地调试要把它调小，不然得干等一分半 */
+const envMs = (name: string, fallback: number): number => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/** 连上不到这么久就断，算「这条路在这台机器上不通」，换另一条 */
+const FAST_FAIL_MS = envMs('XF_WS_FAST_FAIL_MS', 4000);
+/** 多久没收到任何帧就当连接已经假死。心跳 25 秒一次，留足余量 */
+const STALE_MS = envMs('XF_WS_STALE_MS', 90_000);
+/** 建连最多等这么久。TUN 把路由黑洞掉时，握手会一直挂着，不能干等 */
+const OPEN_TIMEOUT_MS = envMs('XF_WS_OPEN_TIMEOUT_MS', 12_000);
 
 /**
  * Bitget 公共行情连接。
@@ -21,7 +37,6 @@ import { wsDispatcher } from '../net.js';
  * candle 订阅虽会确认成功，但不会推送行情帧。
  */
 
-const WS_LIVE = 'wss://ws.bitget.com/v2/ws/public';
 const PRODUCT = 'USDT-FUTURES';
 /** 官方限制是 5 秒内最多 10 条 ping，这里宽松到 25 秒一次 */
 const PING_MS = 25_000;
@@ -58,6 +73,20 @@ export class BitgetMarketHub {
   private nextClientId = 1;
   private alive = false;
   private openedAt = 0;
+  /** 现在走哪条路，以及在这条路上连栽了几次 */
+  private route: NetRoute | null = null;
+  private routeFails = 0;
+  /** 最后收到一帧的时刻。TUN / 代理节点掉线时，TCP 常常还举着，只有数据停了 */
+  private lastMessageAt = 0;
+  private staleTimer: NodeJS.Timeout | null = null;
+  /**
+   * 这个 hub 已经作废（换交易所时会关掉旧的）。
+   *
+   * 关连接会触发 close 事件，那个处理器会顺手安排一次重连 —— 不认这个标记的话，
+   * 「关掉」变成「500 毫秒后又连回来」，旧交易所的连接就一直在后台跑。
+   * 对页面那侧的 wss 已经摘掉了，所以它推的东西没人接，纯属耗着。
+   */
+  private disposed = false;
 
   /** 存一份监听函数：换交易所时要把旧 hub 从 wss 上摘掉，否则两条连接都在跑 */
   private onConn: (sock: WebSocket) => void;
@@ -134,19 +163,62 @@ export class BitgetMarketHub {
     }));
   }
 
+  /**
+   * 接上行情。
+   *
+   * 走哪条路不是写死的：配了代理时先按实测快慢排序（见 net.ts 的 wsRouteOrder），
+   * 连上就记住这条路；如果反复「连上就断」，说明这条路在本机根本走不通
+   * —— TUN 模式下系统代理还开着、或者节点不让连 WebSocket 时就是这样 ——
+   * 换另一条再试。以前只在建连时挑一次，挑错就永远在同一个坑里重连。
+   */
   connect(): void {
-    if (this.ws) return;
-    const dispatcher = wsDispatcher();
+    if (this.disposed || this.ws) return;
+    let order = wsRouteOrder();
+    let preferred: NetRoute = this.route && order.includes(this.route) ? this.route : order[0]!;
+    let dispatcher = wsDispatcherFor(preferred);
+    /**
+     * 说好走代理，手上却没有代理 agent（代理刚好在这一刻被判死）。
+     *
+     * 这一轮就整轮按直连算：日志别写「走代理」，换路记账也别再把「代理」当成另一条 ——
+     * 否则关连接时会按旧顺序切回一个根本不存在的代理，白等一轮超时。
+     */
+    if (preferred === 'proxy' && !dispatcher) {
+      order = ['direct'];
+      preferred = 'direct';
+      dispatcher = null;
+    }
+    const route: NetRoute = preferred;
+    this.route = route;
     const sock = dispatcher
       ? new UndiciWS(WS_LIVE, { dispatcher } as unknown as string[])
       : new UndiciWS(WS_LIVE);
     this.ws = sock;
 
+    // 建连看门狗：到点还没 open 就当作这条路不通，自己兜一次重连
+    const openTimer = setTimeout(() => {
+      if (this.disposed || this.alive) return;
+      console.warn(
+        '[ws] bitget 握手 ' + Math.round(OPEN_TIMEOUT_MS / 1000) + ' 秒没建起来 route=' + route + '，换路重连',
+      );
+      // 握手都建不起来，这条路基本可以直接判死：算两次，当场换路，别再多等一轮
+      this.noteTrouble(order, route, 2);
+      try { sock.close(); } catch { /* 还在 CONNECTING，关不掉也无妨 */ }
+      // CONNECTING 阶段 close() 不一定回调 close 事件，这里自己兜一次
+      if (this.ws === sock) {
+        this.ws = null;
+        this.scheduleReconnect();
+      }
+    }, OPEN_TIMEOUT_MS);
+    openTimer.unref();
+
     sock.addEventListener('open', () => {
+      clearTimeout(openTimer);
       this.alive = true;
       this.openedAt = Date.now();
+      this.lastMessageAt = Date.now();
       this.reconnectAttempt = 0;
-      console.log('[ws] bitget connected' + (dispatcher ? '（走代理）' : ''));
+      this.routeFails = 0;
+      console.log('[ws] bitget connected' + (dispatcher ? '（走代理）' : '（直连）'));
       for (const sub of this.wanted.values()) this.sendSub('subscribe', sub);
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = setInterval(() => {
@@ -154,10 +226,25 @@ export class BitgetMarketHub {
         if (this.ws && this.ws.readyState === OPEN) this.ws.send('ping');
       }, PING_MS);
       this.heartbeat.unref();
+      /**
+       * 假死看门狗：还「连着」但一帧都没有，就把这条连接掐掉重来。
+       * TUN 模式掉线时 TCP 常常还举着，不看数据的话页面会一直停在「已连接」的旧行情上。
+       */
+      if (this.staleTimer) clearInterval(this.staleTimer);
+      this.staleTimer = setInterval(() => {
+        if (!this.ws || this.ws.readyState !== OPEN) return;
+        const now = Date.now();
+        // 一个订阅都没有时，服务端本来就不推东西，别把它当成假死
+        if (!isStale({ now, lastMessageAt: this.lastMessageAt, staleMs: STALE_MS, subscriptions: this.wanted.size })) return;
+        console.warn('[ws] bitget 已 ' + Math.round((now - this.lastMessageAt) / 1000) + ' 秒没有任何数据，重连');
+        try { this.ws.close(); } catch { /* 已经断了 */ }
+      }, Math.min(15_000, Math.max(1000, Math.round(STALE_MS / 6))));
+      this.staleTimer.unref();
     });
 
     // 交易所偶尔会推形状不对的帧，不兜住会把进程带走
     sock.addEventListener('message', (ev) => {
+      this.lastMessageAt = Date.now();
       try {
         const data = (ev as unknown as { data: unknown }).data;
         const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8');
@@ -167,17 +254,50 @@ export class BitgetMarketHub {
       }
     });
 
-    sock.addEventListener('close', () => {
+    sock.addEventListener('close', (ev) => {
+      clearTimeout(openTimer);
       this.alive = false;
       this.ws = null;
       if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
-      console.warn('[ws] bitget closed uptime=' + (Date.now() - this.openedAt) + 'ms');
+      if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+      const uptime = Date.now() - this.openedAt;
+      const close = ev as unknown as { code?: number; reason?: string };
+      console.warn(
+        '[ws] bitget closed uptime=' + uptime + 'ms'
+        + ' route=' + (route === 'proxy' ? 'proxy' : 'direct')
+        + (close?.code ? ' code=' + close.code : '')
+        + (close?.reason ? ' reason=' + close.reason : ''),
+      );
+      /**
+       * 连上就断：这条路在本机走不通。
+       *
+       * TUN 模式最容易撞上这一条：注册表里系统代理还开着，REST 走代理没问题，
+       * 但 WebSocket 经代理连出去会被节点掐掉，于是「连上 → 秒断 → 重连」循环。
+       * 连续两次就换另一条路，别在同一条路上原地打转。
+       */
+      if (uptime < FAST_FAIL_MS) this.noteTrouble(order, route);
+      if (this.disposed) return;
       // 页面靠这一条把「行情断了」显示出来。名字沿用 gate_down：前端只认它
       this.broadcast({ type: 'gate_down' });
       this.scheduleReconnect();
     });
 
-    sock.addEventListener('error', () => { console.warn('[ws] bitget 连接出错（直连被重置？配了代理就会走代理）'); });
+    sock.addEventListener('error', () => {
+      console.warn('[ws] bitget 连接出错 route=' + (route === 'proxy' ? 'proxy' : 'direct') + '（直连被重置？换一条路会自动重试）');
+    });
+  }
+
+  /**
+   * 这条路又栽了一次：连着栽两次就换另一条。
+   *
+   * 只在「有另一条可换」时才动：没配代理的时候直连不通就是不通，换也换不出东西来。
+   */
+  private noteTrouble(order: NetRoute[], route: NetRoute, weight = 1): void {
+    const outcome = routeOnTrouble(order, route, this.routeFails, weight);
+    this.routeFails = outcome.fails;
+    if (!outcome.switched) return;
+    this.route = outcome.route;
+    console.warn('[ws] bitget 连续两次连不上，换 ' + (outcome.route === 'proxy' ? '代理' : '直连') + ' 再试');
   }
 
   private scheduleReconnect(): void {
@@ -272,12 +392,20 @@ export class BitgetMarketHub {
   }
 
   close(): void {
-    // 先摘监听再关：close 事件会顺手安排一次重连，那就变成「关了又自己连回来」
+    /**
+     * 先立「作废」标记再关。
+     *
+     * undici 的 WebSocket 没法像 ws 那样 removeAllListeners，关连接一定会走 close 处理器。
+     * 所以靠这个标记让那个处理器什么都不做 —— 否则关了又自己连回来。
+     */
+    this.disposed = true;
+    this.alive = false;
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
     // 从 wss 上摘掉自己：换交易所会造一个新 hub，旧的不摘就会有两个都在往页面推
     this.wss.off('connection', this.onConn);
-    this.ws?.close();
+    try { this.ws?.close(); } catch { /* 已经断了 */ }
     this.ws = null;
   }
 }

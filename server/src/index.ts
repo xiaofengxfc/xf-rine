@@ -160,9 +160,22 @@ const wss = new WebSocketServer({
 // 等代理探完再连：直连被重置的网络里，先连一次只会白掉一次线、白推一次 gate_down
 void primeProxy().then(() => attachMarketHub(wss));
 
+/**
+ * 行情心跳播报：掉线说一次就够，别每 30 秒刷一行。
+ *
+ * 重连由 hub 自己负责（换路、退避都在那边），这里只负责让人知道「现在是断的」。
+ * 断着的时候每 5 分钟提醒一次，页面顶上那颗点也还是红的。
+ */
+let wasAlive = true;
+let lastDownLogAt = 0;
 setInterval(() => {
   const s = marketHubStatus();
-  if (!s.alive) console.warn('[ws] ' + config.exchange + ' 行情掉线，正在重连…');
+  if (s.alive) { wasAlive = true; return; }
+  const now = Date.now();
+  if (!wasAlive && now - lastDownLogAt < 5 * 60_000) return;
+  wasAlive = false;
+  lastDownLogAt = now;
+  console.warn('[ws] ' + config.exchange + ' 行情掉线，正在重连…');
 }, 30_000).unref();
 
 /**

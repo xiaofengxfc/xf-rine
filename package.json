@@ -14,6 +14,8 @@
     "check:viewport": "pnpm -F server exec tsx ../web/scripts/check-viewport.ts",
     "check:errors": "pnpm -F server exec tsx scripts/check-errors.ts",
     "check:protect": "pnpm -F server exec tsx ../web/scripts/check-protection.ts",
+    "check:ws-route": "pnpm -F server check:ws-route",
+    "check:ws-failover": "pnpm -F server check:ws-failover",
     "check:levels": "pnpm -F server exec tsx scripts/check-levels.ts",
     "check:data": "pnpm -F server exec tsx scripts/check-data.ts",
     "check:pick": "pnpm -F server exec tsx scripts/check-pick.ts",

@@ -1,6 +1,13 @@
 import WebSocket from 'ws';
 import type { WebSocketServer } from 'ws';
 import { marketWsUrl } from '../config.js';
+import { isStale } from '../wsRoute.js';
+
+/** 连上以后一直没有数据多久算假死。Gate 20 秒一次心跳，留足余量 */
+const STALE_MS = (() => {
+  const n = Number(process.env.XF_WS_STALE_MS);
+  return Number.isFinite(n) && n > 0 ? n : 90_000;
+})();
 
 export interface GateCandle {
   t: number;
@@ -46,6 +53,9 @@ export class MarketHub {
   private alive = false;
   private openedAt = 0;
   private heartbeat: NodeJS.Timeout | null = null;
+  /** 最后一帧的时刻，以及假死看门狗 */
+  private lastMessageAt = 0;
+  private staleTimer: NodeJS.Timeout | null = null;
 
   /** 存一份监听函数：换交易所时要把旧 hub 从 wss 上摘掉，否则两条连接都在跑 */
   private onConn: (sock: WebSocket) => void;
@@ -136,6 +146,7 @@ export class MarketHub {
     ws.on('open', () => {
       this.alive = true;
       this.openedAt = Date.now();
+      this.lastMessageAt = Date.now();
       this.reconnectAttempt = 0;
       console.log('[ws] gate connected');
       for (const sub of this.wanted.values()) {
@@ -147,11 +158,27 @@ export class MarketHub {
         this.sendToGate({ time: Math.floor(Date.now() / 1000), channel: 'futures.ping' });
       }, 20_000);
       this.heartbeat.unref();
+      /**
+       * 假死看门狗。
+       *
+       * TUN、代理节点掉线的时候，TCP 常常还举着 —— readyState 是 OPEN，
+       * 但一帧都不来。只看连接状态的话，页面会一直停在「已连接」的旧行情上。
+       */
+      if (this.staleTimer) clearInterval(this.staleTimer);
+      this.staleTimer = setInterval(() => {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const now = Date.now();
+        if (!isStale({ now, lastMessageAt: this.lastMessageAt, staleMs: STALE_MS, subscriptions: this.wanted.size })) return;
+        console.warn('[ws] gate 已 ' + Math.round((now - this.lastMessageAt) / 1000) + ' 秒没有任何数据，重连');
+        try { this.ws.terminate(); } catch { /* 已经断了 */ }
+      }, Math.min(15_000, Math.max(1000, Math.round(STALE_MS / 6))));
+      this.staleTimer.unref();
     });
 
     // 交易所偶尔会推形状不对的帧。不兜住的话异常会冒到事件循环上把进程带走 ——
     // 页面还开着，数据却停在那一刻，看起来就像「均价跑到别处去了」。
     ws.on('message', (buf) => {
+      this.lastMessageAt = Date.now();
       try {
         this.onGateMessage(buf.toString());
       } catch (err) {
@@ -163,6 +190,7 @@ export class MarketHub {
       this.alive = false;
       this.ws = null;
       if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+      if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
       console.warn(`[ws] gate closed code=${code} reason=${reason.toString() || '(none)'} uptime=${Date.now() - this.openedAt}ms`);
       this.broadcast({ type: 'gate_down' });
       this.scheduleReconnect();
@@ -251,6 +279,7 @@ export class MarketHub {
      */
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
     // 从 wss 上摘掉自己：换交易所会造一个新 hub，旧的不摘就会有两个都在往页面推
     this.wss.off('connection', this.onConn);
     this.ws?.removeAllListeners();

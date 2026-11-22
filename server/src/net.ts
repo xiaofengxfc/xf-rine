@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { Agent, ProxyAgent, fetch as undiciFetch } from 'undici';
 import type { Dispatcher } from 'undici';
 import { probeUrl } from './config.js';
+import { orderRoutes, type NetRoute } from './wsRoute.js';
 
 type FetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 
@@ -147,14 +148,33 @@ function dispatcherFor(route: 'direct' | 'proxy'): Dispatcher {
 }
 
 /**
- * 给 WebSocket 用的 dispatcher。
+ * 长连接的候选路，排好序。
  *
- * undici 的 fetch 能跟着 dispatcher 走代理，ws 库不会读系统代理 —— 直连被重置的网络里，
- * 行情连接就只能一直 ECONNRESET。行情走 undici 的 WebSocket 时从这里拿 dispatcher，
- * 和 REST 走同一条路；没配代理就返回 null，调用方按直连连。
+ * undici 的 WebSocket 能跟着 dispatcher 走代理（ws 库不会读系统代理），
+ * 所以行情连接和 REST 用的是同一套出网判断；这里只是把「两条都试」的判断交出去，
+ * 由调用方先试一条、不通就换另一条 —— 只挑一次是不够的，见 bitget/market.ts。
+ *
+ * 为什么不能只看「配没配代理」：代理模式有好几种，系统代理、TUN、规则分流，
+ * 同一个地址在 TUN 下直连反而是通的，而在只配系统代理时不走代理又连不上。
+ * 从外面看不出是哪一种，所以两条都给出来，由调用方「先试一条、秒断就换另一条」。
+ *
+ * 排序用 REST 量出来的快慢：能出网的那条通常也是长连接能用的那条。
  */
-export function wsDispatcher(): Dispatcher | null {
-  return state.on && current !== direct ? current : null;
+export function wsRouteOrder(): NetRoute[] {
+  /**
+   * 手工把某条路排到最前面（XF_WS_ROUTE）。
+   *
+   * 自动排序是按 REST 实测的快慢来的，但「REST 快」不等于「长连接能用」：
+   * TUN、分流规则、节点只放行部分协议，都会让两者结论不一样。
+   * 自动排序猜不出来的时候，留一个说得清楚的开关：设成 proxy 或 direct。
+   * 只是排在前面，另一条仍然是后备 —— 选的这条不通，行情照样会自己换过去。
+   */
+  return orderRoutes(routeMs, state.on, (process.env.XF_WS_ROUTE ?? '').trim().toLowerCase());
+}
+
+/** 某条路的 dispatcher。直连返回 null —— undici 的 WebSocket 不传就是直连 */
+export function wsDispatcherFor(route: NetRoute): Dispatcher | null {
+  return route === 'proxy' && state.on && current !== direct ? current : null;
 }
 
 /** 走一条路发一次，顺手记下这次花了多久 */
