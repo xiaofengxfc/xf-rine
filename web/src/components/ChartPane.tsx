@@ -467,7 +467,8 @@ export default function ChartPane({
   const patternHits = useMemo<PatternHit[]>(() => {
     if (!showPatterns) return EMPTY_HITS;
     const scans = patternScansRef.current;
-    const scan = scanPatterns(scans.get(scanKey) ?? null, bars);
+    // 参数依次是：周期（趋势灵敏度和展示门槛跟着它走）、只要展示的
+    const scan = scanPatterns(scans.get(scanKey) ?? null, bars, interval, true);
     scans.set(scanKey, scan);
     // 只留最近 6 个，别让切过的每个品种都攥着两万根
     if (scans.size > 6) {
@@ -1423,10 +1424,14 @@ export default function ChartPane({
   }, [bars, resetKey, storageKey, theme]);
 
   /**
-   * 形态箭头跟着 K 线和主题刷新。
+   * 形态标记跟着 K 线和主题刷新。
    *
    * 必须排在写 K 线那条 effect 后面：同一个 commit 里 effect 按声明顺序执行，
-   * 先有 K 线再挂箭头；反过来的话，新建的图会先收到一批「时间点还没数据」的箭头。
+   * 先有 K 线再挂标记；反过来的话，新建的图会先收到一批「时间点还没数据」的标记。
+   *
+   * 标记只表示「这根是哪一类形态」，不分看涨看跌 —— 实测 7 万根里没有一个形态在
+   * BH 校正后有正向方向增量（见 patterns.ts 文件头），红绿箭头等于替数据说了它没说的话。
+   * 颜色用中性色，方向和各周期的历史胜率交给角标和图下列表。
    */
   useEffect(() => {
     const plugins = markersRef.current;
@@ -1440,7 +1445,7 @@ export default function ChartPane({
      */
     let hash = shownHits.length;
     for (const h of shownHits) {
-      hash = (hash * 31 + h.time + h.id.length + (h.direction === 'bull' ? 1 : 0)) | 0;
+      hash = (hash * 31 + h.time + h.id.length) | 0;
     }
     const targetTag = target === plugins.bar ? 'b' : target === plugins.line ? 'l' : 'p';
     const sig = [
@@ -1451,11 +1456,11 @@ export default function ChartPane({
     markerSigRef.current = sig;
     const list: SeriesMarker<Time>[] = shownHits.map((h) => ({
       time: h.time as UTCTimestamp,
-      // 看涨在下方用绿箭头，看跌在上方用红箭头：和「进出场」的方向感一致
-      position: h.direction === 'bull' ? 'belowBar' : 'aboveBar',
-      shape: h.direction === 'bull' ? 'arrowUp' : 'arrowDown',
-      color: h.direction === 'bull' ? c.up : c.down,
-      size: 1,
+      // 位置也只按「有形态」来，不按方向。中性色放在 K 线下方，不和进出场箭头抢注意力
+      position: 'belowBar',
+      shape: 'circle',
+      color: c.patternMark,
+      size: 0.6,
     }));
     // 另外两套清空：切回 K 线时不能留下上一次的箭头
     for (const p of [plugins.price, plugins.bar, plugins.line]) if (p !== target) p.setMarkers([]);
@@ -1670,8 +1675,8 @@ export default function ChartPane({
         <button
           className={`tool-btn ${showPatterns ? 'on' : ''}`}
           title={showPatterns
-            ? '正在标形态：看涨在 K 线下方（绿箭头）、看跌在上方（红箭头）。点一下关掉'
-            : '在 K 线上标出识别到的经典形态，并注明看涨还是看跌'}
+            ? '正在标形态：紫色圆点表示这根出现了经典形态，十字线停上去看是哪一种、实测胜率多少。点一下关掉'
+            : '在 K 线上标出识别到的经典形态（只标位置，不主张方向）'}
           onClick={() => pickPatterns(!showPatterns)}
         >
           形态
@@ -1740,7 +1745,15 @@ export default function ChartPane({
                 <span className="badge-sep" aria-hidden="true" />
                 <span className={`badge-pattern ${legend.pattern.direction}`}>
                   {legend.pattern.name}
-                  <em>{legend.pattern.direction === 'bull' ? '看涨' : '看跌'}</em>
+                  {/* 方向写成「教科书语义」，紧跟着实测数字：否则「看涨」两个字会被当成结论 */}
+                  <em>{legend.pattern.direction === 'bull' ? '书上说看涨' : '书上说看跌'}</em>
+                  {legend.pattern.stat
+                    ? <span className="badge-stat">
+                        胜率{Math.round(legend.pattern.stat.win * 100)}% · 基准
+                        {Math.round(legend.pattern.stat.base * 100)}%
+                        {legend.pattern.stat.excess > 0 ? '' : ' · 无增量'}
+                      </span>
+                    : <span className="badge-stat">暂无统计</span>}
                 </span>
               </>
             )}

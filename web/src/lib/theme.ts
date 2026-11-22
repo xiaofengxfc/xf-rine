@@ -135,6 +135,8 @@ export interface ChartColors {
   target: string;
   /** 挂着没成交的限价单 */
   pending: string;
+  /** 形态标记。刻意不用涨跌色：形态只标位置，不主张方向（见 patterns.ts 文件头） */
+  patternMark: string;
 }
 
 const CHART: Record<Theme, ChartColors> = {
@@ -160,6 +162,7 @@ const CHART: Record<Theme, ChartColors> = {
     stop: 'rgba(255,95,109,0.82)',
     target: 'rgba(46,211,160,0.82)',
     pending: '#a885ff',
+    patternMark: 'rgba(168,133,255,0.62)',
   },
   light: {
     background: '#ffffff',
@@ -183,6 +186,7 @@ const CHART: Record<Theme, ChartColors> = {
     stop: 'rgba(217,45,75,0.85)',
     target: 'rgba(14,143,98,0.85)',
     pending: '#7c3aed',
+    patternMark: 'rgba(124,58,237,0.55)',
   },
 };
 
