@@ -353,6 +353,17 @@ export default function ChartPane({
   const firstTimeRef = useRef<number | null>(null);
   const countRef = useRef(0);
   /**
+   * 图表里实际有多少个点。
+   *
+   * 以前每帧都用 price.data().length 对账，而 data() 是把两万个点**逐个新建对象**再返回的
+   * （库的实现是 rows.map(...)）。1 分钟图上每秒来一两帧，等于每秒白发三万个对象 ——
+   * 攒下来的 GC 停顿就是「画面卡一下、甚至停好几秒」。
+   * 这里自己记着点数，真实对账改成低频的兜底检查。
+   */
+  const chartCountRef = useRef(0);
+  /** 增量写了几次。到点才做一次真的对账 */
+  const auditTickRef = useRef(0);
+  /**
    * 视口是不是「贴着最新那一根」。
    *
    * 贴着才跟随新 K 线；往回翻历史时一律不动 —— 这是「K 线不乱飘」的关键。
@@ -862,6 +873,8 @@ export default function ChartPane({
 
       levelLinesRef.current = [];
       lastTimeRef.current = null;
+      chartCountRef.current = 0;
+      auditTickRef.current = 0;
       /**
        * 「这张图已经画过哪份数据」也跟着作废。
        *
@@ -1031,6 +1044,8 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+      chartCountRef.current = clean.length;
+      auditTickRef.current = 0;
       drawnSrcRef.current = bars;
       /**
        * 优先恢复上次看到的那一段，记的是**时间**不是下标。
@@ -1177,6 +1192,8 @@ export default function ChartPane({
       lastTimeRef.current = clean[clean.length - 1]?.time ?? null;
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
+      chartCountRef.current = clean.length;
+      auditTickRef.current = 0;
       drawnSrcRef.current = bars;
 
       /**
@@ -1327,23 +1344,37 @@ export default function ChartPane({
        */
       const start = applied == null ? cleanBars.length - 1 : firstIndexAtOrAfter(cleanBars, applied);
       if (cleanBars.length - start > 500) { redraw(cleanBars); return; }
+      /** 这一轮真往序列里加了几个点。替换最后一根不算新点 */
+      let appendedPoints = 0;
       for (let i = Math.max(0, start); i < cleanBars.length; i += 1) {
         const b = cleanBars[i]!;
         if (applied != null && b.time < applied) continue;
+        if (lastTimeRef.current == null || b.time !== lastTimeRef.current) appendedPoints += 1;
         writePrice(b);
         writeBar(b);
         writeLine(b);
         writeVol(b);
         lastTimeRef.current = b.time;
       }
+      chartCountRef.current += appendedPoints;
       /**
        * 写完之后对一次账：序列里的点数和数据根数必须一样。
        *
        * 增量是一根一根 update() 上去的，中间被库拒收一根（时间重复、值不合法）不会有任何声音；
        * 而视口是按数据长度算的 —— 序列少几根，最新那根就离右边远几根，几轮下来"漂"出一大片空白，
        * 现价线落在空白处，看着就是 K 线和现价对不上。发现对不上就整段重画，一次补齐。
+       *
+       * 对账本身不能每帧做：series.data() 是把每个点重建一遍再返回的，两万个点一次，
+       * 1 分钟图每秒一两帧，等于每秒白造三万个对象。平时用自己记的点数比，
+       * 每 60 次增量才真去数一遍兜底。
        */
-      if (price.data().length !== cleanBars.length) {
+      auditTickRef.current += 1;
+      let mismatch = chartCountRef.current !== cleanBars.length;
+      if (!mismatch && auditTickRef.current >= 60) {
+        auditTickRef.current = 0;
+        mismatch = price.data().length !== cleanBars.length;
+      }
+      if (mismatch) {
         redraw(cleanBars);
         return;
       }

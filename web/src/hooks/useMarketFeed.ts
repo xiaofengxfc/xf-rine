@@ -26,6 +26,16 @@ const OLDER_PAGE = 1000;
 const BACKFILL_PUBLISH_PAGES = 5;
 const TAIL_PAGE = 300;
 const MAX_BARS = 20000;
+/**
+ * 允许临时多留多少根再裁。
+ *
+ * 到了上限就一根一根裁是最贵的做法：每来一根新 K 线，最老的那根就换一次，
+ * 图表认不出前缀，只能整段重画（两万根 × 4 条序列）。1 分钟图上这就是每分钟一次。
+ * 留出一段余量，攒够再一次性裁回去 —— 重画从「每分钟一次」变成「几百分钟一次」。
+ */
+const TRIM_SLACK = 400;
+/** 数据最多留到多少根。超过它就裁回 MAX_BARS */
+const KEEP_BARS = MAX_BARS + TRIM_SLACK;
 const DEFAULT_CONTRACT = 'BTC_USDT';
 
 type Toast = (kind: 'ok' | 'err', title: string, detail?: string) => void;
@@ -119,7 +129,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       if (sequence !== marketSeqRef.current) return;
       const { levels, error: levelsError } = levelsResult;
       const live = pendingLiveRef.current.key === key ? pendingLiveRef.current.bars : [];
-      const bars = mergeNewer(usableBars(candles.bars), usableBars(live), MAX_BARS).bars;
+      const bars = mergeNewer(usableBars(candles.bars), usableBars(live), KEEP_BARS).bars;
       if (pendingLiveRef.current.key === key) pendingLiveRef.current = { key: '', bars: [] };
       const cache = marketCacheRef.current;
       cache.delete(key);
@@ -164,6 +174,12 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
     const publishOlder = (older: Bar[]) => {
       setMarket((current) => {
         if (current.key !== key) return current;
+        /**
+         * 补历史的容量按 MAX_BARS 算，不按 KEEP_BARS。
+         *
+         * 按 KEEP_BARS 补会补到 20400，紧接着来一根新 K 线就超过上限、当场整段重画一次 ——
+         * 打开页面第一分钟就卡一下，白白把余量吃掉。
+         */
         const merged = mergeOlder(current.bars, older, MAX_BARS);
         return merged.bars === current.bars ? current : { ...current, bars: merged.bars };
       });
@@ -235,7 +251,8 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       if (marketRef.current.key !== key) return;
       setMarket((current) => {
         if (current.key !== key) return current;
-        const merged = mergeNewer(current.bars, usableBars(page.bars), MAX_BARS);
+        // 上限用 KEEP_BARS：resync 不该顺手把头部那一根裁掉（那会触发整段重画）
+        const merged = mergeNewer(current.bars, usableBars(page.bars), KEEP_BARS);
         return merged.added === 0 && merged.patched === 0 ? current : { ...current, bars: merged.bars };
       });
     } catch {
@@ -350,13 +367,13 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
             if (bar.time - last.time > intervalSeconds(interval)) void resyncTail();
             bars.push(bar);
             /**
-             * 推到上限就得把最老的挤掉。
+             * 涨过上限 + 余量才裁，一次裁回 MAX_BARS。
              *
-             * 这条路以前不裁：数组会一路涨到 MAX_BARS + 1、+2…… 下一次 resyncTail/补历史
-             * 走 mergeNewer 时又按上限裁回 20000，于是「左边那一根」每分钟变一次，
-             * 图表跟着整段重画一次。裁在这里，长度就一直是稳的。
+             * 这条路以前完全不裁：数组会一路涨到 20001、20002…… 下一次 resyncTail
+             * 走 mergeNewer 时又按 20000 裁回，于是「左边那一根」每分钟变一次，
+             * 图表跟着整段重画一次。裁在这里，且留出余量，长度几百分钟才动一次。
              */
-            if (bars.length > MAX_BARS) bars.splice(0, bars.length - MAX_BARS);
+            if (bars.length > KEEP_BARS) bars.splice(0, bars.length - MAX_BARS);
           } else {
             return current;
           }
