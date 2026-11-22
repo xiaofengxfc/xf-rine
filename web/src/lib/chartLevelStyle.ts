@@ -14,6 +14,7 @@ export function chartZoneLineStyle(input: {
   priceLabel: string;
   pTouch: number | null;
   pHold: number | null;
+  compactLabel?: boolean;
 }): ChartZoneLineStyle {
   const historical = input.history;
   const color = input.type === 'support'
@@ -24,7 +25,11 @@ export function chartZoneLineStyle(input: {
   return {
     color,
     width: 2,
-    title: historical ? '' : `${label} ${input.priceLabel} · 触及 ${pct(input.pTouch)} · 守住 ${pct(input.pHold)}`,
+    title: historical
+      ? ''
+      : input.compactLabel
+        ? label
+        : `${label} ${input.priceLabel} · 触及 ${pct(input.pTouch)} · 守住 ${pct(input.pHold)}`,
     axisLabelVisible: !historical,
   };
 }

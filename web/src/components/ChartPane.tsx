@@ -28,6 +28,8 @@ import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
 
 const UP = '#2ed3a0';
 const DOWN = '#ff5f6d';
+const CHART_FONT_SIZE = 12;
+const MOBILE_CHART_FONT_SIZE = 10;
 
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
 const SPARSE_SHARE = 0.6;
@@ -362,7 +364,7 @@ export default function ChartPane({
         background: { type: ColorType.Solid, color: c.background },
         textColor: c.text,
         fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", sans-serif',
-        fontSize: 12,
+        fontSize: CHART_FONT_SIZE,
         attributionLogo: false,
       },
       grid: {
@@ -692,6 +694,12 @@ export default function ChartPane({
     barRef.current?.applyOptions({ priceLineColor: c.priceLine });
     // 依赖里带 storageKey：切周期会重建整张图，新图也得贴成当前这套
   }, [theme, storageKey]);
+
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      layout: { fontSize: narrow ? MOBILE_CHART_FONT_SIZE : CHART_FONT_SIZE },
+    });
+  }, [narrow]);
 
   /**
    * 画法要在「图重建之后」重新贴一次。

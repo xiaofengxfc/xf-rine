@@ -83,7 +83,7 @@ function contentSignature({ positions, orders, priceOrders, zones, account, mark
   ].join('|');
 }
 
-export function buildChartPriceLines(data: ChartPriceLineInput): ChartPriceLine[] {
+export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabels = false): ChartPriceLine[] {
   const { positions, orders, priceOrders, zones, bars, account, markPrice, stale, priceRound } = data;
   const lastPrice = bars[bars.length - 1]?.close ?? 0;
   const lines: ChartPriceLine[] = [];
@@ -170,6 +170,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput): ChartPriceLine[
       priceLabel: fmtPrice(zone.center, priceRound),
       pTouch: zone.p_touch,
       pHold: zone.p_hold,
+      compactLabel: compactZoneLabels,
     });
     lines.push({
       price: zone.center,
@@ -229,7 +230,7 @@ export function useChartPriceLines(props: Props): void {
     }
     refs.lines.current = [];
 
-    for (const item of buildChartPriceLines(data)) {
+    for (const item of buildChartPriceLines(data, narrow)) {
       if (!Number.isFinite(item.price)) continue;
       try {
         refs.lines.current.push(owner.createPriceLine({
