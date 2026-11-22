@@ -11,7 +11,8 @@
     "check:config-keys": "tsx scripts/check-config-keys.ts",
     "check:http-security": "tsx scripts/check-http-security.ts",
     "check:ws-route": "tsx scripts/check-ws-route.ts",
-    "check:ws-failover": "tsx scripts/check-ws-failover.ts"
+    "check:ws-failover": "tsx scripts/check-ws-failover.ts",
+    "check:update": "tsx scripts/check-update.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

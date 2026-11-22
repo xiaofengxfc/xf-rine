@@ -18,10 +18,24 @@ import PositionsCard from './components/PositionsCard.tsx';
 import NewsCard from './components/NewsCard.tsx';
 import AiCard from './components/AiCard.tsx';
 import SettingsDialog from './components/SettingsDialog.tsx';
+import UpdateDialog from './components/UpdateDialog.tsx';
 import { useDeskNavigation } from './hooks/useDeskNavigation.ts';
 import { useMarketFeed } from './hooks/useMarketFeed.ts';
 import { useTradingSession } from './hooks/useTradingSession.ts';
 import { useUserPreferences } from './hooks/useUserPreferences.ts';
+import {
+  checkForUpdate,
+  clearPendingUpdate,
+  compareVersions,
+  decideUpdate,
+  desktopBridge,
+  isDesktopClient,
+  markVersion,
+  readPendingUpdate,
+  seenVersion,
+  type UpdateCheck,
+} from './lib/update.ts';
+import { isNative } from './lib/endpoint.ts';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
 
@@ -64,6 +78,10 @@ export default function App() {
   const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
   const [toasts, setToasts] = useState<Toast[]>([]);
+  /** 更新提示。mode 是「有新版」还是「刚装完」，两者共用同一个弹窗 */
+  const [update, setUpdate] = useState<{ mode: 'available' | 'updated'; info: UpdateCheck } | null>(null);
+  /** 刚装完那一版的说明看过之后，如果还有更新的版本，接着弹出来 */
+  const [updateAfter, setUpdateAfter] = useState<UpdateCheck | null>(null);
 
   /** 限价单带止盈止损下的单：等它成交、持仓出现，再把保护补上 */
   const [protectQueue, setProtectQueue] = useState<{
@@ -340,6 +358,62 @@ export default function App() {
   useEffect(() => { void loadLocal(); }, [loadLocal]);
 
   useEffect(() => { void loadConfig(); }, [loadConfig]);
+
+  /**
+   * 自动更新：启动时问一次有没有新版。
+   *
+   * 只在装好的程序里查（桌面外壳、手机 App）：浏览器里打开页面没有安装包可装。
+   * 桌面端刚装完的那一次优先用本地存的说明 —— 装完第一次启动可能连不上网。
+   * 其余情况看版本：上次启动的版本比现在低，或服务端说当前这版比上次新，就算刚升级完。
+   * 离线、没配令牌、限流，这里都安安静静，不往页面上写红字。
+   */
+  useEffect(() => {
+    if (!isDesktopClient() && !isNative()) return;
+    let alive = true;
+
+    // 桌面外壳能同步给出当前版本；开始安装前存下的那份说明，装完第一次启动离线也能用
+    const bridge = desktopBridge();
+    const installed = bridge?.version ?? '';
+    const pending = readPendingUpdate();
+    if (pending) clearPendingUpdate();
+
+    const apply = (result: UpdateCheck | null) => {
+      const decision = decideUpdate({ installed, pending, seen: seenVersion(), result });
+      if (decision.remember) markVersion(decision.remember);
+      if (decision.mode === 'none' || !decision.info) return;
+      setUpdate({ mode: decision.mode, info: decision.info });
+      if (decision.after) setUpdateAfter(decision.after);
+    };
+
+    // 刚装完就先弹这一版的说明，不用等网络
+    if (installed && pending && compareVersions(pending.version, installed) === 0) {
+      apply(null);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const result = await checkForUpdate();
+        if (!alive) return;
+        apply(result);
+      })();
+    }, 3000);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  /** 关掉更新弹窗。刚装完的那一个关掉后，接着提示后面还有的新版本 */
+  const closeUpdate = useCallback(() => {
+    if (update?.mode === 'updated' && updateAfter) {
+      const next = updateAfter;
+      setUpdateAfter(null);
+      setUpdate({ mode: 'available', info: next });
+      return;
+    }
+    setUpdate(null);
+  }, [update, updateAfter]);
 
   /**
    * 限价单成交之后才挂得上保护。持仓一出现就补挂一次。
@@ -658,6 +732,10 @@ export default function App() {
           onSaved={() => { void loadConfig(); void loadPrivate(); }}
           onToast={push}
         />
+      )}
+
+      {update && (
+        <UpdateDialog mode={update.mode} info={update.info} onClose={closeUpdate} />
       )}
 
       <div className="toast-host">

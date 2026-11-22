@@ -11,11 +11,12 @@
  *   - 服务端进程莫名退出（自动重启，起不来就说清楚）
  *   - 用户目录里第一次没有配置（自动生成手机访问的口令）
  */
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
-const { randomBytes } = require('node:crypto');
+const { randomBytes, createHash } = require('node:crypto');
+const { safeInstallerName } = require('./update-file.cjs');
 const { envHas, readEnvNumber, setEnvLine, withNetworkDefaults } = require('./environment.cjs');
 const { pickPort } = require('./port-selection.cjs');
 
@@ -108,6 +109,138 @@ function trimLog() {
     if (fs.existsSync(f) && fs.statSync(f).size > 2 * 1024 * 1024) fs.rmSync(f);
   } catch { /* 无所谓 */ }
 }
+
+// ---------- 自动更新 ----------
+
+/**
+ * 更新包放在临时目录，下载完就交给安装器，装了之后这份也没用了。
+ * 一次只允许跑一个更新：两个安装器同时装会把文件互相替换掉。
+ */
+const updateDir = () => path.join(app.getPath('temp'), 'xunfeng-update');
+let updating = false;
+
+function sendUpdateProgress(progress) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.send('update:progress', progress);
+  } catch {
+    /* 窗口刚关掉 */
+  }
+}
+
+/**
+ * 下载安装包。
+ *
+ * 走本机服务端的 /api/update/download：GitHub 的令牌只留在服务端，
+ * 而且那条请求会跟着服务端挑好的出网路线（直连 / 代理）走。
+ * 下载过程中边写盘边算 sha256，写完对不上就删掉重来 ——
+ * 装一个下一半的 exe，用户看到的是「更新完了程序打不开」。
+ */
+async function downloadInstaller(input, onProgress) {
+  const version = String(input.version ?? '').trim().replace(/[^0-9A-Za-z._-]/g, '');
+  if (!version) throw new Error('更新版本号不对');
+  const name = safeInstallerName(input.name, version);
+  if (!/\.exe$/i.test(name)) throw new Error('更新包不是 exe：' + name);
+  const wantDigest = String(input.digest ?? '').toLowerCase().replace(/^sha256:/, '');
+
+  const dir = updateDir();
+  fs.mkdirSync(dir, { recursive: true });
+  // 上次留下的安装包先清掉：一个就一百多兆，别越攒越多
+  try {
+    for (const old of fs.readdirSync(dir)) {
+      if (/\.exe$/i.test(old)) fs.rmSync(path.join(dir, old), { force: true });
+    }
+  } catch { /* 清不掉就放着，反正在临时目录 */ }
+
+  const target = path.join(dir, name);
+  const part = target + '.part';
+  const url = 'http://127.0.0.1:' + serverPort + '/api/update/download?platform=win&version=' + encodeURIComponent(version);
+  const res = await net.fetch(url);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error('下载更新包失败：HTTP ' + res.status + (detail ? ' ' + detail.slice(0, 160) : ''));
+  }
+
+  if (!res.body) throw new Error('下载更新包失败：服务端没有返回内容');
+  const total = Number(res.headers.get('content-length')) || Number(input.size) || 0;
+  onProgress({ phase: 'download', received: 0, total });
+  const hash = createHash('sha256');
+  const fd = fs.openSync(part, 'w');
+  let received = 0;
+  let lastSent = 0;
+  try {
+    // 用 web 的 reader 读：这具身体是 Chromium 那边给的流，不保证能塞进 node 的 Readable
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buf = Buffer.from(value);
+      fs.writeSync(fd, buf);
+      hash.update(buf);
+      received += buf.length;
+      const now = Date.now();
+      if (now - lastSent >= 200) {
+        lastSent = now;
+        onProgress({ phase: 'download', received, total });
+      }
+    }
+  } catch (e) {
+    try { fs.closeSync(fd); } catch { /* 已经关了 */ }
+    try { fs.rmSync(part, { force: true }); } catch { /* 无所谓 */ }
+    throw e;
+  }
+  fs.closeSync(fd);
+
+  const digest = hash.digest('hex');
+  if (wantDigest && digest !== wantDigest) {
+    try { fs.rmSync(part, { force: true }); } catch { /* 无所谓 */ }
+    throw new Error('更新包校验失败（下载不完整或被改过），已删除');
+  }
+  fs.renameSync(part, target);
+  onProgress({ phase: 'download', received, total: total || received });
+  return target;
+}
+
+/**
+ * 下载、校验、启动安装器，然后退出自己。
+ *
+ * 安装器参数：
+ *   --updated    升级模式：跳过选目录那一页，保留用户数据
+ *   /S           静默安装，不弹向导
+ *   --force-run  装完自动打开程序（静默安装不会走完成页，不传这个就没人重启它）
+ * 这几项对着 electron-builder 的 NSIS 模板确认过：--updated 下安装器会等本进程
+ * 退出，还举着就自己杀掉，然后复用原来的安装目录。
+ */
+async function startUpdate(input) {
+  if (updating) return { ok: false, error: '已经在更新了' };
+  updating = true;
+  sendUpdateProgress({ phase: 'download', received: 0, total: Number(input.size) || 0 });
+  try {
+    const installer = await downloadInstaller(input, sendUpdateProgress);
+    sendUpdateProgress({ phase: 'verify', received: 1, total: 1 });
+    log('[main] 更新包已就绪：' + installer);
+
+    const child = spawn(installer, ['--updated', '/S', '--force-run'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    });
+    child.on('error', (e) => log('[main] 更新安装器起不来：' + e.message));
+    child.unref();
+
+    sendUpdateProgress({ phase: 'install', received: 1, total: 1 });
+    log('[main] 已启动更新安装器，程序即将退出');
+    // 给页面一点时间显示「正在安装」；安装器会等我们退出，等不到就自己收掉
+    setTimeout(() => app.quit(), 400);
+    return { ok: true };
+  } catch (e) {
+    updating = false;
+    log('[main] 更新失败：' + (e && e.message ? e.message : e));
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+ipcMain.handle('update:start', (_event, input) => startUpdate(input ?? {}));
 
 // ---------- .env ----------
 
@@ -306,7 +439,11 @@ function createWindow(opts) {
     title: '巡风 · Gate 永续日内台',
     autoHideMenuBar: true,
     webPreferences: {
-      // 页面就是普通的网页，不需要 Node，也不给原生能力
+      // 页面就是普通的网页，不需要 Node，也不给原生能力。
+      // preload 只开了「下载并安装更新」一个口子，别的什么都不暴露
+      preload: path.join(__dirname, 'preload.cjs'),
+      // 页面自己拿不到 app.getVersion()，用启动参数把版本号递进去
+      additionalArguments: ['--xf-version=' + app.getVersion()],
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

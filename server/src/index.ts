@@ -1,5 +1,6 @@
 import express from 'express';
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -11,6 +12,7 @@ import { router } from './routes.js';
 import { attachMarketHub, marketHubStatus, closeMarketHub } from './exchange/index.js';
 import { stopSidecar } from './sr/client.js';
 import { primeProxy, refreshProxy, proxyState, routeStats } from './net.js';
+import { APP_VERSION, checkUpdate, openAsset, updateToken } from './update.js';
 
 const app = express();
 /**
@@ -98,6 +100,77 @@ app.use('/api', (req, res, next) => {
 });
 
 app.use('/api', router);
+
+/**
+ * 自动更新：查版本、下载安装包。
+ *
+ * 查的是 GitHub 的 Release，仓库是私有的，令牌在打包时注入（见 update.ts）。
+ * 平台由客户端报上来：桌面端和安卓要的包不一样。
+ *
+ * 下载走服务端中转，不让客户端直接拿 GitHub 的地址：令牌只留在这边，
+ * 而且服务端本来就会挑直连还是代理出网（net.ts），一百多兆的包也能跟着走对路。
+ */
+
+/** 查更新失败的日志：同一个原因十分钟说一次，免得离线时每次启动都刷 */
+let lastUpdateError = '';
+let lastUpdateErrorAt = 0;
+
+app.get('/api/update/check', async (req, res) => {
+  const platform = req.query.platform === 'android' ? 'android' : 'win';
+  try {
+    const result = await checkUpdate({ current: APP_VERSION, platform });
+    if (result.error && (result.error !== lastUpdateError || Date.now() - lastUpdateErrorAt > 10 * 60_000)) {
+      lastUpdateError = result.error;
+      lastUpdateErrorAt = Date.now();
+      console.warn('[update] 查更新失败：' + result.error);
+    }
+    res.json(result);
+  } catch (err) {
+    // 查更新失败不该在页面上弹错误：离线、限流都会走到这里，静默跳过就行
+    console.warn('[update] 检查更新失败：' + (err instanceof Error ? err.message : String(err)));
+    res.json({ enabled: true, current: APP_VERSION, latest: null, self: null, error: 'CHECK_FAILED' });
+  }
+});
+
+app.get('/api/update/download', async (req, res) => {
+  const platform = req.query.platform === 'android' ? 'android' : 'win';
+  const version = String(req.query.version ?? '').trim();
+  if (!version) {
+    res.status(400).json({ error: 'VERSION_REQUIRED', detail: '缺少要下载的版本号' });
+    return;
+  }
+  // 客户端断开（关窗口、取消下载）就把上游也掐掉，别在后台白拉一百多兆
+  const ctl = new AbortController();
+  res.on('close', () => ctl.abort());
+  try {
+    const opened = await openAsset({ version, platform, signal: ctl.signal });
+    if (!opened) {
+      res.status(404).json({ error: 'NOT_FOUND', detail: '这个版本没有对应平台的安装包' });
+      return;
+    }
+    const { asset, upstream } = opened;
+    res.setHeader('content-type', 'application/octet-stream');
+    if (asset.size > 0) res.setHeader('content-length', String(asset.size));
+    res.setHeader('content-disposition', 'attachment; filename="' + asset.name.replace(/["\\\r\n]/g, '') + '"');
+    if (!upstream.body) {
+      res.status(502).json({ error: 'UPSTREAM_EMPTY', detail: '上游没有返回安装包内容' });
+      return;
+    }
+    const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+    stream.on('error', (err) => {
+      console.warn('[update] 安装包下载中断：' + (err instanceof Error ? err.message : String(err)));
+      res.destroy();
+    });
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn('[update] 下载安装包失败：' + message);
+    if (!res.headersSent) res.status(502).json({ error: 'DOWNLOAD_FAILED', detail: message });
+    else res.destroy();
+  }
+});
+
 /**
  * 健康检查。
  *
@@ -212,6 +285,8 @@ server.listen(config.port, config.host, () => {
   console.log('  密钥      ' + (k.configured ? '已配置 ' + k.hint : '未配置（只能看盘，不能下单）'));
   console.log('  下单      ' + (config.liveTrading ? '已开启' + (config.env === 'live' ? ' —— 用的是真钱，谨慎' : '（模拟盘假钱）') : '关闭（只读）'));
   console.log('  配置      ' + ENV_PATH);
+  // 没令牌就不查更新，也不弹窗。打包脚本会提醒一句，这里再说一次免得以为功能坏了
+  console.log('  更新      ' + (updateToken() ? '已配置令牌，版本 ' + (APP_VERSION || '未知') : '未配置令牌（安装包不会检查更新）'));
   if (lanEnabled()) {
     const urls = lanUrls(config.port);
     console.log('  手机      ' + (urls.length ? urls.join('  ') : '没找到局域网地址（没连 Wi-Fi？）'));
