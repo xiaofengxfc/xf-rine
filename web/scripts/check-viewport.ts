@@ -7,7 +7,7 @@
  *
  * 用法：pnpm check:viewport
  */
-import { viewportRange } from '../src/lib/viewport.ts';
+import { followRange, viewportRange } from '../src/lib/viewport.ts';
 import type { Bar } from '../src/lib/api.ts';
 
 const BASE = 1_700_000_000;
@@ -83,6 +83,54 @@ check(
   { from: 900, to: 1100 },
 );
 check('负的空位当 0', viewportRange(bars(1000), { fromTime: t(900), toTime: t(999), margin: -3 }), { from: 900, to: 999 });
+
+// ---- 8. 来新 K 线时怎么跟随 ----
+// 贴着最新那根（右边留 6 格）：来一根就往右推一根，宽度不变。
+// 全部 100 根、右边空 6 格 → 视口 [93, 106]；来一根变 101 根，应落到 [94, 107]。
+// 100 根、最后一根下标 99、右边空 6 格 → to = 105，宽度 13 → from = 92
+check(
+  '贴着右边：来一根推一格，留白不变',
+  followRange({ from: 92, to: 105, drawn: 100, next: 101, margin: 6 }),
+  { from: 93, to: 106 },
+);
+check(
+  '贴着右边：宽度跟着视口，不按根数猜',
+  followRange({ from: 92.5, to: 105, drawn: 100, next: 101, margin: 6 }),
+  { from: 93.5, to: 106 },
+);
+/**
+ * 人在未来空白区里（自己拖出去 40 格看后面的走势）：一格都不许动。
+ * 以前这里按写死的 6 格重新对齐，来一根就整块往左跳 34 格 —— 「K 线一刷新就自动往左移」。
+ */
+check(
+  '在未来空白区：来新 K 线不动视口',
+  followRange({ from: 19939.75, to: 20039, drawn: 20000, next: 20001, margin: 6 }),
+  null,
+);
+check(
+  '留白正好等于默认值：仍然跟随',
+  followRange({ from: 93, to: 999, drawn: 994, next: 995, margin: 6 }),
+  { from: 94, to: 1000 },
+);
+check(
+  '刚铺数据（还没画过）：不动',
+  followRange({ from: 0, to: 0, drawn: 0, next: 10, margin: 6 }),
+  null,
+);
+check(
+  '一根都不剩：不动',
+  followRange({ from: 0, to: 10, drawn: 5, next: 0, margin: 6 }),
+  null,
+);
+/**
+ * 右边界还在最后一根左边（正常跟随时不会走到这里，followRef 那时是 false）。
+ * 真走到的话按「贴边」处理：空位当 0，宽度照旧，落到最新一根加默认留白上。
+ */
+check(
+  '右边界在最后一根左边：当成贴边，按默认留白对齐',
+  followRange({ from: 80, to: 90, drawn: 100, next: 101, margin: 6 }),
+  { from: 96, to: 106 },
+);
 
 if (failed > 0) {
   console.error(`\n✗ ${failed} 项失败，${total - failed} 项通过`);

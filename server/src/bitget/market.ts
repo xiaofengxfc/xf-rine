@@ -85,6 +85,9 @@ export class BitgetMarketHub {
   /** 最后收到一帧的时刻。TUN / 代理节点掉线时，TCP 常常还举着，只有数据停了 */
   private lastMessageAt = 0;
   private staleTimer: NodeJS.Timeout | null = null;
+  /** 建连看门狗。放掉一条连接时也要把它清掉 */
+  private openTimer: NodeJS.Timeout | null = null;
+
   /**
    * 这个 hub 已经作废（换交易所时会关掉旧的）。
    *
@@ -177,6 +180,45 @@ export class BitgetMarketHub {
    * —— TUN 模式下系统代理还开着、或者节点不让连 WebSocket 时就是这样 ——
    * 换另一条再试。以前只在建连时挑一次，挑错就永远在同一个坑里重连。
    */
+  /**
+   * 放掉当前这条连接，然后重连 —— 不等对端回 close 帧。
+   *
+   * 关键是不拿 close() 当「已经关掉了」的信号。undici 的 WebSocket，close() 只是
+   * 写一个 CLOSE 帧、把状态标成 CLOSING；真正的 'close' 事件要等底层 TCP 关。
+   * 而假死恰恰是「TCP 还举着、对端一个字节都不回」—— 代理节点掉了、TUN 把路由
+   * 黑洞掉的时候就是这样，连这个 CLOSE 帧也没人回。
+   *
+   * 所以只写一句 close() 然后等事件的话：
+   *   · 'close' 可以几分钟都不来（TCP 重传超时之前它不会动）；
+   *   · this.ws 还是非空 —— connect() 一看就当场返回；
+   *   · 结果是看门狗把自己关进 CLOSING 里，行情再也回不来；
+   *   · 换路记账也不会发生（它在 close 处理器里）。
+   *
+   * 这里改成先把 this.ws 让出来再尽力关一次，然后自己排重连。让出来的那条连接
+   * 上还挂着监听，那些处理器第一件事就是比 this.ws !== sock，比不上的直接走开：
+   * 不广播、不排重连，也不会把这时已经建好的新连接清掉。
+   */
+  private abandon(reason: string): void {
+    const sock = this.ws;
+    if (!sock) return;
+    const uptime = this.openedAt > 0 ? Date.now() - this.openedAt : 0;
+    this.ws = null;
+    this.alive = false;
+    this.clearClocks();
+    try { sock.close(); } catch { /* 已经断了，关不掉也无妨 */ }
+    console.warn('[ws] bitget ' + reason + '，放掉这条连接重连（uptime=' + uptime + 'ms）');
+    // 页面靠这一条把「行情断了」显示出来。名字沿用 gate_down：前端只认它
+    this.broadcast({ type: 'gate_down' });
+    this.scheduleReconnect();
+  }
+
+  /** 三个定时器一起清：换连接、放掉连接、关 hub 都要清干净，少清一个就多一条连接 */
+  private clearClocks(): void {
+    if (this.openTimer) { clearTimeout(this.openTimer); this.openTimer = null; }
+    if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
+    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+  }
+
   connect(): void {
     if (this.disposed || this.ws) return;
     let order = wsRouteOrder();
@@ -201,24 +243,18 @@ export class BitgetMarketHub {
     this.ws = sock;
 
     // 建连看门狗：到点还没 open 就当作这条路不通，自己兜一次重连
-    const openTimer = setTimeout(() => {
-      if (this.disposed || this.alive) return;
-      console.warn(
-        '[ws] bitget 握手 ' + Math.round(OPEN_TIMEOUT_MS / 1000) + ' 秒没建起来 route=' + route + '，换路重连',
-      );
+    this.openTimer = setTimeout(() => {
+      if (this.disposed || this.alive || this.ws !== sock) return;
       // 握手都建不起来，这条路基本可以直接判死：算两次，当场换路，别再多等一轮
       this.noteTrouble(order, route, 2);
-      try { sock.close(); } catch { /* 还在 CONNECTING，关不掉也无妨 */ }
-      // CONNECTING 阶段 close() 不一定回调 close 事件，这里自己兜一次
-      if (this.ws === sock) {
-        this.ws = null;
-        this.scheduleReconnect();
-      }
+      this.abandon('握手 ' + Math.round(OPEN_TIMEOUT_MS / 1000) + ' 秒没建起来 route=' + route);
     }, OPEN_TIMEOUT_MS);
-    openTimer.unref();
+    this.openTimer.unref();
 
     sock.addEventListener('open', () => {
-      clearTimeout(openTimer);
+      // 这条已经被放掉了（握手超时之后又连上了）：别去动那时的新连接
+      if (this.disposed || this.ws !== sock) return;
+      if (this.openTimer) { clearTimeout(this.openTimer); this.openTimer = null; }
       this.alive = true;
       this.openedAt = Date.now();
       this.lastMessageAt = Date.now();
@@ -229,27 +265,33 @@ export class BitgetMarketHub {
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = setInterval(() => {
         // Bitget 的心跳是一个裸字符串，不是 JSON
-        if (this.ws && this.ws.readyState === OPEN) this.ws.send('ping');
+        if (this.ws === sock && sock.readyState === OPEN) sock.send('ping');
       }, PING_MS);
       this.heartbeat.unref();
       /**
-       * 假死看门狗：还「连着」但一帧都没有，就把这条连接掐掉重来。
+       * 假死看门狗：还「连着」但一帧都没有，就把这条连接放掉重来。
        * TUN 模式掉线时 TCP 常常还举着，不看数据的话页面会一直停在「已连接」的旧行情上。
        */
       if (this.staleTimer) clearInterval(this.staleTimer);
       this.staleTimer = setInterval(() => {
-        if (!this.ws || this.ws.readyState !== OPEN) return;
+        if (this.ws !== sock || sock.readyState !== OPEN) return;
         const now = Date.now();
         // 一个订阅都没有时，服务端本来就不推东西，别把它当成假死
         if (!isStale({ now, lastMessageAt: this.lastMessageAt, staleMs: STALE_MS, subscriptions: this.wanted.size })) return;
-        console.warn('[ws] bitget 已 ' + Math.round((now - this.lastMessageAt) / 1000) + ' 秒没有任何数据，重连');
-        try { this.ws.close(); } catch { /* 已经断了 */ }
+        /**
+         * 这里不能只写一句 close()：对端不回关闭帧的时候 'close' 事件永远不来，
+         * 这条连接就一直挂在 CLOSING 上，而 connect() 因为 this.ws 非空不会再连。
+         * 见上面 abandon() 那段。
+         */
+        this.abandon('已 ' + Math.round((now - this.lastMessageAt) / 1000) + ' 秒没有任何数据');
       }, Math.min(15_000, Math.max(1000, Math.round(STALE_MS / 6))));
       this.staleTimer.unref();
     });
 
     // 交易所偶尔会推形状不对的帧，不兜住会把进程带走
     sock.addEventListener('message', (ev) => {
+      // 放掉的那条连接可能还会冒出几帧：那不是当前行情，别拿来广播
+      if (this.ws !== sock) return;
       this.lastMessageAt = Date.now();
       try {
         const data = (ev as unknown as { data: unknown }).data;
@@ -261,11 +303,11 @@ export class BitgetMarketHub {
     });
 
     sock.addEventListener('close', (ev) => {
-      clearTimeout(openTimer);
+      // 这条已经被放掉了（abandon 已经排过重连），它迟到的 close 什么都不该做
+      if (this.ws !== sock) return;
       this.alive = false;
       this.ws = null;
-      if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
-      if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+      this.clearClocks();
       const uptime = Date.now() - this.openedAt;
       const close = ev as unknown as { code?: number; reason?: string };
       console.warn(
@@ -410,17 +452,17 @@ export class BitgetMarketHub {
     /**
      * 先立「作废」标记再关。
      *
-     * undici 的 WebSocket 没法像 ws 那样 removeAllListeners，关连接一定会走 close 处理器。
-     * 所以靠这个标记让那个处理器什么都不做 —— 否则关了又自己连回来。
+     * 关连接会走 close 处理器，它本来会顺手安排一次重连 —— 靠这个标记，加上
+     * 「this.ws 已经不是那条连接」那道判断，让那个处理器什么都不做，否则关了又自己连回来。
      */
     this.disposed = true;
     this.alive = false;
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
-    if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = null; }
-    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+    this.clearClocks();
     // 从 wss 上摘掉自己：换交易所会造一个新 hub，旧的不摘就会有两个都在往页面推
     this.wss.off('connection', this.onConn);
-    try { this.ws?.close(); } catch { /* 已经断了 */ }
+    const sock = this.ws;
     this.ws = null;
+    try { sock?.close(); } catch { /* 已经断了 */ }
   }
 }

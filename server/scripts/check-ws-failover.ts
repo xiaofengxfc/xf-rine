@@ -6,10 +6,13 @@
  *   kill-ws     代理只掐 ws.*（REST 正常），应当自动换到直连
  *   hang-ws     代理把 ws.* 的 CONNECT 挂住不回应（TUN 黑洞的样子），应当超时后换直连
  *   silent      上游接受连接但一帧不发（假死），应当被看门狗掐掉重连
+ *   frozen      上游握手成功后彻底冻结：TCP 还举着、close 帧也不回。
+ *               这条才是「代理节点掉线」的真样子 —— 光掐连接没用，得自己放掉
  *
  * 用法：pnpm -F server check:ws-failover
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -19,6 +22,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 const SERVER_PORT = 19081;
 const PROXY_PORT = 19082;
 const SILENT_PORT = 19083;
+const FROZEN_PORT = 19084;
 const OPEN_TIMEOUT_MS = 4000;
 /** 假死阈值调小，不然要干等 90 秒 */
 const STALE_MS = 4000;
@@ -87,6 +91,54 @@ function startSilentUpstream(): Promise<WebSocketServer> {
   const wss = new WebSocketServer({ port: SILENT_PORT, host: '127.0.0.1' });
   wss.on('connection', (sock) => { sock.on('message', () => {}); });
   return new Promise((resolve) => wss.on('listening', () => resolve(wss)));
+}
+
+/**
+ * 握手成功之后就彻底冻结的上游。
+ *
+ * 和 silent 的区别是 **TCP 层的状态**：silent 用的是真的 WebSocket 服务端，
+ * 客户端发 close 帧它会照规矩回一个，连接随即关掉 —— 看门狗「掐掉再重连」的
+ * 那条路是通的。真实世界里代理节点掉线、TUN 黑洞时不是这样：连接看起来还开着，
+ * 对端一个字节都不再回，连 close 帧也不回。
+ *
+ * 这里用 pause() 把接收缓冲区冻住：客户端写出去的 close 帧被内核收下并 ACK，
+ * 但永远没人读、没人回。客户端于是停在 CLOSING 上 —— 这正是要测的那个坑。
+ */
+function startFrozenUpstream(): Promise<{ close: () => Promise<void> }> {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((sock) => {
+    let buf = '';
+    sockets.add(sock);
+    sock.on('close', () => sockets.delete(sock));
+    sock.on('error', () => { /* 客户端放弃连接时会有 EPIPE */ });
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('latin1');
+      if (!buf.includes('\r\n\r\n')) return;
+      const key = /Sec-WebSocket-Key:\s*(\S+)/i.exec(buf)?.[1] ?? '';
+      const accept = createHash('sha1')
+        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .digest('base64');
+      sock.write(
+        'HTTP/1.1 101 Switching Protocols\r\n'
+        + 'Upgrade: websocket\r\n'
+        + 'Connection: Upgrade\r\n'
+        + 'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n',
+      );
+      // 握手完成之后什么都不做：不读、不回、不断开
+      sock.pause();
+    });
+  });
+  return new Promise((resolve) => server.listen(FROZEN_PORT, '127.0.0.1', () => resolve({
+    /**
+     * 冻住的连接不会自己走，close() 会一直等它们 —— 先逐个 destroy 再关服务，
+     * 否则测试跑完卡在这一句上（tsx 会报 unsettled top-level await）。
+     */
+    close: () => new Promise<void>((done) => {
+      for (const sock of sockets) { try { sock.destroy(); } catch { /* 已经关了 */ } }
+      sockets.clear();
+      server.close(() => done());
+    }),
+  })));
 }
 
 // ---------------- 被测试的服务端 ----------------
@@ -226,6 +278,34 @@ for (const mode of ['kill-ws', 'hang-ws'] as ProxyMode[]) {
     },
   );
   await new Promise<void>((r) => silent.close(() => r()));
+}
+
+/**
+ * 对端冻结：连接看着还在，但再也不回任何一个字节。
+ *
+ * 看门狗会发现「没有任何数据」，接着要自己把这条连接放掉再重连。
+ * undici 的 close() 只是写一个 CLOSE 帧、把状态标成 CLOSING；真正的 'close'
+ * 要等底层 TCP 关 —— 冻住的对端永远不回，事件就永远不来。所以这条断的是
+ * 「重连」那一步：只测出「发现了假死」还不够。
+ */
+{
+  console.log('\n[frozen] 对端不回 close 帧，也要能重连');
+  const frozen = await startFrozenUpstream();
+  await runServer(
+    { XF_WS_URL: 'ws://127.0.0.1:' + FROZEN_PORT, XF_WS_ROUTE: '' },
+    async (h) => {
+      const connected = await waitFor(() => h.logs().includes('[ws] bitget connected'), 15_000);
+      ok('[frozen] 上游接受连接', connected, h.logs());
+      const stale = await waitFor(() => h.errs().includes('没有任何数据'), 20_000);
+      ok('[frozen] 一帧不来时被看门狗发现', stale, h.errs());
+      const reconnected = await waitFor(
+        () => (h.logs().match(/bitget connected/g) ?? []).length >= 2,
+        20_000,
+      );
+      ok('[frozen] 对端不回 close 帧也重连回来了', reconnected, h.logs() + ' || ' + h.errs());
+    },
+  );
+  await frozen.close();
 }
 
 /**

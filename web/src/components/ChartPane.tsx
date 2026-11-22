@@ -28,7 +28,7 @@ import {
   sparseStats,
   type PaintedBar,
 } from '../lib/candles.ts';
-import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
+import { followRange, viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
@@ -1348,22 +1348,35 @@ export default function ChartPane({
         return;
       }
       /**
-       * 新 K 线到了、而且人正贴着最右边：把窗口一次性对齐到「最后一根 + 默认留白」。
+       * 新 K 线到了、而且人正贴着最右边：把窗口往前推一根，宽度和右侧留白都照旧。
        *
        * 库的自动位移关掉了（见建图那段），所以不主动对齐的话，新 K 线会先在右侧留白里
-       * 一根根往外长，六根之后就长到视口外面去了。这里只在「确实贴边」时动手：
+       * 一根根往外长，几根之后就长到视口外面去了。这里只在「确实贴边」时动手：
        * 往回翻历史的人，一根都不动。手势期间也不动（松手后由 settle 统一处理）。
+       *
+       * 还有一种更糟的情况：图是允许往未来空白区拖的，拖出去几十格看「接下来会怎么走」
+       * 是常态。那会儿右边界离最后一根有几十格，如果每来一根都按写死的 6 格重新对齐，
+       * 画面就是整块「啪」地往左跳几十格 —— 那正是「K 线一刷新就自动往左移」的来源。
+       *
+       * 所以分两种：
+       *   · 留白比默认值还大（人在未来空白区里看着）：右边界一动不动，新 K 线只是把
+       *     空白填掉，画面一个像素都不挪；
+       *   · 留白在默认值以内（人贴着最新那根）：按默认留白对齐，一根 K 线滑一格。
        */
       if (appended && followRef.current && !gestureRef.current) {
         const range = chart.timeScale().getVisibleLogicalRange();
         if (range) {
-          const width = Math.max(4, range.to - range.from);
-          try {
-            chart.timeScale().setVisibleLogicalRange({
-              from: cleanBars.length - 1 + DEFAULT_RIGHT_MARGIN - width,
-              to: cleanBars.length - 1 + DEFAULT_RIGHT_MARGIN,
-            });
-          } catch { /* 区间不合法就算了 */ }
+          // countRef 到函数末尾才更新，所以这里拿到的还是「这一帧之前画了多少根」
+          const next = followRange({
+            from: range.from,
+            to: range.to,
+            drawn: countRef.current,
+            next: cleanBars.length,
+            margin: DEFAULT_RIGHT_MARGIN,
+          });
+          if (next) {
+            try { chart.timeScale().setVisibleLogicalRange(next); } catch { /* 区间不合法就算了 */ }
+          }
         }
       }
       // 这两个也一起更新：不更新的话，下一次「左边是不是动过」会拿旧值比，判断全乱

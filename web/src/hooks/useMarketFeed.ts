@@ -41,6 +41,16 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
   const [tickers, setTickers] = useState<Ticker[]>([]);
   const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
   const [wsAlive, setWsAlive] = useState(false);
+  /**
+   * 服务端说上游行情断了（gate_down）。
+   *
+   * 页面自己那条连接是好的，所以那个绿点会一直亮着 —— 用户看到的就是「已连接、
+   * 但 K 线不动」。这个标记把这两件事分开：上游一断，顶栏立刻变成「行情断开」，
+   * 同时下面那条兜底改用 REST 把尾巴补上。
+   */
+  const [feedDown, setFeedDown] = useState(false);
+  const feedDownRef = useRef(false);
+  feedDownRef.current = feedDown;
   const [loading, setLoading] = useState(true);
   const [historyEnd, setHistoryEnd] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
@@ -252,6 +262,13 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
   useEffect(() => {
     const seconds = intervalSeconds(interval);
     const timer = window.setInterval(() => {
+      /**
+       * 上游断了的时候，每 15 秒就按 REST 的尾巴补一次。
+       *
+       * 原来只在「最后一根落后三个周期」时才补。行情连着的时候够用，断的时候就太慢了：
+       * 15 分钟图上要等 45 分钟，这期间页面还写着「已连接」—— 看上去就是 K 线彻底不动了。
+       */
+      if (feedDownRef.current) { void resyncTail(); return; }
       const bars = marketRef.current.bars;
       if (bars.length > 0 && Date.now() / 1000 - bars[bars.length - 1]!.time > seconds * 3) {
         void resyncTail();
@@ -280,11 +297,21 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
         if (disposed) return;
         let message: WsMessage;
         try { message = JSON.parse(event.data) as WsMessage; } catch { return; }
+        if (message.type === 'gate_down') {
+          setFeedDown(true);
+          // 上游断了：立刻用 REST 补一次，别等「落后三个周期」那条兜底慢慢触发
+          void resyncTail();
+          return;
+        }
         if (message.type === 'ticker') {
-          if (message.contract === contract) pendingTickerRef.current = message;
+          if (message.contract === contract) {
+            pendingTickerRef.current = message;
+            setFeedDown((down) => (down ? false : down));
+          }
           return;
         }
         if (message.type !== 'candle' || message.contract !== contract) return;
+        setFeedDown((down) => (down ? false : down));
 
         const incoming = message.bar;
         const key = `${contract}:${interval}`;
@@ -322,6 +349,14 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
           else if (bar.time > last.time) {
             if (bar.time - last.time > intervalSeconds(interval)) void resyncTail();
             bars.push(bar);
+            /**
+             * 推到上限就得把最老的挤掉。
+             *
+             * 这条路以前不裁：数组会一路涨到 MAX_BARS + 1、+2…… 下一次 resyncTail/补历史
+             * 走 mergeNewer 时又按上限裁回 20000，于是「左边那一根」每分钟变一次，
+             * 图表跟着整段重画一次。裁在这里，长度就一直是稳的。
+             */
+            if (bars.length > MAX_BARS) bars.splice(0, bars.length - MAX_BARS);
           } else {
             return current;
           }
@@ -376,5 +411,19 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
     return () => window.clearInterval(timer);
   }, [contract, interval, loadLevelsOnly]);
 
-  return { tickers, market, wsAlive, loading, historyEnd, backfilling, needOlder, resyncTail };
+  /**
+   * 顶栏那颗点：页面这条连接通着、并且服务端没说上游断了，才算「行情已连接」。
+   * 只看前者的话，上游掉线时页面会一直绿着，比直接断线更误导。
+   */
+  return {
+    tickers,
+    market,
+    wsAlive: wsAlive && !feedDown,
+    feedDown,
+    loading,
+    historyEnd,
+    backfilling,
+    needOlder,
+    resyncTail,
+  };
 }

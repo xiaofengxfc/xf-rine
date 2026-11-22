@@ -31,6 +31,38 @@ export interface LogicalRange {
   to: number;
 }
 
+export interface FollowInput {
+  /** 现在视口的逻辑区间 */
+  from: number;
+  to: number;
+  /** 这一帧之前图上画了多少根（不含刚来的） */
+  drawn: number;
+  /** 这一帧要画的根数 */
+  next: number;
+  /** 默认右留白。贴着最新一根时右边留几格空 */
+  margin: number;
+}
+
+/**
+ * 来了新 K 线、而且人正贴着右边时，视口该落到哪儿。返回 null 表示一格都别动。
+ *
+ * 为什么要单独一条规则：图是允许往未来空白区拖的，拖出去几十格看「接下来会怎么走」
+ * 是常态。那会儿如果每来一根都按默认留白重新对齐，画面就是整块「啪」地往左跳几十格。
+ *
+ *   · 留白比默认值大（人在未来空白区里看着）：不动。新 K 线只是把空白填掉。
+ *   · 留白在默认值以内（人贴着最新那根）：按默认留白对齐，一根 K 线滑一格。
+ */
+export function followRange(input: FollowInput): LogicalRange | null {
+  if (!(input.drawn > 0) || !(input.next > 0)) return null;
+  const lastDrawn = input.drawn - 1;
+  const marginNow = Math.max(0, input.to - lastDrawn);
+  // 人在未来空白区里：一格都不动，让新 K 线自己把空白填上
+  if (marginNow > Math.max(0, input.margin)) return null;
+  const width = Math.max(4, input.to - input.from);
+  const to = input.next - 1 + Math.max(0, input.margin);
+  return { from: to - width, to };
+}
+
 /** 少于一屏的两根说明那一段已经不在手上了，放回去只会把画面扔到别处 */
 const MIN_BARS = 2;
 
