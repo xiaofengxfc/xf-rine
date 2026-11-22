@@ -48,8 +48,8 @@ android {
         applicationId "com.xfrine.terminal"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 17
-        versionName "1.2.4"
+        versionCode 18
+        versionName "1.2.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // Python 数值库和 Node 运行时使用 arm64 原生库。
         ndk {
