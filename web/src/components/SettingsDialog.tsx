@@ -3,7 +3,54 @@ import { jget, jsend, type AppConfig, type IpInfo } from '../lib/api.ts';
 import { detectBrowserIp } from '../lib/ip.ts';
 import { isNative, apiBase, clearTarget } from '../lib/endpoint.ts';
 import { setTheme, useTheme } from '../lib/theme.ts';
-import { CANDLE_STYLES, setCandleStyle, useCandleStyle } from '../lib/chartStyle.ts';
+import { CANDLE_STYLES, setCandleStyle, useCandleStyle, type CandleStyle } from '../lib/chartStyle.ts';
+
+/**
+ * K 线样式的小缩略图。
+ *
+ * 光看「全空心」「上涨空心」这几个字，选之前分不出画出来是什么样 ——
+ * 每种样式在按钮上先画两根小蜡烛，点哪个一眼就定了。
+ */
+function CandleSwatch({ style }: { style: CandleStyle }) {
+  const up = 'var(--up)';
+  const down = 'var(--down)';
+  const hollowFill = 'var(--bg-2)';
+  const body = (side: 'up' | 'down', x: number, top: number, height: number) => {
+    const filled = side === 'up'
+      ? style === 'filled' || style === 'down-hollow'
+      : style === 'filled' || style === 'up-hollow';
+    const color = side === 'up' ? up : down;
+    return (
+      <g key={side + x}>
+        <line x1={x} y1={3} x2={x} y2={21} stroke={color} strokeWidth={1} />
+        <rect
+          x={x - 3.5} y={top} width={7} height={height}
+          fill={filled ? color : hollowFill}
+          stroke={color} strokeWidth={1}
+        />
+      </g>
+    );
+  };
+  return (
+    <svg className="cs-swatch" width={32} height={24} viewBox="0 0 32 24" aria-hidden="true">
+      {style === 'american' ? (
+        <g stroke="var(--up)" strokeWidth={1.4} fill="none">
+          <line x1={11} y1={3} x2={11} y2={21} />
+          <line x1={7} y1={8} x2={11} y2={8} />
+          <line x1={11} y1={16} x2={15} y2={16} />
+          <line x1={22} y1={5} x2={22} y2={22} stroke="var(--down)" />
+          <line x1={18} y1={12} x2={22} y2={12} stroke="var(--down)" />
+          <line x1={22} y1={19} x2={26} y2={19} stroke="var(--down)" />
+        </g>
+      ) : (
+        <>
+          {body('up', 10, 7, 9)}
+          {body('down', 22, 11, 8)}
+        </>
+      )}
+    </svg>
+  );
+}
 
 type FeedbackKind = 'bug' | 'idea' | 'other';
 
@@ -889,6 +936,7 @@ export default function SettingsDialog({ config, contract = '', interval = '', o
                       aria-pressed={candleStyle === style.id}
                       onClick={() => setCandleStyle(style.id)}
                     >
+                      <CandleSwatch style={style.id} />
                       {style.label}
                     </button>
                   ))}

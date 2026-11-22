@@ -381,10 +381,19 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .seg button:hover { color: var(--text-0); }
 .seg button.on { background: var(--bg-4); color: var(--text-0); }
 .candle-style-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-.candle-style-options button { min-height: 34px; padding: 6px 9px; color: var(--text-1); background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 12px; cursor: pointer; }
-.candle-style-options button:hover { color: var(--text-0); border-color: var(--line-2, var(--line)); }
+.candle-style-options button {
+  display: flex; align-items: center; gap: 9px;
+  min-height: 44px; padding: 6px 10px;
+  color: var(--text-1); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-size: 12px; cursor: pointer; text-align: left;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.candle-style-options button:hover { color: var(--text-0); border-color: var(--bg-4); }
 .candle-style-options button.on { color: var(--accent); border-color: var(--accent); background: var(--bg-3); }
 .candle-style-options button:last-child { grid-column: 1 / -1; }
+/* 每种样式的缩略图：两条小 K 线，选之前就能看出区别 */
+.candle-style-options .cs-swatch { flex: none; display: block; }
 
 .tool-divider { width: 1px; height: 18px; background: var(--line); flex: none; }
 
@@ -478,11 +487,28 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .pm-sep { height: 1px; background: var(--line); margin: 4px 2px; }
 .pm-foot { padding: 5px 8px 2px; font-size: 10px; color: var(--text-2); }
 
+/**
+ * 图上左上角那排 O/H/L/C。
+ *
+ * 它是悬停时才有的一行读数，压在 K 线上面 —— 不加底衬的话，蜡烛正好穿过去，
+ * 数字和影线混成一片。做成一片半透明的圆角底，既不挡图，也读得清。
+ */
 .chart-badge {
-  position: absolute; left: 10px; top: 8px;
-  display: flex; gap: 6px; pointer-events: none;
+  position: absolute; left: 10px; top: 8px; z-index: 4;
+  display: flex; align-items: center; gap: 9px;
+  padding: 2px 9px 2px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--overlay-1);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
   font-size: 10.5px; color: var(--text-2); font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  line-height: 1.7;
 }
+.chart-badge .up { color: var(--up); }
+.chart-badge .down { color: var(--down); }
 
 /* 图上的持仓摘要：已盈亏、止损止盈，以及打到那里各平出多少钱。
    纯展示，不接收鼠标 —— 挡在 K 线上方，但拖动、缩放、画线都照常。 */

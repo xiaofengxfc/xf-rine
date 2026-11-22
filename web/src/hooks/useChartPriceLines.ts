@@ -11,10 +11,10 @@ import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { pendingOrderLines } from '../lib/orderLines.ts';
 import { bracketOf } from '../lib/protective.ts';
 import type { CandleStyle } from '../lib/chartStyle.ts';
+import { chartColors, type ChartColors } from '../lib/theme.ts';
 
-const HOLDING = '#ffcf4d';
-const LIQ = '#ff7a45';
-const PENDING = '#b58bff';
+/** 体检脚本不传色板，按深色那套跑；界面上永远由图表把当前的色板递进来 */
+const FALLBACK_COLORS = chartColors('dark');
 
 type ChartLineSeries = ISeriesApi<'Candlestick'> | ISeriesApi<'Bar'> | ISeriesApi<'Line'>;
 
@@ -27,6 +27,8 @@ interface SeriesRefs {
 }
 
 export interface ChartPriceLineInput {
+  /** 图上的叠加线颜色。不传按深色那套 —— 只有体检脚本会走这条路 */
+  colors?: ChartColors;
   positions: Position[];
   orders: OpenOrder[];
   priceOrders: PriceOrder[];
@@ -40,6 +42,8 @@ export interface ChartPriceLineInput {
 
 interface Props extends Omit<ChartPriceLineInput, 'bars'> {
   refs: SeriesRefs;
+  /** 当前主题的图表色板。换主题要按新颜色重画一遍这些线 */
+  colors: ChartColors;
   candleStyle: CandleStyle;
   drawMode: 'candle' | 'line';
   storageKey: string;
@@ -85,6 +89,7 @@ function contentSignature({ positions, orders, priceOrders, zones, account, mark
 
 export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabels = false): ChartPriceLine[] {
   const { positions, orders, priceOrders, zones, bars, account, markPrice, stale, priceRound } = data;
+  const colors = data.colors ?? FALLBACK_COLORS;
   const lastPrice = bars[bars.length - 1]?.close ?? 0;
   const lines: ChartPriceLine[] = [];
 
@@ -93,7 +98,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
     lines.push({
       price: position.entryPrice,
       rank: 1,
-      color: HOLDING,
+      color: colors.entry,
       width: 2,
       style: LineStyle.Solid,
       title: positions.length > 1
@@ -109,7 +114,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
     lines.push({
       price: liquidationPrice,
       rank: 1.2,
-      color: LIQ,
+      color: colors.liq,
       width: 1,
       style: LineStyle.Dashed,
       title: (estimated ? '预估' : '')
@@ -127,7 +132,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
       lines.push({
         price: bracket.stop.triggerPrice,
         rank: 1.05,
-        color: 'rgba(255,95,109,0.85)',
+        color: colors.stop,
         width: 2,
         style: LineStyle.Dashed,
         title: (multiplePositions
@@ -140,7 +145,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
       lines.push({
         price: bracket.target.triggerPrice,
         rank: 1.06,
-        color: 'rgba(46,211,160,0.85)',
+        color: colors.target,
         width: 2,
         style: LineStyle.Dashed,
         title: (multiplePositions
@@ -155,29 +160,41 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
     lines.push({
       price: order.price,
       rank: 1.5,
-      color: PENDING,
-      width: 2,
+      color: colors.pending,
+      width: 1,
       style: LineStyle.Dashed,
       title: order.label,
     });
   }
 
+  /**
+   * 每侧只让离现价最近的那条当前档位写字。
+   *
+   * selectChartZones 已经按「离现价多远」排好序，所以每种类型第一次出现的那条就是最近的。
+   * 历史位永远不写（它们只是背景）。
+   */
+  const labeled = new Set<'support' | 'resistance'>();
   const nearbyZones = selectChartZones(zones, lastPrice);
   nearbyZones.forEach((zone, index) => {
+    const historical = zone.history === true;
+    const primary = !historical && !labeled.has(zone.zone_type);
+    if (primary) labeled.add(zone.zone_type);
     const appearance = chartZoneLineStyle({
       type: zone.zone_type,
-      history: zone.history === true,
+      history: historical,
       priceLabel: fmtPrice(zone.center, priceRound),
       pTouch: zone.p_touch,
       pHold: zone.p_hold,
       compactLabel: compactZoneLabels,
+      primary,
+      colors,
     });
     lines.push({
       price: zone.center,
       rank: 3 + index * 0.01,
       color: appearance.color,
       width: appearance.width,
-      style: LineStyle.Solid,
+      style: appearance.dashed ? LineStyle.Dashed : LineStyle.Solid,
       title: appearance.title,
       axisLabelVisible: appearance.axisLabelVisible,
     });
@@ -189,6 +206,7 @@ export function buildChartPriceLines(data: ChartPriceLineInput, compactZoneLabel
 export function useChartPriceLines(props: Props): void {
   const {
     refs,
+    colors,
     positions,
     orders,
     priceOrders,
@@ -203,6 +221,7 @@ export function useChartPriceLines(props: Props): void {
     narrow,
   } = props;
   const data: ChartPriceLineInput = {
+    colors,
     positions,
     orders,
     priceOrders,
@@ -248,5 +267,5 @@ export function useChartPriceLines(props: Props): void {
     // The signature avoids redrawing unchanged price lines on each REST refresh.
     // storageKey and narrow also rebuild axis labels for a new market or viewport width.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [levelSignature, priceRound, candleStyle, drawMode, storageKey, narrow]);
+  }, [levelSignature, priceRound, candleStyle, drawMode, storageKey, narrow, colors]);
 }

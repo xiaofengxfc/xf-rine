@@ -88,54 +88,101 @@ export function useTheme(): Theme {
 /**
  * 图表（lightweight-charts）用的那份色板。
  * canvas 里读不到 CSS 变量，只能在这里再写一遍 —— 改配色时两处要一起改。
+ *
+ * 分成三类，别混用：
+ *   - 画布的面：底色、网格、坐标轴、十字线。跟 --bg / --line / --text 走。
+ *   - K 线本身：涨、跌两色。跟 --up / --down 走（浅色下用深一档的那套，
+ *     白底上的 #2ed3a0 太浅，一排实体看着像褪色）。
+ *   - 图上叠加的东西：成交量、平价占位线、关键位、持仓/止损止盈/挂单。
+ *     这一类要**弱于 K 线**：它们只是标注，抢了实体的颜色，图就先乱了。
  */
 export interface ChartColors {
   background: string;
+  /** 坐标轴和十字线上的字 */
   text: string;
-  grid: string;
+  /** 横向网格：比竖线略实一点，读价格靠它 */
+  gridHorz: string;
+  /** 竖向网格：只用来定时间，压到几乎看不见 */
+  gridVert: string;
   crosshair: string;
   crosshairLabel: string;
   border: string;
+  /** 最后一价那条线（和它的轴标签） */
   priceLine: string;
   /** 折线模式那条收盘价线的颜色 */
   line: string;
+  /** 涨跌两色：K 线实体与影线共用，成交量是它们的淡化版 */
+  up: string;
+  down: string;
   /**
-   * 下面三项是**画在数据上**的颜色（每根 K 线各自带一份），不是 series 的选项。
+   * 下面两项是**画在数据上**的颜色（每根 K 线各自带一份），不是 series 的选项。
    * 深色下用淡一点就够；浅色下同一个淡色落在白底上几乎看不见，
-   * 成交量会整排消失、平价 K 线会变成一片白 —— 所以浅色这边要更实一些。
+   * 成交量会整排消失 —— 所以浅色这边要更实一些。
    */
   volumeUp: string;
   volumeDown: string;
   /** 平价 K 线（最高 = 最低，交易所给的无成交占位线）画的中性灰 */
   flat: string;
+  /** 关键位：支撑 / 阻力。比涨跌色淡，它们是横线不是行情 */
+  zoneSupport: string;
+  zoneResistance: string;
+  /** 持仓均价 */
+  entry: string;
+  /** 强平价 */
+  liq: string;
+  /** 止损 / 止盈 */
+  stop: string;
+  target: string;
+  /** 挂着没成交的限价单 */
+  pending: string;
 }
 
 const CHART: Record<Theme, ChartColors> = {
   dark: {
     background: '#0c0e12',
-    text: '#98a2b3',
-    grid: 'rgba(30,35,44,0.32)',
-    crosshair: 'rgba(152,162,179,0.4)',
-    crosshairLabel: '#1e232d',
-    border: '#1e232c',
+    text: '#8b95a7',
+    gridHorz: 'rgba(38,45,58,0.55)',
+    gridVert: 'rgba(30,35,44,0.4)',
+    crosshair: 'rgba(148,160,178,0.36)',
+    crosshairLabel: '#242a35',
+    border: '#1a1f28',
     priceLine: '#4c8dff',
-    line: '#9aa7b8',
-    volumeUp: 'rgba(46,211,160,0.28)',
-    volumeDown: 'rgba(255,95,109,0.28)',
-    flat: 'rgba(139,152,165,0.55)',
+    line: '#93a3b8',
+    up: '#2ed3a0',
+    down: '#ff5f6d',
+    volumeUp: 'rgba(46,211,160,0.3)',
+    volumeDown: 'rgba(255,95,109,0.26)',
+    flat: 'rgba(126,138,152,0.45)',
+    zoneSupport: 'rgba(46,211,160,0.72)',
+    zoneResistance: 'rgba(255,95,109,0.72)',
+    entry: '#ffcf4d',
+    liq: '#ff8a4c',
+    stop: 'rgba(255,95,109,0.82)',
+    target: 'rgba(46,211,160,0.82)',
+    pending: '#a885ff',
   },
   light: {
     background: '#ffffff',
-    text: '#4d5870',
-    grid: 'rgba(223,228,236,0.58)',
-    crosshair: 'rgba(77,88,112,0.45)',
-    crosshairLabel: '#dfe4ec',
-    border: '#dfe4ec',
+    text: '#5f6b7d',
+    gridHorz: 'rgba(205,213,226,0.72)',
+    gridVert: 'rgba(220,227,237,0.62)',
+    crosshair: 'rgba(71,82,102,0.4)',
+    crosshairLabel: '#dde3ec',
+    border: '#e2e8f1',
     priceLine: '#2563eb',
     line: '#6b7689',
-    volumeUp: 'rgba(14,143,98,0.45)',
-    volumeDown: 'rgba(217,45,75,0.42)',
-    flat: 'rgba(107,118,137,0.7)',
+    up: '#0e8f62',
+    down: '#d92d4b',
+    volumeUp: 'rgba(14,143,98,0.34)',
+    volumeDown: 'rgba(217,45,75,0.28)',
+    flat: 'rgba(122,133,150,0.5)',
+    zoneSupport: 'rgba(14,143,98,0.75)',
+    zoneResistance: 'rgba(217,45,75,0.72)',
+    entry: '#b45309',
+    liq: '#c2410c',
+    stop: 'rgba(217,45,75,0.85)',
+    target: 'rgba(14,143,98,0.85)',
+    pending: '#7c3aed',
   },
 };
 

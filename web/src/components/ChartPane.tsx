@@ -9,7 +9,9 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  TickMarkType,
   type IChartApi,
+  type Time,
   type IPriceLine,
   type ISeriesApi,
   type UTCTimestamp,
@@ -32,10 +34,53 @@ import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.
 import { useCandleStyle } from '../lib/chartStyle.ts';
 import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
 
-const UP = '#2ed3a0';
-const DOWN = '#ff5f6d';
-const CHART_FONT_SIZE = 12;
+/**
+ * 坐标轴上的字用等宽字体。
+ *
+ * 价格是一位一位往下对齐读的，比例字体里 1 和 8 宽度不一样，右对齐的那一列
+ * 每行都差一点，扫一眼反而读得慢。
+ */
+const CHART_FONT = '"JetBrains Mono", "Cascadia Mono", ui-monospace, "SF Mono", Consolas, monospace';
+const CHART_FONT_SIZE = 11;
 const MOBILE_CHART_FONT_SIZE = 10;
+/**
+ * 默认一屏放多少根 K 线 —— 按像素宽度算，不写死根数。
+ *
+ * 以前固定 160 根：桌面上 866px 的面板一根只剩 4.9px，实体只有 3px、影线 1px，
+ * 一整排看下来就是条形码。按「一根占多少像素」算，宽屏窄屏都落在实体画得出来的区间。
+ */
+const DEFAULT_BAR_PIXELS = 7.6;
+const DEFAULT_MIN_BARS = 60;
+const DEFAULT_MAX_BARS = 140;
+/** 量柱占面板底部多大一条：上面的价格区跟着让位，两张不会叠在一起 */
+const VOLUME_TOP = 0.84;
+
+/**
+ * 轴上和十字线上的时间一律按**本机时区**写。
+ *
+ * 图表库默认按 UTC 排时间轴，而这一页里其它地方（右键取价、画线标签、档位、订单）
+ * 用的都是本机时区。同一根 K 线于是有两个时间：轴上写 07:04，菜单里写 15:04 ——
+ * 看起来就是「K 线和时间对不上」。东八区差整整八小时，够把一根 K 线指到别的日子去。
+ */
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+function localTick(time: number, type: TickMarkType): string {
+  const d = new Date(time * 1000);
+  switch (type) {
+    case TickMarkType.Year: return String(d.getFullYear());
+    case TickMarkType.Month: return `${d.getMonth() + 1}月`;
+    case TickMarkType.DayOfMonth: return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+    case TickMarkType.Time: return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    case TickMarkType.TimeWithSeconds: return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    default: return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+  }
+}
+
+/** 十字线上的时间：带上日期，和右键菜单里那一行对得上 */
+function localCrosshair(time: number): string {
+  const d = new Date(time * 1000);
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
 
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
 const SPARSE_SHARE = 0.6;
@@ -376,13 +421,15 @@ export default function ChartPane({
       layout: {
         background: { type: ColorType.Solid, color: c.background },
         textColor: c.text,
-        fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", sans-serif',
+        fontFamily: CHART_FONT,
         fontSize: CHART_FONT_SIZE,
         attributionLogo: false,
       },
+      // 网格只当参考：横线略实（读价用），竖线压到几乎看不见（定时间用），
+      // 两条都不该比 K 线抢眼
       grid: {
-        vertLines: { color: c.grid },
-        horzLines: { color: c.grid },
+        vertLines: { color: c.gridVert, style: LineStyle.Solid },
+        horzLines: { color: c.gridHorz, style: LineStyle.Solid },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -401,7 +448,15 @@ export default function ChartPane({
       },
       rightPriceScale: {
         borderColor: c.border,
-        scaleMargins: { top: 0.08, bottom: 0.22 },
+        // 上面留一点给最新的影线，下面让出量柱那一条。
+        // 留太多的话，K 线下面会空出一大块没有任何东西的底板。
+        scaleMargins: { top: 0.08, bottom: 0.18 },
+        alignLabels: true,
+        // 标签再稀一点：一屏十几行数字反而不好读
+        tickMarkDensity: 3,
+        // 轴上只留读得全的标签：半截数字比没有更难看
+        entireTextOnly: true,
+        minimumWidth: 68,
       },
       timeScale: {
         borderColor: c.border,
@@ -409,6 +464,13 @@ export default function ChartPane({
         secondsVisible: false,
         rightOffset: DEFAULT_RIGHT_MARGIN,
         barSpacing: 8,
+        /**
+         * 一根最少 2px。再小的话实体和影线糊成一片深色竖条，
+         * 一整屏看着就是「K 线错乱」—— 宁可少看几根，也别给出这种画面。
+         */
+        minBarSpacing: 2,
+        // 刻度按本机时区写，和右键菜单、画线标签用同一套时间
+        tickMarkFormatter: (time: Time, type: TickMarkType) => localTick(Number(time), type),
         // 不夹左右边界：可以浏览数据外区域，也可以拖进最新 K 线右侧的未来空白。
         fixLeftEdge: false,
         fixRightEdge: false,
@@ -416,32 +478,40 @@ export default function ChartPane({
       localization: {
         locale: 'zh-CN',
         priceFormatter: (p: number) => (p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(3) : p.toFixed(6)),
+        timeFormatter: (t: Time) => localCrosshair(Number(t)),
       },
     });
 
+    /**
+     * K 线。默认实心、不描边。
+     *
+     * 描边是沿着路径画的，会往实体外面扩半个像素：实体只有 3~5px 宽时，外圈比里圈
+     * 宽一圈，画在正中间的 1px 影线看着就像偏到了某一边。实心就应该只有填充色。
+     * 空心的那几种样式反过来，必须靠描边成形 —— 见下面那个样式 effect。
+     */
     const price = chart.addSeries(CandlestickSeries, {
-      upColor: UP,
-      downColor: DOWN,
-      borderVisible: true,
-      borderUpColor: UP,
-      borderDownColor: DOWN,
-      wickUpColor: UP,
-      wickDownColor: DOWN,
+      upColor: c.up,
+      downColor: c.down,
+      borderVisible: false,
+      borderUpColor: c.up,
+      borderDownColor: c.down,
+      wickUpColor: c.up,
+      wickDownColor: c.down,
       priceLineVisible: true,
       priceLineColor: c.priceLine,
-      priceLineStyle: LineStyle.Dotted,
+      priceLineStyle: LineStyle.Dashed,
       lastValueVisible: true,
     });
 
     // 美国线与 K 线共享同一份 OHLC 数据；K 线序列保留为绘图管理器的锚点。
     const bar = chart.addSeries(BarSeries, {
-      upColor: UP,
-      downColor: DOWN,
+      upColor: c.up,
+      downColor: c.down,
       openVisible: true,
       thinBars: true,
       priceLineVisible: false,
       priceLineColor: c.priceLine,
-      priceLineStyle: LineStyle.Dotted,
+      priceLineStyle: LineStyle.Dashed,
       lastValueVisible: false,
       visible: false,
     });
@@ -467,8 +537,9 @@ export default function ChartPane({
       priceScaleId: 'vol',
       lastValueVisible: false,
       priceLineVisible: false,
+      base: 0,
     });
-    chart.priceScale('vol').applyOptions({ visible: false, scaleMargins: { top: 0.84, bottom: 0 } });
+    chart.priceScale('vol').applyOptions({ visible: false, scaleMargins: { top: VOLUME_TOP, bottom: 0 } });
 
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point) { setLegend(null); return; }
@@ -698,7 +769,7 @@ export default function ChartPane({
     const c = chartColors(theme);
     chartRef.current?.applyOptions({
       layout: { background: { type: ColorType.Solid, color: c.background }, textColor: c.text },
-      grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
+      grid: { vertLines: { color: c.gridVert }, horzLines: { color: c.gridHorz } },
       crosshair: {
         vertLine: { color: c.crosshair, labelBackgroundColor: c.crosshairLabel },
         horzLine: { color: c.crosshair, labelBackgroundColor: c.crosshairLabel },
@@ -732,37 +803,41 @@ export default function ChartPane({
     const price = priceRef.current;
     const bar = barRef.current;
     if (!price || !bar) return;
-    const transparent = 'rgba(0, 0, 0, 0)';
+    const c = chartColors(theme);
     const american = drawMode === 'candle' && candleStyle === 'american';
-    const upFilled = candleStyle === 'filled' || candleStyle === 'down-hollow';
-    const downFilled = candleStyle === 'filled' || candleStyle === 'up-hollow';
-    const upColor = american ? transparent : upFilled ? UP : transparent;
-    const downColor = american ? transparent : downFilled ? DOWN : transparent;
-    const upEdge = american ? transparent : UP;
-    const downEdge = american ? transparent : DOWN;
+    /**
+     * 空心：实体内部不填色，只留一圈涨跌色的描边。
+     *
+     * 填「透明」是不行的 —— 网格线会从蜡烛中间穿过去，一排空心蜡烛看着像被划了几刀。
+     * 填底色才对：内部就是画面本身，只有边框是有颜色的。
+     */
+    const upHollow = candleStyle === 'hollow' || candleStyle === 'up-hollow';
+    const downHollow = candleStyle === 'hollow' || candleStyle === 'down-hollow';
     price.applyOptions({
-      visible: drawMode === 'candle',
-      upColor,
-      downColor,
-      borderVisible: true,
-      borderUpColor: upEdge,
-      borderDownColor: downEdge,
-      wickUpColor: upEdge,
-      wickDownColor: downEdge,
+      visible: drawMode === 'candle' && !american,
+      upColor: upHollow ? c.background : c.up,
+      downColor: downHollow ? c.background : c.down,
+      // 实心的那边不描边：描边会往外扩半像素，实体细的时候影线看着就歪了。
+      // 有空心的一边必须开，否则空心等于没有。
+      borderVisible: upHollow || downHollow,
+      borderUpColor: c.up,
+      borderDownColor: c.down,
+      wickUpColor: c.up,
+      wickDownColor: c.down,
       priceLineVisible: drawMode === 'candle' && !american,
       lastValueVisible: drawMode === 'candle' && !american,
     });
     bar.applyOptions({
       visible: american,
-      upColor: UP,
-      downColor: DOWN,
+      upColor: c.up,
+      downColor: c.down,
       openVisible: true,
       thinBars: true,
       priceLineVisible: american,
       lastValueVisible: american,
     });
     lineRef.current?.applyOptions({ visible: drawMode === 'line' });
-  }, [candleStyle, drawMode, storageKey]);
+  }, [candleStyle, drawMode, storageKey, theme]);
 
   // ---- K 线数据 ----
   useEffect(() => {
@@ -794,11 +869,14 @@ export default function ChartPane({
       paintRef.current = { src: bars, bars: normalized, tick: priceRound, out };
       return out;
     };
+    /** 空心样式下实体内部就是底色，平价线也一样，不然一片灰会盖住网格 */
+    const hollowStyle = candleStyle === 'hollow' || candleStyle === 'up-hollow' || candleStyle === 'down-hollow';
     /** 平价线给中性灰：它没有涨跌，涂成绿或红都是在编行情 */
     const point = (b: PaintedBar) => (b.flat
       ? {
         time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close,
-        color: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
+        color: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)'
+          : hollowStyle ? colorsRef.current.background : colorsRef.current.flat,
         borderColor: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
         wickColor: candleStyle === 'american' ? 'rgba(0, 0, 0, 0)' : colorsRef.current.flat,
       }
@@ -887,8 +965,11 @@ export default function ChartPane({
       } catch { /* 记录坏了就用默认值 */ }
 
       if (!restored) {
-        // 500 根全展开会把价格压成一条线，日内用不上。默认只看最近 160 根。
-        const from = Math.max(0, clean.length - 160);
+        // 500 根全展开会把价格压成一条线，日内用不上；但写死根数，窄屏上又会挤成条形码。
+        // 按面板实际宽度算一屏放几根：一根占 7.6px 时实体画得出来，也还看得清一段行情。
+        const usable = Math.max(240, (hostRef.current?.clientWidth || 720) - 76);
+        const count = Math.min(DEFAULT_MAX_BARS, Math.max(DEFAULT_MIN_BARS, Math.round(usable / DEFAULT_BAR_PIXELS)));
+        const from = Math.max(0, clean.length - count);
         chart.timeScale().setVisibleLogicalRange({ from, to: clean.length - 1 + DEFAULT_RIGHT_MARGIN });
       }
     };
@@ -926,6 +1007,18 @@ export default function ChartPane({
       }
       // 保留右侧空白和视口边界偏移，补 K 线后仍停在同一处。
       const margin = logical && beforeLen > 0 ? Math.max(0, logical.to - (beforeLen - 1)) : 0;
+      /**
+       * 重画之前，视口是不是正贴着最新那一根。
+       *
+       * 这一项决定了重画之后按什么找回画面 —— 见下面那段。少判这一下，
+       * 每一次往前补历史都会把画面往过去推一整页：默认视图本来是「最近 110 根」，
+       * 补完三千根之后那个逻辑区间指向的是三千根之前，图上就是三个月前的行情，
+       * 而顶上报的还是现价 —— 看起来就是「K 线跑到别处去了」。
+       */
+      // 整段飘在未来空白区的不算：那是用户自己拖出去的，重锚会把他拽回来
+      const wasAtEdge = !!logical && beforeLen > 0 && !entirelyFuture && logical.to >= beforeLen - 1;
+      /** 现在一屏放几根。贴边重锚时要照这个宽度恢复，不然缩放会被改掉 */
+      const visibleBars = logical ? Math.max(4, logical.to - logical.from) : 0;
       const future = entirelyFuture
         ? { futureFrom: logical!.from - (beforeLen - 1), futureTo: logical!.to - (beforeLen - 1) }
         : {};
@@ -945,6 +1038,21 @@ export default function ChartPane({
       firstTimeRef.current = clean[0]?.time ?? null;
       countRef.current = clean.length;
 
+      /**
+       * 原来就停在最新那一屏：补进历史之后也停在最新那一屏。
+       *
+       * 这里不能靠时间找回 —— 补历史的时候库是按逻辑下标稳住窗口的（视口里的时间
+       * 于是整体提前），而我们记下的那段时间还是补之前那一段。于是每补一页，
+       * 画面就往过去挪一页，几千根补完已经退到几个月前了。
+       * 按「还看最新的、宽度不变」重算区间，才是用户真正期待的结果。
+       */
+      if (wasAtEdge && visibleBars > 0) {
+        const from = Math.max(0, clean.length - 1 + margin - visibleBars);
+        try {
+          ts.setVisibleLogicalRange({ from, to: clean.length - 1 + margin });
+        } catch { /* 区间不合法就算了 */ }
+        return;
+      }
       if (!span || typeof span.from !== 'number' || typeof span.to !== 'number') return;
       if ('futureFrom' in future || 'pastFrom' in past) {
         // getVisibleRange 会把未来区裁到最后一根 K 线的时间戳，这里直接按逻辑位置恢复。
@@ -1160,6 +1268,7 @@ export default function ChartPane({
 
   useChartPriceLines({
     refs: { price: priceRef, bar: barRef, line: lineRef, lines: levelLinesRef, bars: barsRef },
+    colors: chartColors(theme),
     positions,
     orders,
     priceOrders,
