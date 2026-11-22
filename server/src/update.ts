@@ -6,9 +6,10 @@ import { netFetch } from './net.js';
  * 这里只管「查到什么、该不该提示」。下载和安装由客户端自己做：
  * 桌面端交给外壳（Electron 主进程），安卓交给系统浏览器。
  *
- * 版本号和令牌在打包时由 esbuild 注入；开发态用环境变量顶上：
- * XF_APP_VERSION、XF_UPDATE_TOKEN。仓库本身是私有的，匿名请求 API 只会拿到 404，
- * 所以令牌是查更新和下载安装包的前提。打包脚本从 .update-token 或环境变量读它。
+ * 版本号在打包时由 esbuild 注入；开发态用 XF_APP_VERSION 顶上。
+ * 仓库是公开的，匿名请求 GitHub 的 API 就够 —— 客户端和安装包里都不带任何令牌。
+ * 私有 fork 想沿用这套逻辑时，可以给 XF_UPDATE_TOKEN（打包时注入或运行时环境变量），
+ * 有值就带上，没值就走匿名。
  */
 
 declare const __XF_VERSION__: string;
@@ -23,7 +24,11 @@ function builtString(name: 'version' | 'token'): string {
 /** 这份程序自己的版本号。没注入时退回环境变量，再没有就是空串 */
 export const APP_VERSION = (builtString('version') || (process.env.XF_APP_VERSION ?? '')).trim();
 
-/** 读 GitHub 的令牌。只读权限就够（Contents: Read） */
+/**
+ * 可选：私有 fork 用的只读令牌。
+ *
+ * 公开仓库不需要它；有值时请求会带上，方便把同一套地址指向一个私有仓库。
+ */
 export function updateToken(): string {
   return (builtString('token') || (process.env.XF_UPDATE_TOKEN ?? '')).trim();
 }
@@ -174,7 +179,6 @@ function githubError(status: number, body: string): string {
 }
 
 async function loadReleases(): Promise<Release[]> {
-  if (!updateToken()) throw new Error('UPDATE_TOKEN_MISSING');
   const res = await netFetch(
     apiBase() + '/repos/' + repo() + '/releases?per_page=10',
     { headers: authHeaders('application/vnd.github+json') },
@@ -226,7 +230,7 @@ export interface UpdateRelease {
 }
 
 export interface UpdateCheck {
-  /** 有没有配更新令牌。没配时客户端什么都不显示 */
+  /** 更新检查是否可用。公开仓库恒为 true，留着是给「关掉检查」这类情况用的 */
   enabled: boolean;
   /** 这份程序自己的版本 */
   current: string;
@@ -257,14 +261,9 @@ export async function checkUpdate(input: {
   current: string;
   platform: UpdatePlatform;
   releases?: Release[];
-  token?: string;
 }): Promise<UpdateCheck> {
   const current = input.current.trim();
-  const enabled = Boolean((input.token ?? updateToken()).trim()) || input.releases !== undefined;
-  const base: UpdateCheck = { enabled, current, latest: null, self: null };
-  if (!enabled) {
-    return { ...base, error: 'UPDATE_TOKEN_MISSING' };
-  }
+  const base: UpdateCheck = { enabled: true, current, latest: null, self: null };
 
   let releases: Release[];
   try {
@@ -285,9 +284,9 @@ export async function checkUpdate(input: {
 /**
  * 打开某个版本的安装包，返回上游响应和资源信息。
  *
- * 令牌只在服务端用：客户端要下载时打到 /api/update/download，
- * 由这里带着令牌取回来再转发。安装包一百多兆，所以不设短超时 ——
- * 由调用方在客户端断开时中止。
+ * 客户端要下载时打到 /api/update/download，由这里取回来再转发：
+ * 服务端知道该走直连还是代理，也不必让客户端跟着 GitHub 的 302 跑。
+ * 安装包一百多兆，所以不设短超时 —— 由调用方在客户端断开时中止。
  */
 export async function openAsset(input: {
   version: string;
@@ -295,7 +294,6 @@ export async function openAsset(input: {
   signal?: AbortSignal;
   releases?: Release[];
 }): Promise<{ asset: ReleaseAsset; upstream: Awaited<ReturnType<typeof netFetch>> } | null> {
-  if (!updateToken()) throw new Error('UPDATE_TOKEN_MISSING');
   const releases = input.releases ?? (await cachedReleases());
   const release = releases.find((item) => compareVersions(item.version, input.version) === 0) ?? null;
   if (!release) return null;

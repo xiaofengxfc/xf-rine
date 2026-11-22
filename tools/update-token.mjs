@@ -2,19 +2,19 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * 打包时注入安装包的 GitHub 只读令牌。
+ * 打包时可选注入的 GitHub 只读令牌。
  *
- * 仓库是私有的，匿名请求 releases 只会拿到 404，所以客户端必须带着令牌；
- * 令牌在打包时被写进服务端产物（esbuild 的 define），运行时不再读外部文件。
- * 它**跟着安装包一起分发**，拿到安装包的人就能解出来 —— 因此只能用细粒度令牌，
- * 权限只给这一个仓库的 Contents: Read，泄露了换一个重新打包即可。
+ * 仓库是公开的，平时不需要令牌：客户端匿名查 Release 就够。
+ * 这个口子是给私有 fork 留的 —— 想指向一个私有仓库时，打包前设 XF_UPDATE_TOKEN
+ * （细粒度、只读 Contents），令牌会被写进服务端产物，运行时不再读外部文件。
+ * 注意它会跟着安装包一起分发：拿到安装包的人能解出来，所以只能用只读令牌。
  *
- * 来源：环境变量 XF_UPDATE_TOKEN 优先，其次是仓库根目录的 .update-token（不进版本库）。
- * 两个都没有时返回空串，打出来的安装包不检查更新 —— 构建时会给一句警告。
+ * 来源只有环境变量。没有就返回空串，请求走匿名。
  */
 export function readUpdateToken(repoRoot) {
   const fromEnv = (process.env.XF_UPDATE_TOKEN ?? '').trim();
   if (fromEnv) return fromEnv;
+  // 兼容一下以前的本地文件写法，但不再提示：公开仓库用不上它
   const file = resolve(repoRoot, '.update-token');
   if (!existsSync(file)) return '';
   try {
@@ -22,11 +22,4 @@ export function readUpdateToken(repoRoot) {
   } catch {
     return '';
   }
-}
-
-/** 没配令牌时提醒一句：这不是错误，但打出来的包不会自动更新 */
-export function warnMissingToken(token) {
-  if (token) return;
-  console.warn('[warn] 没有更新令牌（.update-token 或 XF_UPDATE_TOKEN），打出来的安装包不会检查更新');
-  console.warn('       要开自动更新：建一个只读 Contents 的细粒度令牌，写进 .update-token 再打包');
 }

@@ -18,7 +18,7 @@ server/data/
 desktop/out/
 desktop/release/
 
-# 自动更新用的 GitHub 只读令牌。会被写进安装包，但别进版本库
+# 私有 fork 打包时可能用到的 GitHub 只读令牌，别进版本库
 .update-token
 
 # 手机端：Gradle 的构建目录和本机路径，每台机器不一样

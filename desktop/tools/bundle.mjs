@@ -11,7 +11,7 @@ import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
-import { readUpdateToken, warnMissingToken } from '../../tools/update-token.mjs';
+import { readUpdateToken } from '../../tools/update-token.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktop = resolve(here, '..');
@@ -20,14 +20,13 @@ const repo = resolve(desktop, '..');
 mkdirSync(resolve(desktop, 'out'), { recursive: true });
 
 /**
- * 版本号和更新令牌在构建时写进产物（服务端 update.ts 读它们）。
+ * 版本号在构建时写进产物（服务端 update.ts 读它）。
  *
- * 版本号取 desktop/package.json —— 安装包名字、关于页上的版本都跟它走。
- * 令牌见 tools/update-token.mjs：没配就警告一句，安装包照常能打，只是不检查更新。
+ * 取 desktop/package.json —— 安装包名字、关于页上的版本都跟它走。
+ * 更新令牌是可选的，只有私有 fork 才需要（见 tools/update-token.mjs）。
  */
 const version = JSON.parse(readFileSync(resolve(desktop, 'package.json'), 'utf8')).version;
 const updateToken = readUpdateToken(repo);
-warnMissingToken(updateToken);
 
 await build({
   entryPoints: [resolve(repo, 'server/src/index.ts')],
@@ -51,4 +50,4 @@ await build({
   },
 });
 
-console.log('服务端已打包：desktop/out/server.cjs  版本 ' + version + (updateToken ? '，更新已启用' : '，更新未启用'));
+console.log('服务端已打包：desktop/out/server.cjs  版本 ' + version + (updateToken ? '（带更新令牌）' : ''));

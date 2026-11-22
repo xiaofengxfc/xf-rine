@@ -12,7 +12,7 @@ import { router } from './routes.js';
 import { attachMarketHub, marketHubStatus, closeMarketHub } from './exchange/index.js';
 import { stopSidecar } from './sr/client.js';
 import { primeProxy, refreshProxy, proxyState, routeStats } from './net.js';
-import { APP_VERSION, checkUpdate, openAsset, updateToken } from './update.js';
+import { APP_VERSION, checkUpdate, openAsset } from './update.js';
 
 const app = express();
 /**
@@ -104,11 +104,11 @@ app.use('/api', router);
 /**
  * 自动更新：查版本、下载安装包。
  *
- * 查的是 GitHub 的 Release，仓库是私有的，令牌在打包时注入（见 update.ts）。
+ * 查的是 GitHub 的 Release，公开仓库匿名读取就够（私有 fork 可以带令牌，见 update.ts）。
  * 平台由客户端报上来：桌面端和安卓要的包不一样。
  *
- * 下载走服务端中转，不让客户端直接拿 GitHub 的地址：令牌只留在这边，
- * 而且服务端本来就会挑直连还是代理出网（net.ts），一百多兆的包也能跟着走对路。
+ * 下载走服务端中转，不让客户端直接拿 GitHub 的地址：服务端本来就会挑直连还是代理出网
+ * （net.ts），一百多兆的包也能跟着走对路；客户端那边也不必处理跨域和重定向。
  */
 
 /** 查更新失败的日志：同一个原因十分钟说一次，免得离线时每次启动都刷 */
@@ -285,8 +285,7 @@ server.listen(config.port, config.host, () => {
   console.log('  密钥      ' + (k.configured ? '已配置 ' + k.hint : '未配置（只能看盘，不能下单）'));
   console.log('  下单      ' + (config.liveTrading ? '已开启' + (config.env === 'live' ? ' —— 用的是真钱，谨慎' : '（模拟盘假钱）') : '关闭（只读）'));
   console.log('  配置      ' + ENV_PATH);
-  // 没令牌就不查更新，也不弹窗。打包脚本会提醒一句，这里再说一次免得以为功能坏了
-  console.log('  更新      ' + (updateToken() ? '已配置令牌，版本 ' + (APP_VERSION || '未知') : '未配置令牌（安装包不会检查更新）'));
+  console.log('  更新      版本 ' + (APP_VERSION || '未知') + '，启动时查一次 GitHub Release');
   if (lanEnabled()) {
     const urls = lanUrls(config.port);
     console.log('  手机      ' + (urls.length ? urls.join('  ') : '没找到局域网地址（没连 Wi-Fi？）'));

@@ -75,20 +75,19 @@ eq('比最新还新（开发版）：不提示降级', latestFor(list, '1.3.0', 
 eq('只有 apk 的版本，桌面端不提示', latestFor([release('1.2.4', { assets: [assets[0]!] })], '1.2.2', 'win') === null);
 
 // ---- 该提示什么 ----
-const withToken = await checkUpdate({ current: '1.2.2', platform: 'win', releases: list, token: 't' });
+const withToken = await checkUpdate({ current: '1.2.2', platform: 'win', releases: list });
 eq('有新版：带版本号', withToken.latest?.version === '1.2.4');
 eq('有新版：带更新说明', (withToken.latest?.notes ?? '').includes('1.2.4 的说明'));
 eq('有新版：带安装包信息和 sha256', withToken.latest?.asset.digest === 'sha256:bbbb');
 
-const upToDate = await checkUpdate({ current: '1.2.4', platform: 'win', releases: list, token: 't' });
+const upToDate = await checkUpdate({ current: '1.2.4', platform: 'win', releases: list });
 eq('已是最新：不提示', upToDate.latest === null);
 eq('已是最新：能查到这一版的说明（升级完要弹的就是它）', upToDate.self?.notes === '1.2.4 的说明');
 
-const noToken = await checkUpdate({ current: '1.2.3', platform: 'win', token: '' });
-eq('没配令牌：不查也不提示', noToken.enabled === false && noToken.latest === null);
-eq('没配令牌：说清原因', noToken.error === 'UPDATE_TOKEN_MISSING');
+const anonymous = await checkUpdate({ current: '1.2.2', platform: 'win', releases: list });
+eq('公开仓库：不带令牌也照常提示', anonymous.enabled === true && anonymous.latest?.version === '1.2.4');
 
-const android = await checkUpdate({ current: '1.2.2', platform: 'android', releases: list, token: 't' });
+const android = await checkUpdate({ current: '1.2.2', platform: 'android', releases: list });
 eq('安卓拿的是 apk', android.latest?.asset.name.endsWith('.apk') === true);
 
 let failures = 0;
