@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import type { PatternHit } from '../lib/patterns.ts';
 import { fmtTime } from '../lib/format.ts';
 
@@ -21,10 +22,80 @@ interface Props {
  * 一条都没有时整块不渲染，不留一条空带子占着图的高度。
  */
 export default function PatternsStrip({ hits, limit = 10 }: Props) {
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState(false);
+
+  // 放不下时会横向溢出，但滚动条是藏着的 —— 光靠默认行为鼠标根本滚不动
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const measure = () => setOverflow(el.scrollWidth > el.clientWidth + 2);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hits]);
+
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+
+    // 纵向滚轮转成横向：这是鼠标用户唯一顺手的滚法
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return;
+      const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      if (!delta) return;
+      el.scrollLeft += delta;
+      e.preventDefault();
+    };
+
+    // 按住拖动。卡片上没有点击行为，所以从哪儿按都能拖
+    let down = false;
+    let startX = 0;
+    let startLeft = 0;
+    let moved = false;
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || el.scrollWidth <= el.clientWidth) return;
+      down = true;
+      moved = false;
+      startX = e.clientX;
+      startLeft = el.scrollLeft;
+      el.setPointerCapture?.(e.pointerId);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!down) return;
+      const dx = e.clientX - startX;
+      if (!moved && Math.abs(dx) > 3) {
+        moved = true;
+        el.classList.add('dragging');
+      }
+      if (moved) {
+        el.scrollLeft = startLeft - dx;
+        e.preventDefault();
+      }
+    };
+    const onUp = () => {
+      if (!down) return;
+      down = false;
+      el.classList.remove('dragging');
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
+
   if (hits.length === 0) return null;
   const recent = hits.slice(-limit).reverse();
   return (
-    <div className="patterns-strip">
+    <div className={'patterns-strip' + (overflow ? ' scrollable' : '')} ref={stripRef}>
       <span className="ps-label">最近形态</span>
       {recent.map((h) => {
         const dir = h.direction === 'bull' ? '看涨' : '看跌';

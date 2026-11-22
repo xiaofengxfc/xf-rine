@@ -641,6 +641,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   scrollbar-width: none;
 }
 .patterns-strip::-webkit-scrollbar { display: none; }
+/* 放不下时两端渐隐，暗示还有内容；同时给鼠标用户一个可拖的手型 */
+.patterns-strip.scrollable {
+  cursor: grab;
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
+.patterns-strip.dragging { cursor: grabbing; user-select: none; }
 .ps-label {
   flex: none;
   font-size: 10px; color: var(--text-2); letter-spacing: 0.04em;
