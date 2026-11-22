@@ -9,7 +9,7 @@ import {
   type WsMessage,
 } from '../lib/api.ts';
 import { backfill } from '../lib/backfill.ts';
-import { intervalSeconds, mergeNewer, mergeOlder } from '../lib/candles.ts';
+import { intervalSeconds, mergeNewer, mergeOlder, upsertBar } from '../lib/candles.ts';
 import { wsUrl } from '../lib/endpoint.ts';
 
 export interface MarketSnap {
@@ -48,6 +48,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef(0);
   const marketSeqRef = useRef(0);
+  const pendingLiveRef = useRef<{ key: string; bars: Bar[] }>({ key: '', bars: [] });
   const marketCacheRef = useRef(new Map<string, {
     info: ContractInfo;
     bars: Bar[];
@@ -84,11 +85,16 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
   const loadMarket = useCallback(async (name: string, timeframe: string) => {
     const key = `${name}:${timeframe}`;
     const sequence = ++marketSeqRef.current;
+    pendingLiveRef.current = { key, bars: [] };
     noMoreOlderRef.current = false;
     setHistoryEnd(false);
 
     const cached = marketCacheRef.current.get(key) ?? null;
-    if (cached) setMarket({ key, ...cached });
+    if (cached) {
+      const next = { key, ...cached };
+      marketRef.current = next;
+      setMarket(next);
+    }
     setLoading(!cached);
 
     try {
@@ -100,16 +106,21 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
         jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${timeframe}&limit=${OLDER_PAGE}`),
         levelsPromise,
       ]);
+      if (sequence !== marketSeqRef.current) return;
       const { levels, error: levelsError } = levelsResult;
+      const live = pendingLiveRef.current.key === key ? pendingLiveRef.current.bars : [];
+      const bars = mergeNewer(candles.bars, live, MAX_BARS).bars;
+      if (pendingLiveRef.current.key === key) pendingLiveRef.current = { key: '', bars: [] };
       const cache = marketCacheRef.current;
       cache.delete(key);
-      cache.set(key, { info, bars: candles.bars, levels, levelsError });
+      cache.set(key, { info, bars, levels, levelsError });
       if (cache.size > 4) {
         const oldest = cache.keys().next().value;
         if (oldest) cache.delete(oldest);
       }
-      if (sequence !== marketSeqRef.current) return;
-      setMarket({ key, info, bars: candles.bars, levels, levelsError });
+      const next = { key, info, bars, levels, levelsError };
+      marketRef.current = next;
+      setMarket(next);
     } catch (error) {
       if (sequence === marketSeqRef.current) onToast('err', '行情加载失败', (error as Error).message);
     } finally {
@@ -266,6 +277,7 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       };
 
       socket.onmessage = (event) => {
+        if (disposed) return;
         let message: WsMessage;
         try { message = JSON.parse(event.data) as WsMessage; } catch { return; }
         if (message.type === 'ticker') {
@@ -276,18 +288,26 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
 
         const incoming = message.bar;
         const key = `${contract}:${interval}`;
+        const bar: Bar = {
+          time: incoming.time,
+          open: incoming.open,
+          high: incoming.high,
+          low: incoming.low,
+          close: incoming.close,
+          volume: incoming.volume,
+        };
+        const currentMarket = marketRef.current;
+        const currentLast = currentMarket.bars[currentMarket.bars.length - 1];
+        if (pendingLiveRef.current.key === key
+          && (currentMarket.key !== key || !currentLast || incoming.time >= currentLast.time)) {
+          upsertBar(pendingLiveRef.current.bars, bar, TAIL_PAGE);
+        }
+        if (currentMarket.key !== key || currentMarket.bars.length === 0) return;
+
         setMarket((current) => {
           if (current.key !== key || current.bars.length === 0) return current;
           const bars = current.bars.slice();
           const last = bars[bars.length - 1]!;
-          const bar: Bar = {
-            time: incoming.time,
-            open: incoming.open,
-            high: incoming.high,
-            low: incoming.low,
-            close: incoming.close,
-            volume: incoming.volume,
-          };
           if (last.time === incoming.time) bars[bars.length - 1] = bar;
           else if (incoming.time > last.time) {
             if (incoming.time - last.time > intervalSeconds(interval)) void resyncTail();

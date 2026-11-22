@@ -1,7 +1,6 @@
 import type { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
 import { WebSocket as UndiciWS } from 'undici';
-import { config } from '../config.js';
 import { wsDispatcher } from '../net.js';
 
 /**
@@ -18,11 +17,11 @@ import { wsDispatcher } from '../net.js';
  *     bitget 的 WS 直连会被重置，只有跟着 REST 那条代理走出去才连得上。
  *     对页面那侧仍然是 ws 的 WebSocketServer，协议不变。
  *
- * 模拟盘（PAPTRADING）的行情地址是 wspap.bitget.com，实盘是 ws.bitget.com。
+ * 公开行情始终使用主网地址。模拟账户的公开 REST K 线也是主网行情，wspap 上的
+ * candle 订阅虽会确认成功，但不会推送行情帧。
  */
 
 const WS_LIVE = 'wss://ws.bitget.com/v2/ws/public';
-const WS_DEMO = 'wss://wspap.bitget.com/v2/ws/public';
 const PRODUCT = 'USDT-FUTURES';
 /** 官方限制是 5 秒内最多 10 条 ping，这里宽松到 25 秒一次 */
 const PING_MS = 25_000;
@@ -137,11 +136,10 @@ export class BitgetMarketHub {
 
   connect(): void {
     if (this.ws) return;
-    const url = config.env === 'testnet' ? WS_DEMO : WS_LIVE;
     const dispatcher = wsDispatcher();
     const sock = dispatcher
-      ? new UndiciWS(url, { dispatcher } as unknown as string[])
-      : new UndiciWS(url);
+      ? new UndiciWS(WS_LIVE, { dispatcher } as unknown as string[])
+      : new UndiciWS(WS_LIVE);
     this.ws = sock;
 
     sock.addEventListener('open', () => {

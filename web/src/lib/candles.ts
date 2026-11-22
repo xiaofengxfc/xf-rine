@@ -39,6 +39,14 @@ export function firstIndexAtOrAfter(bars: Bar[], t: number): number {
   return lo;
 }
 
+/** Keep a small, time-ordered buffer of live bars received before the REST snapshot is ready. */
+export function upsertBar(bars: Bar[], incoming: Bar, maxBars: number): void {
+  const index = firstIndexAtOrAfter(bars, incoming.time);
+  if (index < bars.length && bars[index]!.time === incoming.time) bars[index] = incoming;
+  else bars.splice(index, 0, incoming);
+  if (bars.length > maxBars) bars.splice(0, bars.length - maxBars);
+}
+
 export interface OlderMerge {
   bars: Bar[];
   /** 真并进来的根数。调用方要显示进度或者判有没有进展就看它 */

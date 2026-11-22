@@ -6,7 +6,7 @@
  */
 import {
   INTERVAL_SEC, isFlatBar, isNoTradeBar, mergeNewer, mergeOlder, normalizeBars, paintBars,
-  paintBarsIncrementally, sparseStats,
+  paintBarsIncrementally, sparseStats, upsertBar,
   type Bar,
 } from '../src/lib/candles.ts';
 import { backfill } from '../src/lib/backfill.ts';
@@ -171,6 +171,17 @@ ok('mergeNewer：更早的历史一根都不丢', () => {
   const m = mergeNewer(base, [bar(240, 1.8, 2.05, 1, 2.02)], 100);
   eq(m.bars.length, 3, '根数');
   eq(m.bars[0]!.time, 60, '最老一根');
+});
+
+ok('实时缓冲：按时间更新、插入并保留最新容量', () => {
+  const pending = [bar(120, 2, 2, 2, 2)];
+  upsertBar(pending, bar(120, 2, 3, 1, 2.5), 3);
+  upsertBar(pending, bar(180, 3, 3, 3, 3), 3);
+  upsertBar(pending, bar(60, 1, 1, 1, 1), 3);
+  eq(pending.map((item) => item.time), [60, 120, 180], '有序且无重复');
+  eq(pending[1]!.close, 2.5, '同一根应用最新推送');
+  upsertBar(pending, bar(240, 4, 4, 4, 4), 3);
+  eq(pending.map((item) => item.time), [120, 180, 240], '超出容量时保留最新 K 线');
 });
 
 ok('mergeOlder：容量不足时补入最靠近现有数据的历史', () => {
