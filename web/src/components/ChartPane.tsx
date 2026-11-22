@@ -16,7 +16,13 @@ import {
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind, type DrawingLabel } from 'lightweight-charts-drawing';
 import type { Account, Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib/api.ts';
-import { firstIndexAtOrAfter, normalizeBars, paintBars, sparseStats, type PaintedBar } from '../lib/candles.ts';
+import {
+  firstIndexAtOrAfter,
+  normalizeBars,
+  paintBarsIncrementally,
+  sparseStats,
+  type PaintedBar,
+} from '../lib/candles.ts';
 import { viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
@@ -265,7 +271,12 @@ export default function ChartPane({
   const firstTimeRef = useRef<number | null>(null);
   const countRef = useRef(0);
   /** 画图用的那版 K 线（平价线已撑开）。同一份数据只算一次，别每秒拷两万根 */
-  const paintRef = useRef<{ src: Bar[] | null; tick: number; out: PaintedBar[] }>({ src: null, tick: -1, out: [] });
+  const paintRef = useRef<{
+    src: Bar[] | null;
+    bars: Bar[];
+    tick: number;
+    out: PaintedBar[];
+  }>({ src: null, bars: [], tick: -1, out: [] });
   /**
    * 当前这套色板。
    *
@@ -768,8 +779,13 @@ export default function ChartPane({
     const painted = (): PaintedBar[] => {
       const cache = paintRef.current;
       if (cache.src === bars && cache.tick === priceRound) return cache.out;
-      const out = paintBars(normalizeBars(bars), priceRound);
-      paintRef.current = { src: bars, tick: priceRound, out };
+      const normalized = normalizeBars(bars);
+      const out = paintBarsIncrementally(normalized, priceRound, {
+        bars: cache.bars,
+        tick: cache.tick,
+        painted: cache.out,
+      });
+      paintRef.current = { src: bars, bars: normalized, tick: priceRound, out };
       return out;
     };
     /** 平价线给中性灰：它没有涨跌，涂成绿或红都是在编行情 */

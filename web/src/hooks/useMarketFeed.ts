@@ -22,6 +22,8 @@ export interface MarketSnap {
 
 const EMPTY_MARKET: MarketSnap = { key: '', info: null, bars: [], levels: null };
 const OLDER_PAGE = 1000;
+/** Publish several fetched pages together to avoid redrawing the full chart per page. */
+const BACKFILL_PUBLISH_PAGES = 5;
 const TAIL_PAGE = 300;
 const MAX_BARS = 20000;
 const DEFAULT_CONTRACT = 'BTC_USDT';
@@ -137,6 +139,14 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
     const [name, timeframe] = key.split(':') as [string, string];
     const stale = () => pumpGenRef.current !== generation || marketRef.current.key !== key;
     let failures = 0;
+    let pagesSincePublish = 0;
+    const publishOlder = (older: Bar[]) => {
+      setMarket((current) => {
+        if (current.key !== key) return current;
+        const merged = mergeOlder(current.bars, older, MAX_BARS);
+        return merged.bars === current.bars ? current : { ...current, bars: merged.bars };
+      });
+    };
     setBackfilling(true);
 
     try {
@@ -153,14 +163,14 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
         },
         onPage: (next) => {
           if (stale()) return;
-          setMarket((current) => {
-            if (current.key !== key) return current;
-            const merged = mergeOlder(current.bars, next, MAX_BARS);
-            return merged.bars === current.bars ? current : { ...current, bars: merged.bars };
-          });
+          pagesSincePublish += 1;
+          if (pagesSincePublish < BACKFILL_PUBLISH_PAGES) return;
+          pagesSincePublish = 0;
+          publishOlder(next);
         },
       });
       if (stale()) return;
+      publishOlder(result.bars);
 
       if (result.stopped === 'exhausted' || result.stopped === 'full' || result.pages > 0) {
         nopageRetryRef.current = 0;

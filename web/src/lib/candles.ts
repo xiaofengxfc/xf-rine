@@ -48,25 +48,37 @@ export interface OlderMerge {
    * 这不是到头，调用方当成「没有进展」处理就行。把它当成到头，历史就停在原地了。
    */
   duplicate: boolean;
-  /** 再并就超过本地上限。到上限就不再补，已经画上去的一根都不动 */
+  /** 本页剩余历史超过容量，已补入能容纳的部分 */
   full: boolean;
 }
 
 /**
  * 把一页更早的 K 线并到前面。
  *
- * 超上限时宁可不并 —— 先加再 slice(-max) 会把最老的那几百根挤掉，
- * 用户正看着左边，那一片会当场变空，看起来就是 K 线缺了一段。
+ * 剩余容量不足时只补入离现有数据最近的部分，已显示的 K 线一根不裁，
+ * 免得用户正看着左边，那一片会当场变空，看起来就是 K 线缺了一段。
  */
 export function mergeOlder(prev: Bar[], older: Bar[], maxBars: number): OlderMerge {
   if (older.length === 0) return { bars: prev, added: 0, duplicate: true, full: false };
   const seen = new Set(prev.map((b) => b.time));
-  const add = older.filter((b) => !seen.has(b.time));
+  const add: Bar[] = [];
+  for (const bar of normalizeBars(older)) {
+    if (seen.has(bar.time)) continue;
+    seen.add(bar.time);
+    add.push(bar);
+  }
   if (add.length === 0) return { bars: prev, added: 0, duplicate: true, full: false };
-  if (prev.length + add.length > maxBars) return { bars: prev, added: 0, duplicate: false, full: true };
-  const merged = [...add, ...prev];
+  const room = maxBars - prev.length;
+  if (room <= 0) return { bars: prev, added: 0, duplicate: false, full: true };
+  const accepted = add.length > room ? add.slice(add.length - room) : add;
+  const merged = [...accepted, ...prev];
   merged.sort((a, b) => a.time - b.time);
-  return { bars: normalizeBars(merged), added: add.length, duplicate: false, full: false };
+  return {
+    bars: normalizeBars(merged),
+    added: accepted.length,
+    duplicate: false,
+    full: accepted.length < add.length,
+  };
 }
 
 /** 每个周期一根 K 线多少秒。判断「最新一根落后了几根」要用它 */
@@ -114,6 +126,12 @@ export interface PaintedBar extends Bar {
   flat: boolean;
 }
 
+export interface PaintedBarsCache {
+  bars: Bar[];
+  tick: number;
+  painted: PaintedBar[];
+}
+
 /**
  * 画图前把平价 K 线撑开。
  *
@@ -131,6 +149,57 @@ export function paintBars(bars: Bar[], tick: number): PaintedBar[] {
     out[i] = { ...b, high: b.close + half, low: b.close - half, flat: true };
   }
   return out;
+}
+
+/** Reuse converted bars outside the changed range in already normalized data. */
+export function paintBarsIncrementally(
+  bars: Bar[],
+  tick: number,
+  previous: PaintedBarsCache,
+): PaintedBar[] {
+  if (previous.tick !== tick || previous.painted.length !== previous.bars.length) {
+    return paintBars(bars, tick);
+  }
+  if (previous.bars === bars) return previous.painted;
+
+  const sharedLimit = Math.min(previous.bars.length, bars.length);
+  let prefix = 0;
+  while (prefix < sharedLimit && previous.bars[prefix] === bars[prefix]) prefix += 1;
+
+  let suffix = 0;
+  while (
+    suffix < sharedLimit - prefix
+    && previous.bars[previous.bars.length - suffix - 1] === bars[bars.length - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+
+  if (prefix === 0 && suffix === 0) {
+    const offset = bars.length > 0 ? previous.bars.indexOf(bars[0]!) : -1;
+    let overlap = 0;
+    while (
+      offset >= 0
+      && offset + overlap < previous.bars.length
+      && overlap < bars.length
+      && previous.bars[offset + overlap] === bars[overlap]
+    ) {
+      overlap += 1;
+    }
+    if (overlap === 0) return paintBars(bars, tick);
+
+    return [
+      ...previous.painted.slice(offset, offset + overlap),
+      ...paintBars(bars.slice(overlap), tick),
+    ];
+  }
+
+  const changedEnd = bars.length - suffix;
+  const changed = paintBars(bars.slice(prefix, changedEnd), tick);
+  return [
+    ...previous.painted.slice(0, prefix),
+    ...changed,
+    ...previous.painted.slice(previous.painted.length - suffix),
+  ];
 }
 
 export interface TailMerge {

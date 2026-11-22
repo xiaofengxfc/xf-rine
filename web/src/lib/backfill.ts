@@ -103,8 +103,8 @@ export async function backfill(opts: BackfillOptions): Promise<BackfillResult> {
       bars = merged.bars;
       opts.onPage?.(bars, merged.added);
     }
+    if (merged.full || bars.length >= opts.maxBars) return out('full');
     if (page.exhausted) return out('exhausted', true);
-    if (merged.full) return out('full');
     if (merged.duplicate) {
       stalls += 1;
       if (stalls > maxStall) return out('nopage');

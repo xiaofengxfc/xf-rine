@@ -5,9 +5,11 @@
  * 这几条都是纯函数，拿构造的数据就能验，不需要网络也不需要起服务。
  */
 import {
-  INTERVAL_SEC, isFlatBar, isNoTradeBar, mergeNewer, normalizeBars, paintBars, sparseStats,
+  INTERVAL_SEC, isFlatBar, isNoTradeBar, mergeNewer, mergeOlder, normalizeBars, paintBars,
+  paintBarsIncrementally, sparseStats,
   type Bar,
 } from '../src/lib/candles.ts';
+import { backfill } from '../src/lib/backfill.ts';
 
 const bar = (time: number, o: number, h: number, l: number, c: number, v = 1): Bar => (
   { time, open: o, high: h, low: l, close: c, volume: v }
@@ -87,6 +89,57 @@ ok('paintBars：不改调用方传进来的数组', () => {
   eq(JSON.stringify(sample), before, '原始数据');
 });
 
+ok('增量撑开：实时更新时复用未变化的历史 K 线', () => {
+  const previous = paintBars(sample, 0.01);
+  const next = sample.slice();
+  next[next.length - 1] = bar(240, 10.5, 12.5, 10, 11.5, 32);
+  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
+  if (incremental[0] !== previous[0] || incremental[1] !== previous[1]) {
+    throw new Error('未变化的 K 线应复用转换结果');
+  }
+});
+
+ok('增量撑开：最小变动价变化时重新计算全部 K 线', () => {
+  const previous = paintBars(sample, 0.01);
+  const incremental = paintBarsIncrementally(sample, 0.1, { bars: sample, tick: 0.01, painted: previous });
+  eq(incremental, paintBars(sample, 0.1), '与整段重算结果一致');
+  if (incremental[1] === previous[1] || incremental[1]!.high === previous[1]!.high) {
+    throw new Error('最小变动价变化后平价 K 线应重新撑开');
+  }
+});
+
+ok('增量撑开：追加新 K 线时复用全部已有 K 线', () => {
+  const previous = paintBars(sample, 0.01);
+  const next = [...sample, bar(300, 11, 12, 10.5, 11.5, 26)];
+  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
+  if (incremental.slice(0, sample.length).some((item, index) => item !== previous[index])) {
+    throw new Error('追加 K 线后已有转换结果应复用');
+  }
+});
+
+ok('增量撑开：滑动数据窗口时复用未变化的重叠 K 线', () => {
+  const previous = paintBars(sample, 0.01);
+  const next = [sample[1]!, sample[2]!, sample[3]!, bar(300, 11, 12, 10.5, 11.5, 26)];
+  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
+  if (incremental[0] !== previous[1] || incremental[2] !== previous[3]) {
+    throw new Error('滑动窗口中未变化的 K 线应复用转换结果');
+  }
+});
+
+ok('增量撑开：补入更早历史时复用已有 K 线', () => {
+  const previous = paintBars(sample, 0.01);
+  const older = bar(30, 8, 9, 7, 8.5);
+  const next = [older, ...sample];
+  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
+  if (incremental[1] !== previous[0] || incremental[2] !== previous[1]) {
+    throw new Error('补历史后已有 K 线应复用转换结果');
+  }
+});
+
 // ---- mergeNewer ----
 const base: Bar[] = [bar(60, 1, 2, 1, 1.5), bar(120, 1.5, 2, 1, 1.8), bar(240, 1.8, 2, 1, 2)];
 ok('mergeNewer：中间缺的那几根补进来', () => {
@@ -119,6 +172,33 @@ ok('mergeNewer：更早的历史一根都不丢', () => {
   eq(m.bars.length, 3, '根数');
   eq(m.bars[0]!.time, 60, '最老一根');
 });
+
+ok('mergeOlder：容量不足时补入最靠近现有数据的历史', () => {
+  const current = [bar(180, 3, 3, 3, 3), bar(240, 4, 4, 4, 4), bar(300, 5, 5, 5, 5)];
+  const page = [
+    bar(0, 1, 1, 1, 1), bar(60, 2, 2, 2, 2), bar(120, 3, 3, 3, 3),
+    ...current,
+  ];
+  const merged = mergeOlder(current, page, 5);
+  eq(merged.bars.map((item) => item.time), [60, 120, 180, 240, 300], '保留已有数据并填满剩余容量');
+  eq([merged.added, merged.full], [2, true], '新增数量和上限标记');
+});
+
+try {
+  const result = await backfill({
+    bars: [bar(180, 3, 3, 3, 3), bar(240, 4, 4, 4, 4), bar(300, 5, 5, 5, 5)],
+    maxBars: 5,
+    fetchPage: async () => ({
+      bars: [bar(0, 1, 1, 1, 1), bar(60, 2, 2, 2, 2), bar(120, 3, 3, 3, 3)],
+      exhausted: true,
+    }),
+  });
+  eq(result.bars.map((item) => item.time), [60, 120, 180, 240, 300], '补入最近的两根历史');
+  eq(result.stopped, 'full', '到本地上限时标记为 full');
+  passed += 1;
+} catch (err) {
+  failures.push(`backfill：容量边缘优先保留已显示数据: ${(err as Error).message}`);
+}
 
 // ---- 统计 ----
 ok('sparseStats：平价 / 无成交 / 占比', () => {
