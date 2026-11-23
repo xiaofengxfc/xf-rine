@@ -1329,6 +1329,16 @@ body:has(.modal-bg) { overflow: hidden; }
 .update-foot { margin-top: 8px; text-align: center; }
 .update-hint { margin-top: 10px; }
 
+/* 下好的那个包：文件名要一眼看清，落盘位置只用来对账，别抢视线 */
+.update-file {
+  margin-top: 12px; padding: 8px 10px;
+  border: 1px solid var(--line-soft); border-radius: 8px;
+  background: var(--bg-2);
+  font-size: 11.5px; line-height: 1.6; color: var(--text-0);
+  word-break: break-all;
+}
+.update-file .muted { color: var(--text-2); font-family: var(--mono); font-size: 10.5px; }
+
 
 .hint { font-size: 10.5px; color: var(--text-2); line-height: 1.6; margin: 0; }
 .hint code { font-family: var(--mono); color: var(--text-1); }

@@ -42,4 +42,11 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        装更新要用。没有这一条，Android 8 起连「安装未知应用」那个开关页都进不去 ——
+        ACTION_MANAGE_UNKNOWN_APP_SOURCES 会因为包没声明这项权限直接打不开，
+        用户看到的是一句「无法打开设置」，而下载好的包始终装不上。
+        声明了不代表自动就有：系统默认是关的，第一次装更新时还要用户自己打开。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 </manifest>

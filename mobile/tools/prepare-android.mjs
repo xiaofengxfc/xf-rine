@@ -44,6 +44,28 @@ cpSync(pluginDir, pluginTarget, {
   filter: (source) => !/[\\/](node_modules|dist|scripts|Package\.swift)[\\/]?$/.test(source.replace(pluginDir, '')),
 });
 
+/**
+ * 版本号对不上，装出来的包就是坏的。
+ *
+ * 两处各写一份，从来就容易只改一处：
+ *   - mobile/package.json  → 打进 server.js 的 __XF_VERSION__，服务端拿它判断「有没有新版」；
+ *   - app/build.gradle     → 安装器认的 versionName，系统靠它决定能不能覆盖安装。
+ *
+ * 只改 json：App 自己觉得是 1.2.6（于是不再提示更新），可系统看到的还是 1.2.5，
+ * 下一个包装上去又被判成同一版 —— 用户会看到「有新版但点不动」。
+ * 只改 gradle：反过来，装完之后服务端还报旧版本，下次启动继续提示更新。
+ * 所以这里直接拦下，别等装到手机上才发现。
+ */
+const appVersion = JSON.parse(readFileSync(resolve(mobile, 'package.json'), 'utf8')).version;
+const gradleText = readFileSync(resolve(androidDir, 'app/build.gradle'), 'utf8');
+const gradleVersion = (/versionName\s+"([^"]+)"/.exec(gradleText) ?? [])[1] ?? '';
+if (gradleVersion !== appVersion) {
+  console.error('版本号不一致：mobile/package.json 是 ' + appVersion
+    + '，android/app/build.gradle 的 versionName 是 ' + (gradleVersion || '（没找到）')
+    + '。两处要一起改，否则装上去的包会一直提示更新，或者从来不提示。');
+  process.exit(1);
+}
+
 const original = readFileSync(settings, 'utf8');
 const patched = original.replace(
   /project\(':capawesome-capacitor-nodejs'\)\.projectDir = new File\('[^']+'\)/,

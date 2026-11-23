@@ -101,6 +101,79 @@ const noNotes = decideUpdate({
 });
 eq('这一版没写说明：仍然告诉用户已经升上来了', noNotes.mode === 'updated');
 
+// ---- 手机：下好了没装 ----
+const apk = (version: string, over: Partial<Record<string, unknown>> = {}) => ({
+  version,
+  name: 'XunFeng-' + version + '-arm64.apk',
+  size: 88 * 1024 * 1024,
+  digest: 'sha256:bb',
+  path: '/data/user/0/com.xfrine.terminal/files/update/XunFeng-' + version + '-arm64.apk',
+  notes: version + ' 的说明',
+  at: 1,
+  ...over,
+});
+
+const readyToInstall = decideUpdate({
+  installed: '1.2.5',
+  seen: '1.2.5',
+  downloaded: apk('1.2.6'),
+  result: makeResult({ current: '1.2.6', latest: release('1.2.6') }),
+});
+eq('下好了比现在新的包：弹「已下载」，不是「发现新版本」', readyToInstall.mode === 'install');
+eq('下好了：把那个包交给弹窗显示文件名和位置',
+  readyToInstall.downloaded?.name === 'XunFeng-1.2.6-arm64.apk'
+  && readyToInstall.downloaded?.path.endsWith('XunFeng-1.2.6-arm64.apk'));
+eq('下好了：更新说明用 Release 原文', readyToInstall.info?.latest?.notes === '1.2.6 的说明');
+
+const offlineWithPackage = decideUpdate({
+  installed: '1.2.5',
+  seen: '1.2.5',
+  downloaded: apk('1.2.6'),
+  result: null,
+});
+eq('离线但包在本地：仍然给「安装」', offlineWithPackage.mode === 'install');
+eq('离线：退回包里带着的那份说明', offlineWithPackage.info?.latest?.notes === '1.2.6 的说明');
+
+const stalePackage = decideUpdate({
+  installed: '1.2.6',
+  seen: '1.2.5',
+  downloaded: apk('1.2.6'),
+  result: makeResult({ current: '1.2.6', selfNotes: '这一版改了什么' }),
+});
+eq('包和装着的同版本（已经装过了）：不再提「安装」', stalePackage.mode === 'updated');
+eq('同版本：那个残留的包不交给弹窗', stalePackage.downloaded === null);
+
+const olderPackage = decideUpdate({
+  installed: '1.2.7',
+  seen: '1.2.7',
+  downloaded: apk('1.2.6'),
+  result: makeResult({ current: '1.2.7' }),
+});
+eq('包里的是旧版本：不当成待安装', olderPackage.mode === 'none');
+
+const brokenPackage = decideUpdate({
+  installed: '1.2.5',
+  seen: '1.2.5',
+  downloaded: apk('1.2.6', { size: 0 }),
+  result: makeResult({ current: '1.2.5', latest: release('1.2.6') }),
+});
+eq('包大小不对（下了一半）：退回普通的「有新版」', brokenPackage.mode === 'available');
+
+const notApk = decideUpdate({
+  installed: '1.2.5',
+  seen: '1.2.5',
+  downloaded: apk('1.2.6', { name: 'XunFeng-1.2.6-Setup.exe' }),
+  result: makeResult({ current: '1.2.5', latest: release('1.2.6') }),
+});
+eq('包不是 apk：不当成待安装', notApk.mode === 'available');
+
+const desktopUnaffected = decideUpdate({
+  installed: '1.2.5',
+  seen: '1.2.3',
+  result: makeResult({ current: '1.2.5', selfNotes: '这一版改了什么' }),
+});
+eq('桌面端（没有 downloaded）：判定老样子', desktopUnaffected.mode === 'updated' && desktopUnaffected.downloaded === null);
+
 let failures = 0;
 for (const [name, passed] of checks) {
   if (passed) console.log('  ✓ ' + name);

@@ -28,13 +28,16 @@ import {
   clearPendingUpdate,
   compareVersions,
   decideUpdate,
-  desktopBridge,
+  installedVersion,
   isDesktopClient,
   markVersion,
+  pendingInstall,
   readPendingUpdate,
   seenVersion,
+  type InstallPackage,
   type UpdateCheck,
 } from './lib/update.ts';
+import { attachPhoneUpdate, discardPendingPackage, isPhoneUpdate } from './lib/appUpdate.ts';
 import { isNative } from './lib/endpoint.ts';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
@@ -78,8 +81,16 @@ export default function App() {
   const [targetStr, setTargetStr] = useState('');
   const [priceMode, setPriceMode] = useState<'market' | 'limit'>('limit');
   const [toasts, setToasts] = useState<Toast[]>([]);
-  /** 更新提示。mode 是「有新版」还是「刚装完」，两者共用同一个弹窗 */
-  const [update, setUpdate] = useState<{ mode: 'available' | 'updated'; info: UpdateCheck } | null>(null);
+  /**
+   * 更新提示。三种情形共用同一个弹窗：
+   * available（有新版）、updated（刚装完）、install（下好了还没装）。
+   */
+  const [update, setUpdate] = useState<{
+    mode: 'available' | 'updated' | 'install';
+    info: UpdateCheck;
+    /** 手机上下好待装的那个包，弹窗一打开就能显示文件名和位置 */
+    pending?: InstallPackage | null;
+  } | null>(null);
   /** 刚装完那一版的说明看过之后，如果还有更新的版本，接着弹出来 */
   const [updateAfter, setUpdateAfter] = useState<UpdateCheck | null>(null);
 
@@ -371,31 +382,53 @@ export default function App() {
     if (!isDesktopClient() && !isNative()) return;
     let alive = true;
 
-    // 桌面外壳能同步给出当前版本；开始安装前存下的那份说明，装完第一次启动离线也能用
-    const bridge = desktopBridge();
-    const installed = bridge?.version ?? '';
-    const pending = readPendingUpdate();
-    if (pending) clearPendingUpdate();
+    // 手机端要先问一下本地插件：装着的这一版是多少、有没有下好还没装的包。
+    // 这两件事都只有壳知道，问一次记住就够（版本号在一次启动里不会变）
+    const bootstrap = isPhoneUpdate() ? attachPhoneUpdate() : Promise.resolve('');
 
-    const apply = (result: UpdateCheck | null) => {
-      const decision = decideUpdate({ installed, pending, seen: seenVersion(), result });
+    const apply = (installed: string, ready: InstallPackage | null, result: UpdateCheck | null) => {
+      /**
+       * 开始安装前存下的那份说明，装完第一次启动离线也能用。
+       *
+       * 只有在「包已经装上了」这一轮才消耗掉它。包还没装（ready 还在）时不能清：
+       * 清了说明就只剩联网那一路，而升级完成第一次启动恰好可能没网 ——
+       * 那正是当初存它要应付的时候。
+       */
+      const pending = readPendingUpdate();
+      if (!ready && pending) clearPendingUpdate();
+      const decision = decideUpdate({ installed, pending, seen: seenVersion(), result, downloaded: ready });
       if (decision.remember) markVersion(decision.remember);
       if (decision.mode === 'none' || !decision.info) return;
-      setUpdate({ mode: decision.mode, info: decision.info });
+      setUpdate({ mode: decision.mode, info: decision.info, pending: decision.downloaded });
       if (decision.after) setUpdateAfter(decision.after);
     };
 
-    // 刚装完就先弹这一版的说明，不用等网络
-    if (installed && pending && compareVersions(pending.version, installed) === 0) {
-      apply(null);
-      return;
-    }
-
     const timer = window.setTimeout(() => {
       void (async () => {
+        await bootstrap.catch(() => '');
+        const installed = installedVersion();
+        const ready = await pendingInstall();
+        if (!alive) return;
+        /**
+         * 手机上已经下好一个新版：不必等网络。
+         * 离线时也该弹「更新已下载」—— 包就在本地，网络好坏不影响装它。
+         */
+        if (ready && (!installed || compareVersions(ready.version, installed) > 0)) {
+          const result = await checkForUpdate().catch(() => null);
+          if (!alive) return;
+          apply(installed, ready, result);
+          return;
+        }
+        // 刚装完就先弹这一版的说明，也不用等网络
+        const pending = readPendingUpdate();
+        if (installed && pending && compareVersions(pending.version, installed) === 0) {
+          if (pending) clearPendingUpdate();
+          apply(installed, ready, null);
+          return;
+        }
         const result = await checkForUpdate();
         if (!alive) return;
-        apply(result);
+        apply(installed, ready, result);
       })();
     }, 3000);
     return () => {
@@ -404,12 +437,24 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * 包里那版已经装上了：把残留的安装包删掉。
+   *
+   * 用户可能是从系统安装器里装的，也可能是强杀重启之后才进到这一屏 ——
+   * 包还躺在 files/update/ 里，七八十兆白占着空间。
+   * 只在「已更新」这一轮清，别的状态不清：那时它还有用。
+   */
+  useEffect(() => {
+    if (update?.mode !== 'updated') return;
+    void discardPendingPackage();
+  }, [update?.mode]);
+
   /** 关掉更新弹窗。刚装完的那一个关掉后，接着提示后面还有的新版本 */
   const closeUpdate = useCallback(() => {
     if (update?.mode === 'updated' && updateAfter) {
       const next = updateAfter;
       setUpdateAfter(null);
-      setUpdate({ mode: 'available', info: next });
+      setUpdate({ mode: 'available', info: next, pending: null });
       return;
     }
     setUpdate(null);
@@ -735,7 +780,12 @@ export default function App() {
       )}
 
       {update && (
-        <UpdateDialog mode={update.mode} info={update.info} onClose={closeUpdate} />
+        <UpdateDialog
+          mode={update.mode}
+          info={update.info}
+          initialPending={update.pending ?? null}
+          onClose={closeUpdate}
+        />
       )}
 
       <div className="toast-host">

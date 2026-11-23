@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+        更新包下在 App 私有目录的 update/ 下（见 AppUpdatePlugin）。
+        FileProvider 只肯分享这里点名的目录，不点名就抛 IllegalArgumentException：
+        「Failed to find configured root that contains ...」，安装器根本弹不出来。
+    -->
+    <files-path name="app_update" path="update/" />
     <external-path name="my_images" path="." />
     <cache-path name="my_cache_images" path="." />
 </paths>
