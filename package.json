@@ -8,6 +8,8 @@
     "build": "pnpm -F web build",
     "start": "pnpm -F server start",
     "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck",
+    "check:all": "node tools/check-all.mjs",
+    "check:ci": "pnpm typecheck && node tools/check-all.mjs",
     "check:sizing": "pnpm -F web check:sizing",
     "check:units": "pnpm -F web check:units",
     "check:paint": "pnpm -F server exec tsx ../web/scripts/check-paint.ts",
