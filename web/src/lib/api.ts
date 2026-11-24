@@ -417,6 +417,11 @@ export type WsMessage =
   | { type: 'trade'; contract: string; price: number; size: number; ts: number }
   | { type: 'hello'; ts: number }
   | { type: 'subscribed'; contract: string; interval: string }
+  /**
+   * 服务端的心跳。页面不拿它当数据，只靠它判断这条连接还活着没有 ——
+   * 半开的连接不会发 close，没有这一条就只能刷新页面。
+   */
+  | { type: 'ping'; ts: number }
   | { type: 'gate_down' };
 
 

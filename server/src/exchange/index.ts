@@ -1,4 +1,4 @@
-import type { WebSocketServer } from 'ws';
+import WebSocket, { type WebSocketServer } from 'ws';
 import { config } from '../config.js';
 import type { Exchange, MarketHub } from './types.js';
 import { GateExchange } from './gate.js';
@@ -28,11 +28,32 @@ export function exchange(): Exchange {
   return gateInstance;
 }
 
+/**
+ * 页面到服务端这一跳的心跳。
+ *
+ * 页面那颗「行情已连接」不能只看 readyState：代理节点掉线、TUN 黑洞、手机切前后台之后，
+ * TCP 常常还举着，连接状态是 OPEN 却一帧都不来 —— 页面就绿着、K 线不动，只能刷新。
+ * 每 10 秒推一条心跳，页面据此判断「多久没消息」，超时自己重连（见 web 的 useMarketFeed）。
+ *
+ * 挂在 wss 上而不是 hub 上：换交易所会造一个新 hub，心跳不该跟着一起换。
+ */
+const CLIENT_HEARTBEAT_MS = 10_000;
+let clientHeartbeat: NodeJS.Timeout | null = null;
+
 /** 启动时接上行情连接。它跟着当前交易所走，页面那侧的协议是同一套 */
 export function attachMarketHub(wss: WebSocketServer): void {
   hubWss = wss;
   hub = exchange().marketHub(wss);
   hub.connect();
+  if (clientHeartbeat) clearInterval(clientHeartbeat);
+  clientHeartbeat = setInterval(() => {
+    for (const client of wss.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      // 这一条可能正好在处理关闭：send 会抛，抛出去就会把心跳定时器带走
+      try { client.send('{"type":"ping"}'); } catch { /* 已经断了 */ }
+    }
+  }, CLIENT_HEARTBEAT_MS);
+  clientHeartbeat.unref();
 }
 
 export function marketHubStatus(): { alive: boolean; subscriptions: number; clients: number } {
