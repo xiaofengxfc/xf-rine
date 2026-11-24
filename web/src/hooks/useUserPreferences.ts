@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { storedSymbol } from '../lib/instrument.ts';
+import { instrumentKey, storedSymbol, type VenueId } from '../lib/instrument.ts';
 
 const PREFS_KEY = 'xf-rine:prefs';
 const DEFAULT_CONTRACT = 'BTC_USDT';
@@ -46,11 +46,28 @@ function readPrefs(): Prefs {
   }
 }
 
-export function useUserPreferences() {
+/**
+ * @param venue 当前连的交易所；配置还没拿到时传 null。
+ *   身份串里带交易所，不知道是哪一家就不能写 —— 写进去就是错的，而且要等到下次才发现。
+ */
+export function useUserPreferences(venue: VenueId | null) {
   const [initial] = useState(readPrefs);
   const [contract, setContract] = useState(initial.contract);
   const [interval, setInterval] = useState(initial.interval);
   const [posPct, setPosPct] = useState(initial.posPct);
+  const [instrument, setInstrument] = useState(initial.instrument);
+
+  /**
+   * 交易所确定之后（或者换了品种）才把身份写实。
+   *
+   * 换交易所时这里会跟着改写成新那一家 —— 身份里的 venue 以当前配置为准，
+   * 存档里留着旧家的身份，下次启动就会拿它去查另一家的数据。
+   */
+  useEffect(() => {
+    if (!venue) return;
+    const next = instrumentKey({ venue, market: 'perp', symbol: contract });
+    setInstrument((cur) => (cur === next ? cur : next));
+  }, [venue, contract]);
 
   useEffect(() => {
     try {
@@ -58,12 +75,12 @@ export function useUserPreferences() {
         contract,
         interval,
         posPct,
-        ...(initial.instrument ? { instrument: initial.instrument } : {}),
+        ...(instrument ? { instrument } : {}),
       }));
     } catch {
       // Preferences are optional and must not prevent the trading desk from opening.
     }
-  }, [contract, interval, posPct, initial.instrument]);
+  }, [contract, interval, posPct, instrument]);
 
   return { contract, setContract, interval, setInterval, posPct, setPosPct };
 }

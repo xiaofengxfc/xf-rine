@@ -47,11 +47,16 @@ let toastSeq = 1;
 
 export default function App() {
   const appRootRef = useRef<HTMLDivElement | null>(null);
-  const { contract, setContract, interval, setInterval, posPct, setPosPct } = useUserPreferences();
   const [news, setNews] = useState<NewsDigest | null>(null);
   const [newsLoading, setNewsLoading] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /**
+   * 品种偏好。必须排在 config 后面：身份串里带交易所，
+   * 不知道当前连的是哪一家就不能写（写错要等下次启动才发现）。
+   */
+  const { contract, setContract, interval, setInterval, posPct, setPosPct } =
+    useUserPreferences(config ? config.exchange : null);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const {
     view,
