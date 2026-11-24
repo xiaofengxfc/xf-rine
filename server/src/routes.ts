@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { bodyOf, textOr } from './http/params.js';
-import { instrumentOf } from './exchange/instrument.js';
+import { instrumentOf, resolveSymbol } from './exchange/instrument.js';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -704,7 +704,11 @@ function qnum(raw: unknown, fallback: number, min: number, max: number): number 
 }
 
 router.get('/candles', wrap(async (req, res) => {
-  const contract = String(req.query.contract ?? 'BTC_USDT');
+  const contract = resolveSymbol({
+    instrument: req.query.instrument,
+    contract: req.query.contract,
+    fallback: 'BTC_USDT',
+  });
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '1m';
   const limit = Math.round(qnum(req.query.limit, 500, 50, 1000));
   const beforeRaw = Number(req.query.before);
@@ -878,7 +882,11 @@ router.get('/levels', wrap(async (req, res) => {
     return;
   }
 
-  const contract = String(req.query.contract ?? 'BTC_USDT');
+  const contract = resolveSymbol({
+    instrument: req.query.instrument,
+    contract: req.query.contract,
+    fallback: 'BTC_USDT',
+  });
   const interval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '15m';
   // 档位只看收盘的 K 线，晚一根的时间无所谓：时间轴里那一段够新就用它，别为它跑一趟交易所
   const { bars } = await loadCandles(contract, interval, limit, false, undefined, stepSeconds(interval) * 1000);
