@@ -129,8 +129,15 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
     }
   }, [setContract]);
 
+  /**
+   * 所有地方必须用同一个键。
+   *
+   * 以前 loadMarket 用的是裸符号（`BTC_USDT:15m`），而 marketKey 已经带上身份
+   * （`gate:perp:BTC_USDT:15m`）—— 于是 App 那句 `market.key === marketKey`
+   * 永远不成立，bars 被当成「不是当前品种」一直给空数组，图就是白的。
+   */
   const loadMarket = useCallback(async (name: string, timeframe: string) => {
-    const key = `${name}:${timeframe}`;
+    const key = marketKeyOf(name, timeframe, instrument);
     const sequence = ++marketSeqRef.current;
     pendingLiveRef.current = { key, bars: [] };
     noMoreOlderRef.current = false;
@@ -173,10 +180,10 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
     } finally {
       if (sequence === marketSeqRef.current) setLoading(false);
     }
-  }, [onToast]);
+  }, [onToast, instrument]);
 
   const loadLevelsOnly = useCallback(async (name: string, timeframe: string) => {
-    const key = `${name}:${timeframe}`;
+    const key = marketKeyOf(name, timeframe, instrument);
     try {
       const levels = await jget<LevelsResponse>(`/api/levels?contract=${name}&interval=${timeframe}&limit=500`);
       setMarket((current) => current.key === key ? { ...current, levels, levelsError: null } : current);
@@ -185,7 +192,7 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
         ? { ...current, levelsError: (error as Error).message || '关键位暂不可用' }
         : current);
     }
-  }, []);
+  }, [instrument]);
 
   const backfillOlder = useCallback(async () => {
     const key = marketRef.current.key;
@@ -194,7 +201,14 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
 
     const generation = ++pumpGenRef.current;
     pumpingKeyRef.current = key;
-    const [name, timeframe] = key.split(':') as [string, string];
+    /**
+     * 合约和周期直接从当前状态取，**不能**再从 key 里 split。
+     *
+     * 键现在带身份（`gate:perp:BTC_USDT:15m`），split(':') 出来第一段是 "gate" ——
+     * 于是补历史会去问一个叫 gate 的合约，返回空页，往回拖永远补不出东西。
+     */
+    const name = contract;
+    const timeframe = interval;
     const stale = () => pumpGenRef.current !== generation || marketRef.current.key !== key;
     let failures = 0;
     let pagesSincePublish = 0;
@@ -272,7 +286,9 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
   const resyncTail = useCallback(async () => {
     const key = marketRef.current.key;
     if (!key || marketRef.current.bars.length === 0 || !isCurrentMarket(key)) return;
-    const [name, timeframe] = key.split(':') as [string, string];
+    // 和 backfillOlder 同一个理由：键带身份之后不能再 split，直接取当前状态
+    const name = contract;
+    const timeframe = interval;
     try {
       const page = await jget<{ bars: Bar[] }>(`/api/candles?contract=${name}&interval=${timeframe}&limit=${TAIL_PAGE}`);
       if (marketRef.current.key !== key) return;
@@ -285,10 +301,12 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
     } catch {
       // The next synchronization can fill a temporary gap.
     }
-  }, [isCurrentMarket]);
+  }, [contract, interval, isCurrentMarket]);
 
   useEffect(() => {
     void loadMarket(contract, interval);
+    // loadMarket 的依赖里已经有 instrument：身份到达（配置回来）时会重新加载一次，
+    // 否则第一屏拿到的快照键是不带身份的，App 那边会判成「不是当前品种」
   }, [contract, interval, loadMarket]);
 
   useEffect(() => {
