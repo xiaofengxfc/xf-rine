@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import type { WebSocketServer } from 'ws';
 import { marketWsUrl } from '../config.js';
 import { isStale } from '../wsRoute.js';
-import { instrumentField, instrumentFromSymbol } from '@xfrine/instrument';
+import { instrumentField, instrumentFromSymbol, parseInstrument } from '@xfrine/instrument';
 
 /**
  * 播给页面的每一条行情都同时带「裸合约名」和「完整身份」。
@@ -105,7 +105,18 @@ export class MarketHub {
   private onClientMessage(client: Client, raw: string): void {
     let msg: any;
     try { msg = JSON.parse(raw); } catch { return; }
-    if (msg?.type === 'subscribe' && typeof msg.contract === 'string') {
+    /**
+     * 订阅两种写法都认：带 instrument 就用它的符号，只带 contract 的老客户端照旧。
+     *
+     * 身份写错、或者属于别家交易所，就退回 contract 而不是把整条订阅拒掉 ——
+     * 这是长连接上的高频动作，为一个可选字段让页面连不上不值得；
+     * 真属于别家的订阅，交易所那边本来也不会给数据。
+     */
+    const instrumentSymbol = typeof msg?.instrument === 'string'
+      ? parseInstrument(msg.instrument)
+      : null;
+    const subscribed = instrumentSymbol && instrumentSymbol.venue === 'gate' ? instrumentSymbol.symbol : '';
+    if (msg?.type === 'subscribe' && (subscribed || typeof msg.contract === 'string')) {
       /**
        * 合约名不能按 ASCII 白名单洗。
        *
@@ -113,7 +124,7 @@ export class MarketHub {
        * 这 5 个币的 K 线、最新价、逐笔永远不来，图上就停在 REST 快照那一刻。
        * 只挡控制字符和空白（JSON 里本来就安全，这里只是别把怪东西转给交易所），长度按 Gate 的上限截。
        */
-      const contract = String(msg.contract).replace(/[\u0000-\u001f\u007f\s]/g, '').slice(0, 32);
+      const contract = String(subscribed || msg.contract).replace(/[\u0000-\u001f\u007f\s]/g, '').slice(0, 32);
       const interval = typeof msg.interval === 'string' ? msg.interval.replace(/[^0-9a-zA-Z]/g, '') : '1m';
       // 单连接只保持一组订阅，切换合约时先退旧的
       this.dropAllRefs(client.id);
