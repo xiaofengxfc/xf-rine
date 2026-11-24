@@ -53,9 +53,36 @@ export const PERP_CAPABILITIES: MarketCapabilities = {
   label: '永续合约',
 };
 
+/**
+ * 现货。表先定下来，**数据源还没接**。
+ *
+ * 定这张表是为了让「现货不能开空、没有杠杆、没有持仓」这几件事有个准确的说法，
+ * 而不是让 UI 继续按永续的假设去画。
+ *
+ * 还没接的部分很具体：Gate 的现货 K 线频道（spot.candlesticks）帧里不带货币对名，
+ * 要按订阅时用的 payload 反查 —— 这一点没法离线验证，所以宁可不接，
+ * 也不写一个看起来能跑、实际行情永远不来的订阅。
+ */
+export const SPOT_CAPABILITIES: MarketCapabilities = {
+  canShort: false,
+  hasLeverage: false,
+  hasFunding: false,
+  hasExpiry: false,
+  hasTriggerOrders: false,
+  hasPositions: false,
+  hasLiquidation: false,
+  hasSession: false,
+  sizeUnit: 'base',
+  label: '现货',
+};
+
 const TABLE: Record<string, MarketCapabilities> = {
   perp: PERP_CAPABILITIES,
+  spot: SPOT_CAPABILITIES,
 };
+
+/** 已经真的接了数据源的市场。UI 据此区分「不支持」和「还没接」 */
+export const WIRED_MARKETS: readonly string[] = ['perp'];
 
 /**
  * 按市场类型取能力表。

@@ -21,14 +21,14 @@
  */
 
 export {
-  capabilitiesFor, PERP_CAPABILITIES, type MarketCapabilities,
+  capabilitiesFor, PERP_CAPABILITIES, SPOT_CAPABILITIES, WIRED_MARKETS, type MarketCapabilities,
 } from './capabilities.js';
 
 /** 哪一家。这里的值要和 server/src/exchange 里的 ExchangeId 对得上 */
 export type VenueId = 'gate' | 'bitget';
 
 /** 哪一类市场。现在只有 USDT 永续（含交割？没有。加的时候再说） */
-export type MarketKind = 'perp';
+export type MarketKind = 'perp' | 'spot';
 
 export interface InstrumentRef {
   venue: VenueId;
@@ -38,7 +38,8 @@ export interface InstrumentRef {
 }
 
 export const VENUES: readonly VenueId[] = ['gate', 'bitget'];
-export const MARKETS: readonly MarketKind[] = ['perp'];
+/** spot 已进身份体系，但数据源还没接（见 capabilities.ts 的说明） */
+export const MARKETS: readonly MarketKind[] = ['perp', 'spot'];
 
 /** 从字符串里认出来的 venue / market 用这套正则卡住：拼错了要认不出，不能悄悄当成 gate */
 const VENUE_RE = /^[a-z0-9]{2,16}$/;

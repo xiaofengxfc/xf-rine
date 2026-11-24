@@ -7,7 +7,7 @@
  */
 import {
   capabilitiesFor, instrumentField, instrumentFromSymbol, instrumentKey, parseInstrument, parseInstrumentOr,
-  PERP_CAPABILITIES, sameInstrument,
+  PERP_CAPABILITIES, sameInstrument, WIRED_MARKETS,
 } from '@xfrine/instrument';
 
 let failures = 0;
@@ -27,7 +27,7 @@ check('带数字的符号照样认', sameInstrument(parseInstrument('gate:perp:1
 check('少了 market 段不认', parseInstrument('gate:BTC_USDT') === null);
 check('多了一段不认', parseInstrument('gate:perp:BTC_USDT:extra') === null);
 check('不认识的交易所说 null', parseInstrument('binance:perp:BTC_USDT') === null);
-check('还没接的市场类型说 null', parseInstrument('gate:spot:BTC_USDT') === null);
+check('还没进身份体系的市场类型说 null', parseInstrument('gate:option:BTC_USDT') === null);
 check('空的符号说 null', parseInstrument('gate:perp:') === null);
 check('符号里有空格说 null', parseInstrument('gate:perp:BTC USDT') === null);
 check('非字符串说 null', parseInstrument(42) === null && parseInstrument(null) === null && parseInstrument(undefined) === null);
@@ -56,7 +56,17 @@ check('永续不过期、24 小时不停', perp?.hasExpiry === false && perp?.ha
 check('永续有持仓、有强平、能挂触发单',
   perp?.hasPositions === true && perp?.hasLiquidation === true && perp?.hasTriggerOrders === true);
 check('永续按张下单', perp?.sizeUnit === 'contract');
-check('认不出的市场返回 null（不是一张「什么都不能」的空表）', capabilitiesFor('spot') === null);
+check('认不出的市场返回 null（不是一张「什么都不能」的空表）', capabilitiesFor('futures') === null);
+
+// ---- 现货：进了身份体系，但还没接数据源 ----
+const spot = capabilitiesFor('spot');
+check('现货有准确的能力表', spot !== null && spot.canShort === false && spot.hasLeverage === false);
+check('现货没有持仓、没有强平、没有资金费',
+  spot?.hasPositions === false && spot?.hasLiquidation === false && spot?.hasFunding === false);
+check('现货按基础币下单', spot?.sizeUnit === 'base');
+check('现货能进身份串', instrumentKey({ venue: 'gate', market: 'spot', symbol: 'BTC_USDT' }) === 'gate:spot:BTC_USDT');
+check('现货身份能解析回来', sameInstrument(parseInstrument('gate:spot:BTC_USDT'), { venue: 'gate', market: 'spot', symbol: 'BTC_USDT' }));
+check('但现货不在「已接数据源」名单里', !WIRED_MARKETS.includes('spot') && WIRED_MARKETS.includes('perp'));
 check('能力表是只读常量，改不动别人', PERP_CAPABILITIES.label === '永续合约');
 
 // ---- 行情缓存键与身份串是两件事 ----

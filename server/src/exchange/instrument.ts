@@ -7,7 +7,9 @@
  * 双写期用：接口和行情帧同时带 contract 和 instrument。
  * 等前端全部改读 instrument，这一层和 contract 字段一起下掉。
  */
-import { instrumentField, instrumentFromSymbol, parseInstrument, type InstrumentRef } from '@xfrine/instrument';
+import {
+  instrumentField, instrumentFromSymbol, parseInstrument, WIRED_MARKETS, type InstrumentRef,
+} from '@xfrine/instrument';
 import { DataError } from '../errors.js';
 import { exchange } from './index.js';
 
@@ -42,6 +44,15 @@ export function resolveSymbol(input: {
     if (!ref) {
       throw new DataError(400, 'BAD_INSTRUMENT',
         '品种写法不对：' + raw + '。要写成 venue:market:symbol，例如 gate:perp:BTC_USDT');
+    }
+    /**
+     * 现货已经在身份体系里，但数据源还没接。
+     * 说清楚，而不是让它走到「订阅成功、行情永远不来」那条路上 ——
+     * 那种状态在页面上看起来只是「这个币没数据」。
+     */
+    if (!WIRED_MARKETS.includes(ref.market)) {
+      throw new DataError(501, 'MARKET_NOT_WIRED',
+        ref.market + ' 市场还没接数据源。现在只有 ' + WIRED_MARKETS.join('、') + ' 能用');
     }
     const active = exchange().id;
     if (ref.venue !== active) {
