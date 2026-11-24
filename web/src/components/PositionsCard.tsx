@@ -13,6 +13,7 @@ import {
 import {
   bracketOf as findBracket, dirLabel, protectionState, triggerKind, type Dir,
 } from '../lib/protective.ts';
+import type { MarketCapabilities } from '../lib/instrument.ts';
 
 interface Props {
   account?: Account | null;
@@ -30,6 +31,8 @@ interface Props {
   token: string | null;
   onToast: (kind: 'ok' | 'err', title: string, detail?: string) => void;
   onRefresh: () => void;
+  /** 当前市场能干哪些事。没有就按永续的既有行为走（有强平价、能挂触发单） */
+  capabilities?: MarketCapabilities;
 }
 
 /** 正在改的止损止盈。没填的那一侧表示不挂。 */
@@ -110,7 +113,7 @@ function cleanupText(c: CanceledTrades | undefined): string {
 
 export default function PositionsCard({
   account, positions, orders, priceOrders, priceRound, rounds, marks, stale,
-  armed, token, onToast, onRefresh,
+  armed, token, onToast, onRefresh, capabilities,
 }: Props) {
   /**
    * 这一行是哪个合约，就用那个合约的最小变动位显示价。
@@ -531,7 +534,10 @@ export default function PositionsCard({
                     <div><span>张数</span><span>{Math.abs(p.size)}</span></div>
                     <div><span>开仓价</span><span>{fmtPrice(p.entryPrice, round)}</span></div>
                     <div><span>标记价</span><span>{fmtPrice(mark, round)}</span></div>
-                    <div><span>强平价</span><span>{liqPrice > 0 ? `${exchangeLiqPrice > 0 ? '' : '≈ '}${fmtPrice(liqPrice, round)}` : '—'}</span></div>
+                    {/* 没有强平价的市场（现货）本来就不该有这一行，而不是显示一个「—」 */}
+                    {capabilities?.hasLiquidation === false ? null : (
+                      <div><span>强平价</span><span>{liqPrice > 0 ? `${exchangeLiqPrice > 0 ? '' : '≈ '}${fmtPrice(liqPrice, round)}` : '—'}</span></div>
+                    )}
                     <div><span>价值</span><span>{fmtUsd(p.value, 0)}</span></div>
                     <div><span>持仓模式</span><span>{p.mode === 'single' ? '单向' : p.mode === 'dual_long' ? '双向多' : p.mode === 'dual_short' ? '双向空' : p.mode}</span></div>
                   </div>
@@ -586,16 +592,19 @@ export default function PositionsCard({
                     </div>
                   ) : (
                     <>
-                      <div className="pos-acts two">
-                        <button
-                          className="btn ghost"
-                          disabled={!armed}
-                          title={armed ? '自己填止损止盈，不填就是不设' : '先解锁交易'}
-                          onClick={() => editBracket(p)}
-                        >
-                          设止损止盈
-                        </button>
-                      </div>
+                      {/* 不能挂触发单的市场（现货）没有这一套，别给一个按了必然失败的按钮 */}
+                      {capabilities?.hasTriggerOrders === false ? null : (
+                        <div className="pos-acts two">
+                          <button
+                            className="btn ghost"
+                            disabled={!armed}
+                            title={armed ? '自己填止损止盈，不填就是不设' : '先解锁交易'}
+                            onClick={() => editBracket(p)}
+                          >
+                            设止损止盈
+                          </button>
+                        </div>
+                      )}
 
                       {adding && adding.key === k ? (
                         <div className="pos-acts two">

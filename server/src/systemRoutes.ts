@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { bodyOf } from './http/params.js';
+import { capabilitiesFor } from '@xfrine/instrument';
 import {
   config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint,
   remoteAccess, ENV_PATH, exchangeLabel, exchangeIntervals, type GateEnv,
@@ -29,6 +30,8 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
   // ---------- 配置与体检 ----------
 
   router.get('/config', (req, res) => {
+    // 当前市场的能力表跟着全局配置下发：页面不用为每个合约各问一次
+    const capabilities = capabilitiesFor('perp');
     // 手机端要填的地址和口令。口令只回本机 —— 本机都打不开页面的话，也没有理由知道它。
     const remote = remoteAccess();
     const local = isLoopbackAddress(req.socket.remoteAddress ?? '');
@@ -64,6 +67,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
         endpoint: aiEndpoint(),
       },
       armed: false,
+      capabilities: capabilities ?? undefined,
       // 反馈寄到哪个信箱，页面要能说清楚 —— 内嵌配置，用户不用自己填
       feedback: feedbackTarget(),
     });

@@ -361,6 +361,8 @@ export interface AiAnalysis {
 export interface AppConfig {
   /** 当前连的交易所。合约名、张数、下单都跟着它走 */
   exchange: 'gate' | 'bitget';
+  /** 当前市场能干哪些事（现在就是永续那张表）。UI 从它读，别再散着写死 */
+  capabilities?: MarketCapabilities;
   exchangeLabel: string;
   /** 这家支持的 K 线周期。Bitget 没有 8h，列出来点了只会报错 */
   intervals: string[];

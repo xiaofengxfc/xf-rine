@@ -8,8 +8,8 @@ import { parseInstrument } from '@xfrine/instrument';
 
 export {
   instrumentField, instrumentFromSymbol, instrumentKey, parseInstrument, parseInstrumentOr, sameInstrument,
-  MARKETS, VENUES,
-  type InstrumentRef, type MarketKind, type VenueId,
+  capabilitiesFor, MARKETS, PERP_CAPABILITIES, SPOT_CAPABILITIES, VENUES, WIRED_MARKETS,
+  type InstrumentRef, type MarketCapabilities, type MarketKind, type VenueId,
 } from '@xfrine/instrument';
 
 /**

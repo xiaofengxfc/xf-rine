@@ -752,6 +752,7 @@ export default function App() {
           />
 
           <PositionsCard
+            capabilities={config?.capabilities}
             account={account}
             positions={positions}
             orders={orders}
