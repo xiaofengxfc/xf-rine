@@ -332,6 +332,17 @@ export function translate(e: unknown): unknown {
     }
   }
 
+  /**
+   * 撤一张已经成交或已经撤掉的委托。
+   *
+   * 交易所只回一个码，页面以前看到的是「ORDER_NOT_FOUND」，用户会以为是程序找不到
+   * 自己的单 —— 其实多半是他自己刚撤过、或者行情正好走到那一步成交了。
+   */
+  if (e.label === 'ORDER_NOT_FOUND') {
+    return new GateError(400, 'ORDER_NOT_FOUND',
+      '这张委托已经不在挂着了：可能刚成交、或者已经被撤掉。刷新一下委托列表看看');
+  }
+
   if (e.label === 'MARKET_PRICE_TOO_DEVIATED' || e.label === 'PRICE_TOO_DEVIATED') {
     // 这句最常出现在平仓上：盘口是空的，市价平不掉，用户会以为程序坏了
     return new GateError(

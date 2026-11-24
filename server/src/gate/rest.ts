@@ -109,8 +109,18 @@ async function request<T>(
       try {
         const j = JSON.parse(text);
         label = j.label ?? j.message ?? label;
-        detail = j.detail ?? j.message ?? j.error ?? detail;
+        /**
+         * detail 只取「真的多说了点什么」的字段。
+         *
+         * 以前这里是 `j.detail ?? j.message ?? j.error ?? raw`，而 Gate 的拒单
+         * 常常只回 `{"label":"ORDER_NOT_FOUND"}` —— 于是兜底落到整段原始 JSON，
+         * 用户看到的是一串 `{"label":"ORDER_NOT_FOUND"}`，而不是一句人话。
+         * label 已经把错因说完了，这时候 detail 就不要再塞同一件事。
+         */
+        const extra = j.detail ?? j.message ?? j.error;
+        detail = typeof extra === 'string' && extra !== label ? extra : label;
       } catch { /* keep raw */ }
+      // detail 到这一步应当已经是字符串；对象仍然展开，但不会再是「整段原始 JSON」
       throw new GateError(res.status, label, typeof detail === 'string' ? detail : JSON.stringify(detail), 'Gate');
     }
     return (safeText ? JSON.parse(safeText) : null) as T;

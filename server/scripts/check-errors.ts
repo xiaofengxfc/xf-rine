@@ -81,6 +81,17 @@ check(
 const plain = new Error('boom');
 check('非 GateError 原样返回', translate(plain) === plain, true);
 
+// ---- 7. 撤一张已经不在的单：要翻成人话 ----
+// Gate 只回一个码（{"label":"ORDER_NOT_FOUND"}），以前 detail 里是整段原始 JSON。
+const notFound = translate(new GateError(404, 'ORDER_NOT_FOUND', 'ORDER_NOT_FOUND')) as GateError;
+check('委托找不到时换成 400 并保留错误码',
+  { label: notFound.label, status: notFound.status },
+  { label: 'ORDER_NOT_FOUND', status: 400 });
+// 重点：不能再把 `{"label":"ORDER_NOT_FOUND"}` 这种原始 JSON 甩给用户
+check('委托找不到时 detail 是人话，不是原始 JSON',
+  /刷新|成交|撤/.test(notFound.detail) && !notFound.detail.includes('{'),
+  true);
+
 if (failed > 0) {
   console.error(`\n✗ ${failed} 项失败，${total - failed} 项通过`);
   process.exit(1);
