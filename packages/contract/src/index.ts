@@ -10,6 +10,10 @@
  * 漂移在 `tsc --noEmit` 就会暴露。
  */
 
+import type { MarketCapabilities } from '@xfrine/instrument';
+
+export type { MarketCapabilities };
+
 export interface ContractInfo {
   name: string;
   /** 完整身份，形如 gate:perp:BTC_USDT。过渡期与 name 双写，老客户端不认也不影响 */
@@ -34,6 +38,8 @@ export interface ContractInfo {
   status?: string;
   /** 当前环境能不能交易它 */
   tradable?: boolean;
+  /** 这个市场能干哪些事。UI 从它读，而不是从「我知道这是永续」读 */
+  capabilities?: MarketCapabilities;
 }
 
 export interface Ticker {

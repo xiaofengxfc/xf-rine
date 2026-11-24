@@ -20,6 +20,10 @@
  * 再加 —— 提前预留一个永远走不到的枚举值，只会让 switch 看起来更完整而更不可靠。
  */
 
+export {
+  capabilitiesFor, PERP_CAPABILITIES, type MarketCapabilities,
+} from './capabilities.js';
+
 /** 哪一家。这里的值要和 server/src/exchange 里的 ExchangeId 对得上 */
 export type VenueId = 'gate' | 'bitget';
 

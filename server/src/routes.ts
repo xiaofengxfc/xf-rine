@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { bodyOf, textOr } from './http/params.js';
 import { instrumentOf, resolveSymbol } from './exchange/instrument.js';
+import { capabilitiesFor } from '@xfrine/instrument';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -438,6 +439,7 @@ router.get('/contracts/:name', wrap(async (req, res) => {
     tradable: tradable === null ? true : tradable.has(c.name),
     name: c.name,
     instrument: instrumentOf(c.name),
+    capabilities: capabilitiesFor('perp') ?? undefined,
     multiplier: Number(c.quanto_multiplier),
     sizeMin: Number(c.order_size_min) > 0 ? c.order_size_min : (c.size_step ?? 1),
     sizeStep: c.size_step ?? 1,

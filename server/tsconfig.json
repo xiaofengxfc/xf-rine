@@ -10,7 +10,8 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
   "paths": {
-    "@xfrine/contract": ["../packages/contract/src/index.ts"]
+    "@xfrine/contract": ["../packages/contract/src/index.ts"],
+    "@xfrine/instrument": ["../packages/instrument/src/index.ts"]
   },
     "esModuleInterop": true,
     "resolveJsonModule": true,

@@ -6,7 +6,8 @@
  * 比「能认出来」更要紧 —— 下面一半用例是在钉这一条。
  */
 import {
-  instrumentField, instrumentFromSymbol, instrumentKey, parseInstrument, parseInstrumentOr, sameInstrument,
+  capabilitiesFor, instrumentField, instrumentFromSymbol, instrumentKey, parseInstrument, parseInstrumentOr,
+  PERP_CAPABILITIES, sameInstrument,
 } from '@xfrine/instrument';
 
 let failures = 0;
@@ -45,6 +46,18 @@ check('没有身份就不带字段', instrumentField(null) === undefined && inst
 check('同一品种判等', sameInstrument(btc, { ...btc }));
 check('不同交易所不算同一个', !sameInstrument(btc, { ...btc, venue: 'bitget' }));
 check('空值不算相等', !sameInstrument(null, btc) && !sameInstrument(btc, null));
+
+// ---- 市场能力表 ----
+const perp = capabilitiesFor('perp');
+check('永续有这张能力表', perp !== null);
+check('永续能开空、有杠杆、有资金费',
+  perp?.canShort === true && perp?.hasLeverage === true && perp?.hasFunding === true);
+check('永续不过期、24 小时不停', perp?.hasExpiry === false && perp?.hasSession === false);
+check('永续有持仓、有强平、能挂触发单',
+  perp?.hasPositions === true && perp?.hasLiquidation === true && perp?.hasTriggerOrders === true);
+check('永续按张下单', perp?.sizeUnit === 'contract');
+check('认不出的市场返回 null（不是一张「什么都不能」的空表）', capabilitiesFor('spot') === null);
+check('能力表是只读常量，改不动别人', PERP_CAPABILITIES.label === '永续合约');
 
 // ---- 行情缓存键与身份串是两件事 ----
 // marketKeyOf 在前端，但规则在这里一并钉住：它有身份就用身份，没有就退回裸符号。

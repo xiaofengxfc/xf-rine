@@ -95,6 +95,8 @@ export default function OrderTicket({
   const sizeStep = contract?.sizeStep && contract.sizeStep > 0 ? contract.sizeStep : 1;
   const sizeMin = contract?.sizeMin && contract.sizeMin > 0 ? contract.sizeMin : sizeStep;
   const levMax = Math.min(contract?.leverageMax ?? 20, 125);
+  /** 这个市场能干哪些事。合约元数据还没回来时没有它，此时按永续的既有行为走 */
+  const capabilities = contract?.capabilities;
   const sizeMax = contract?.sizeMax && contract.sizeMax > 0
     ? floorToSizeStep(contract.sizeMax, sizeStep)
     : 0;
@@ -510,6 +512,19 @@ export default function OrderTicket({
           ))}
         </div>
 
+        {/*
+          能力驱动：没有杠杆的市场（现货、股票）不显示杠杆和保证金模式。
+          永续的 hasLeverage 是 true，所以这里和改造前完全一样；
+          但以后接现货时，不用再回来在组件里加 if。
+        */}
+        {capabilities && !capabilities.hasLeverage ? (
+          <div className="muted" style={{ marginBottom: 9, fontSize: 12 }}>
+            {capabilities.label}没有杠杆，按下单金额成交
+          </div>
+        ) : null}
+
+        {capabilities?.hasLeverage === false ? null : (
+        <>
         <div className="field" style={{ marginBottom: 9 }}>
           <label>杠杆 {lev}x</label>
           <input
@@ -541,6 +556,8 @@ export default function OrderTicket({
           <div className="edit-note" style={{ marginBottom: 8, color: 'var(--warn)' }}>
             全仓：这个仓亏穿了会继续吃账户里剩下的钱，止损护不住的部分由整个余额承担。
           </div>
+        )}
+        </>
         )}
 
         <div className="seg" style={{ marginBottom: 9, width: '100%' }}>
