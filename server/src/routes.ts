@@ -2,7 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { bodyOf, textOr } from './http/params.js';
 import { instrumentOf, resolveSymbol } from './exchange/instrument.js';
-import { capabilitiesFor } from '@xfrine/instrument';
+import { capabilitiesFor, instrumentField, parseInstrument } from '@xfrine/instrument';
+import { spotCandles } from './gate/spot.js';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -706,6 +707,42 @@ function qnum(raw: unknown, fallback: number, min: number, max: number): number 
 }
 
 router.get('/candles', wrap(async (req, res) => {
+  /**
+   * 现货走自己那条路：Gate 现货的 K 线是 REST 的数组格式，
+   * 和永续那条「时间轴缓存 + WS 增量」的链路不一样。
+   *
+   * 只在这里接受现货身份。交易接口一律只读 contract，所以现货身份
+   * 进不去下单链路 —— 那边仍然是永续的语义。
+   */
+  const asSpot = typeof req.query.instrument === 'string' ? parseInstrument(req.query.instrument) : null;
+  if (asSpot?.market === 'spot') {
+    if (asSpot.venue !== config.exchange) {
+      throw new DataError(400, 'OTHER_VENUE',
+        '这个品种属于 ' + asSpot.venue + '，当前服务端连的是 ' + config.exchange);
+    }
+    const spotInterval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '1m';
+    const spotLimit = Math.round(qnum(req.query.limit, 500, 50, 1000));
+    const beforeRaw = Number(req.query.before);
+    const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
+    const rows = await spotCandles(asSpot.symbol, spotInterval, spotLimit, before);
+    const bars = rows.map((c) => ({
+      time: Number(c.t), open: Number(c.o), high: Number(c.h), low: Number(c.l),
+      close: Number(c.c), volume: Number(c.v),
+      ...(c.turnover === undefined ? {} : { turnover: c.turnover }),
+    }));
+    const body: CandlesResponse = {
+      contract: asSpot.symbol,
+      instrument: instrumentField(asSpot),
+      interval: spotInterval,
+      bars,
+      hasMore: bars.length >= spotLimit,
+      exhausted: false,
+      gap: false,
+    };
+    res.json(body);
+    return;
+  }
+
   const contract = resolveSymbol({
     instrument: req.query.instrument,
     contract: req.query.contract,

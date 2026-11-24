@@ -26,6 +26,7 @@ const CHECKS = [
   { group: 'server', name: 'errors', file: 'server/scripts/check-errors.ts' },
   { group: 'server', name: 'params', file: 'server/scripts/check-params.ts' },
   { group: 'server', name: 'instrument', file: 'server/scripts/check-instrument.ts' },
+  { group: 'server', name: 'spot-candles', file: 'server/scripts/check-spot-candles.ts' },
   { group: 'server', name: 'http-security', file: 'server/scripts/check-http-security.ts' },
   { group: 'server', name: 'ws-route', file: 'server/scripts/check-ws-route.ts' },
   { group: 'server', name: 'daily-pnl', file: 'server/scripts/check-daily-pnl.ts' },

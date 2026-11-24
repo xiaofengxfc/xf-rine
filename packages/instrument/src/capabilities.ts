@@ -54,14 +54,17 @@ export const PERP_CAPABILITIES: MarketCapabilities = {
 };
 
 /**
- * 现货。表先定下来，**数据源还没接**。
+ * 现货。**K 线已经接了（Gate REST，只读）；交易还没接。**
  *
  * 定这张表是为了让「现货不能开空、没有杠杆、没有持仓」这几件事有个准确的说法，
  * 而不是让 UI 继续按永续的假设去画。
  *
- * 还没接的部分很具体：Gate 的现货 K 线频道（spot.candlesticks）帧里不带货币对名，
- * 要按订阅时用的 payload 反查 —— 这一点没法离线验证，所以宁可不接，
- * 也不写一个看起来能跑、实际行情永远不来的订阅。
+ * 接的是 REST 而不是 WebSocket：现货 WS 频道（spot.candlesticks）的帧里不带货币对名，
+ * 要按订阅时的 payload 反查，那个映射没法离线验证。REST 是数组格式、结构稳定，
+ * 先用它把现货 K 线接上；WS 增量以后再说。
+ *
+ * 交易（下单、加杠杆、挂止损止盈）仍然只认永续：那几个接口只读 contract 参数，
+ * 现货身份进不去，所以这里 hasPositions / hasLeverage 为 false 与代码是一致的。
  */
 export const SPOT_CAPABILITIES: MarketCapabilities = {
   canShort: false,
