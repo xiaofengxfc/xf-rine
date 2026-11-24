@@ -9,6 +9,7 @@
     "start": "pnpm -F server start",
     "typecheck": "pnpm -F server typecheck && pnpm -F web typecheck",
     "check:sizing": "pnpm -F web check:sizing",
+    "check:units": "pnpm -F web check:units",
     "check:paint": "pnpm -F server exec tsx ../web/scripts/check-paint.ts",
     "check:candles": "pnpm -F server exec tsx ../web/scripts/check-candles.ts",
     "check:patterns": "pnpm -F server exec tsx ../web/scripts/check-patterns.ts",

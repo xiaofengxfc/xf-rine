@@ -3,7 +3,8 @@ import { jsend, type Account, type ContractInfo } from '../lib/api.ts';
 import { fmtMoney, fmtPrice, fmtUsd, fmtPct } from '../lib/format.ts';
 import { crossCollateralCoversDropToZero, estimateLiquidationPrice } from '../lib/liquidation.ts';
 import { protectionRows, wrongSide } from '../lib/protection.ts';
-import { floorToSizeStep, isOnSizeStep, percentSizing } from '../lib/sizing.ts';
+import { floorToSizeStep, percentSizing } from '../lib/sizing.ts';
+import { coinDecimalsOf, coinStepOf, coinsToContracts, coinsToInput, contractsToCoins, fmtCoins } from '../lib/units.ts';
 import { pnlFromCost } from '../lib/position.ts';
 
 /** 仓位比例的几个档。做日内的人只在这几个数之间选，比让他填一个百分比快 */
@@ -63,8 +64,9 @@ export default function OrderTicket({
   priceMode, onPriceModeChange, onResetPrices,
 }: Props) {
   const [side, setSide] = useState<'long' | 'short'>('long');
-  const [sizeStr, setSizeStr] = useState('');
-  /** 用户自己改过张数之后，就不再让「按比例算」覆盖他的输入 */
+  /** 框里存的是币数量（数字串），张数由它算出来 —— 交易所那边认的本来就是币 */
+  const [qtyStr, setQtyStr] = useState('');
+  /** 用户自己改过数量之后，就不再让「按比例算」覆盖他的输入 */
   const [sizeTouched, setSizeTouched] = useState(false);
   const setStopStr = onStopChange;
   const setTargetStr = onTargetChange;
@@ -96,12 +98,18 @@ export default function OrderTicket({
   const sizeMax = contract?.sizeMax && contract.sizeMax > 0
     ? floorToSizeStep(contract.sizeMax, sizeStep)
     : 0;
-  /** N 张折成多少基础币，保留交易所支持的最多 12 位数量精度 */
-  const qtyOf = (n: number): string => {
-    const v = n * mult;
-    if (!(v > 0)) return '—';
-    return v.toLocaleString('en-US', { maximumFractionDigits: 12 });
-  };
+  /** 币那一侧的下单步进和位数：交易所给的是「张」的步进，乘上每张币数就是币的 */
+  const coinStep = coinStepOf(mult, sizeStep);
+  const coinDecimals = coinDecimalsOf(mult, sizeStep);
+  /**
+   * N 张折成多少基础币。
+   *
+   * 输入框那头按币算，这一头只负责把张数说成人看得懂的币数。换算和格式化
+   * 全走 units.ts —— 这里再写一份除法，两处就会慢慢长成不同的口径。
+   */
+  const coinsOf = useCallback((contracts: number): string =>
+    contracts > 0 && mult > 0 ? fmtCoins(contractsToCoins(contracts, mult), coinDecimals) : '—',
+  [mult, coinDecimals]);
   // 杠杆上限跟着合约走。切到上限更低的合约时，原来的 50x 必须夹回去：
   // 不夹的话摘要会按交易所根本不接受的杠杆算保证金，设置杠杆那一步也会静默失败，
   // 最后真正下单用的还是账户上原来的杠杆，和确认条上写的不是一回事。
@@ -114,7 +122,7 @@ export default function OrderTicket({
   const snapPrice = (p: number) => (priceRound > 0 ? Number((Math.round(p / priceRound) * priceRound).toFixed(10)) : p);
 
   useEffect(() => {
-    setSizeStr('');
+    setQtyStr('');
     setSizeTouched(false);
     setPending(false);
     // 三个价都清掉：换币种后留着上一个币的价格，点下去会被「价格偏离现价」拒掉
@@ -179,18 +187,21 @@ export default function OrderTicket({
     const margin = fmtUsd(avail * (p / 100));
     if (avail <= 0) return '可用余额是 0，先入金或者把别的仓平掉';
     if (r.size <= 0) {
-      return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）低于最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`;
+      return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）低于最低下单量 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`;
     }
-    return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）可开 ${r.size} 张，约 ${fmtUsd(r.usedMargin)} USDT 保证金`;
-  }, [pctPreview, avail, lev, sizeMin, baseCurrency]);
+    return `用 ${p}% 可用余额（${margin} USDT × ${lev}x）可开 ${coinsOf(r.size)} ${baseCurrency}（${r.size} 张），约 ${fmtUsd(r.usedMargin)} USDT 保证金`;
+  }, [pctPreview, avail, lev, sizeMin, baseCurrency, coinsOf]);
 
-  // 没自己改过张数，就让比例说了算（换价、换杠杆、换比例都跟着变）
+  // 没自己改过数量，就让比例说了算（换价、换杠杆、换比例都跟着变）
   useEffect(() => {
     if (sizeTouched) return;
-    setSizeStr(sizing.size > 0 ? String(sizing.size) : '');
-  }, [sizing.size, sizeTouched]);
+    setQtyStr(coinsToInput(contractsToCoins(sizing.size, mult), coinDecimals));
+  }, [sizing.size, sizeTouched, mult, coinDecimals]);
 
-  const size = Number(sizeStr) || 0;
+  /** 框里那个币数，和它实际能下出去多少张。中间差的是「按步进向下取整」那一下 */
+  const qtyCoins = Number(qtyStr) || 0;
+  const size = coinsToContracts(qtyCoins, mult, sizeStep);
+  const actualCoins = contractsToCoins(size, mult);
   const notional = size * mult * priceUsed;
   const margin = lev > 0 ? notional / lev : 0;
   const need = margin + notional * feeRate;
@@ -265,14 +276,22 @@ export default function OrderTicket({
     /**
      * 限价模式下限价必须是一个正数。
      *
-     * 这条要排在张数前面：比例算张数时除的就是这个价，价空着张数会是 0 或 1，
-     * 提示成「张数至少 1」会把人引到另一个框去改。
+     * 这条要排在数量前面：比例算张数时除的就是这个价，价空着数量会是 0 或 1，
+     * 提示成「至少 1 张」会把人引到另一个框去改。
      */
     if (priceMode === 'limit' && !(priceUsed > 0)) return '限价还没填：先填一个价格再下单';
-    if (!Number.isFinite(size) || size <= 0) return '张数不合法';
-    if (size < sizeMin) return `至少 ${sizeMin} 张（${qtyOf(sizeMin)} ${baseCurrency}）`;
-    if (sizeMax > 0 && size > sizeMax) return `张数最多 ${sizeMax}`;
-    if (!isOnSizeStep(size, sizeStep)) return `张数必须按 ${sizeStep} 张递增`;
+    // 乘数读不到就没法把币折成张，这时候下单只能是猜
+    if (!(mult > 0)) return '没读到这个合约的乘数，换算不了数量';
+    if (!(qtyCoins > 0)) return '数量不合法';
+    /**
+     * 折完不够一张。
+     *
+     * 框里写着的币数是合法的数，只是凑不满一手 —— 只说「不合法」人能对着一个
+     * 看着正常的数字琢磨半天。这里直接说清楚最低是多少币、折几张。
+     */
+    if (size <= 0) return `低于最低下单量 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`;
+    if (size < sizeMin) return `至少 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`;
+    if (sizeMax > 0 && size > sizeMax) return `最多 ${coinsOf(sizeMax)} ${baseCurrency}（${sizeMax} 张）`;
     if (stopNum > 0 && priceUsed > 0 && wrong.stop) {
       return side === 'long' ? '止损要在现价下方' : '止损要在现价上方';
     }
@@ -288,13 +307,14 @@ export default function OrderTicket({
   /** 比例算出来的张数被夹住时，把账写清楚：想要多少、能下多少、为什么 */
   const sizingNote = (() => {
     if (sizing.clamped === 'afford' && priceUsed > 0) {
-      return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降张数、提杠杆，或者换个小一点的合约。`;
+      return `可用 ${fmtUsd(avail)} USDT 按 ${lev}x 连最低下单量 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）都不够（每张要 ${fmtUsd(mult * priceUsed / Math.max(lev, 1) + mult * priceUsed * feeRate)} USDT 保证金 + 手续费）。先降数量、提杠杆，或者换个小一点的合约。`;
     }
     if (sizing.clamped === 'min') {
-      return `${posPct}% 的可用余额预算低于最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）；不会自动超出所选比例。`;
+      return `${posPct}% 的可用余额预算低于最低下单量 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）；不会自动超出所选比例。`;
     }
     if (sizing.clamped === 'max') {
-      return `按 ${posPct}% 能开 ${floorToSizeStep(sizing.raw, sizeStep)} 张，但合约上限是 ${sizeMax} 张，已经夹回去。`;
+      const fits = floorToSizeStep(sizing.raw, sizeStep);
+      return `按 ${posPct}% 能开 ${coinsOf(fits)} ${baseCurrency}（${fits} 张），但合约上限是 ${coinsOf(sizeMax)} ${baseCurrency}（${sizeMax} 张），已经夹回去。`;
     }
     return '';
   })();
@@ -332,7 +352,7 @@ export default function OrderTicket({
       onToast(
         'ok',
         `下单成功 #${r.order.id}`,
-        `${r.order.status} · 名义 ${fmtUsd(r.checked.notional)} USDT`
+        `${r.order.status} · ${fmtCoins(actualCoins, coinDecimals)} ${baseCurrency}（${size} 张） · 名义 ${fmtUsd(r.checked.notional)} USDT`
         + `${r.order.fillPrice ? ` · 成交价 ${r.order.fillPrice}` : ''}`
         + `${b?.status === 'attached' ? ' · 保护单已挂' : b?.status === 'partial' ? ' · 保护只挂上了一边' : b?.status === 'pending' ? ' · 成交后自动补挂保护' : ''}`,
       );
@@ -394,24 +414,34 @@ export default function OrderTicket({
 
         <div className="field">
           <label>
-            张数（{mult ? fmtUsd(mult, mult < 0.01 ? 4 : mult < 1 ? 2 : 0) : '—'} {baseCurrency}/张）
-            <span className="dim"> · 按 {posPct}% 可用余额算得 {sizing.size} 张</span>
+            数量（{baseCurrency}）
+            <span className="dim"> · 按 {posPct}% 可用余额算得 {sizing.size > 0 ? `${coinsOf(sizing.size)} ${baseCurrency}` : '—'}</span>
           </label>
           <div className="size-wrap">
             <input
               className="input"
-              inputMode={sizeStep < 1 ? 'decimal' : 'numeric'}
-              aria-label="下单张数"
-              placeholder={`最小 ${sizeMin}`}
+              inputMode="decimal"
+              aria-label="下单数量"
+              placeholder={`最小 ${coinsOf(sizeMin)}`}
               // 桌面端悬停时浏览器也会弹一句，和下面那张卡片说的是同一件事
-              title={`最低下单量 ${qtyOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`}
-              value={sizeStr}
+              title={`最低下单量 ${coinsOf(sizeMin)} ${baseCurrency}（${sizeMin} 张）`}
+              value={qtyStr}
               onChange={(e) => {
                 const cleaned = e.target.value.replace(/[^0-9.]/g, '');
                 const [whole = '', ...fraction] = cleaned.split('.');
-                setSizeStr(fraction.length > 0 ? `${whole}.${fraction.join('')}` : whole);
+                setQtyStr(fraction.length > 0 ? `${whole}.${fraction.join('')}` : whole);
                 setSizeTouched(true);
                 setPending(false);
+              }}
+              /**
+               * 失焦时把框里的数字吸附到真正会提交出去的那个币数。
+               *
+               * 打字的时候不吸附：边打边改，人连「0.0123」都打不完。但离开输入框之后，
+               * 框里留着的必须就是会被提交的那个数 —— 差的这一下在这里补。
+               * 不够一张时（size 为 0）不动它：一失焦就清空，人还得重打一遍。
+               */
+              onBlur={() => {
+                if (size > 0) setQtyStr(coinsToInput(actualCoins, coinDecimals));
               }}
             />
             {/**
@@ -423,7 +453,7 @@ export default function OrderTicket({
               * 手机键盘弹起来只占下半屏，写在上面的提示不会被挡住。
               */}
             <div className="size-tip">
-              最低下单量 <b>{qtyOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张）
+              最低下单量 <b>{coinsOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张）
               {priceUsed > 0 && mult > 0 && (
                 <>
                   {' · '}名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT
@@ -440,10 +470,22 @@ export default function OrderTicket({
            * 真正给的最低成交数量，以及它折成多少基础币。
            */}
           <div className="size-min-line">
-            最低下单量 <b>{qtyOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张 · 步进 {sizeStep}）
+            最低下单量 <b>{coinsOf(sizeMin)} {baseCurrency}</b>（{sizeMin} 张{mult > 0 ? ` · 步进 ${fmtCoins(coinStep, coinDecimals)} ${baseCurrency}` : ''}）
             {priceUsed > 0 && mult > 0 && <>（名义 {fmtUsd(sizeMin * mult * priceUsed)} USDT）</>}
-            {sizeMax > 0 && <span className="dim"> · 最多 {sizeMax} 张</span>}
+            {sizeMax > 0 && <span className="dim"> · 最多 {coinsOf(sizeMax)} {baseCurrency}（{sizeMax} 张）</span>}
           </div>
+          {/**
+           * 这一单实际会下出去多少。
+           *
+           * 框里填的是币数，交易所能吃的是「张 × 每张币数」的整数倍，两个数常常差一点点。
+           * 差的这点不藏起来：这里把真正提交的张数和它对应的币数并排写出来，
+           * 失焦时也把人填的数吸附到这一行上 —— 免得「看到的」和「下出去的」不是一回事。
+           */}
+          {size > 0 && (
+            <div className="size-actual">
+              实际下单 <b>{size} 张</b> = {fmtCoins(actualCoins, coinDecimals)} {baseCurrency}
+            </div>
+          )}
         </div>
 
         <div className="row4" style={{ marginBottom: 10 }}>
@@ -453,10 +495,10 @@ export default function OrderTicket({
               className="chip"
               style={posPct === p ? { background: 'var(--accent)', color: '#0b0e13', borderColor: 'var(--accent)' } : undefined}
               /**
-               * chip 上直接写「这一档能开多少张」。
+               * 悬停时把这一档能开多少写出来。
                *
                * 以前点了只有输入框里的数字变，而余额不够时那个数字是 0 ——
-               * 看着就像「点了没反应」。现在每一档都把它算出来的张数写在自己身上，
+               * 看着就像「点了没反应」。现在每一档都在悬停时把它算出来的币数写清楚，
                * 算不出一张的那几档直接置灰，省得人反复点。
                */
               title={chipTitle(p)}
@@ -554,7 +596,7 @@ export default function OrderTicket({
           <div className="pnl-at">
             <div className="pnl-at-head">
               <span>
-                {priceMode === 'limit' ? '限价' : '现价'} {fmtPrice(priceUsed, priceRound)} · {size} 张
+                {priceMode === 'limit' ? '限价' : '现价'} {fmtPrice(priceUsed, priceRound)} · {fmtCoins(actualCoins, coinDecimals)} {baseCurrency}（{size} 张）
               </span>
               <span className="dim">{lev}x</span>
             </div>
@@ -596,6 +638,7 @@ export default function OrderTicket({
 
         <dl className="summary">
           <dt>现价</dt><dd>{fmtPrice(last, priceRound)}</dd>
+          <dt>数量</dt><dd>{size > 0 ? `${fmtCoins(actualCoins, coinDecimals)} ${baseCurrency}（${size} 张）` : '—'}</dd>
           <dt>名义价值</dt><dd className={notional > 0 ? '' : 'dim'}>{notional > 0 ? fmtUsd(notional) : '—'} USDT</dd>
           <dt>占用保证金</dt><dd className={marginShort > 0 ? 'down' : ''}>{margin > 0 ? fmtUsd(margin) : '—'} USDT</dd>
           <dt>手续费</dt><dd className="dim">{notional > 0 ? fmtUsd(notional * feeRate) : '—'} USDT</dd>
@@ -646,7 +689,7 @@ export default function OrderTicket({
         ) : (
           <div className="confirm">
             <p>
-              确认 {side === 'long' ? '买入开多' : '卖出开空'} <b>{size}</b> 张 {contract?.name}，
+              确认 {side === 'long' ? '买入开多' : '卖出开空'} <b>{fmtCoins(actualCoins, coinDecimals)}</b> {baseCurrency}（{size} 张） {contract?.name}，
               {priceMode === 'limit' ? `限价 ${priceUsed}` : '市价'}，
               名义 <b>{fmtUsd(notional)}</b> USDT，{lev}x 杠杆，占用保证金 {fmtUsd(margin)} USDT。
               {env === 'testnet' ? '模拟盘，扣的是测试网假钱。' : '这是真实资金。'}
@@ -662,7 +705,7 @@ export default function OrderTicket({
             {marginShort > 0 && (
               <p className="warn">
                 保证金不够：连手续费要 {fmtUsd(need)} USDT，可用只有 {fmtUsd(avail)} USDT，差 {fmtUsd(marginShort)} USDT。
-                按同样的杠杆最多做 {sizing.affordable} 张，或者把杠杆调高。
+                按同样的杠杆最多做 {coinsOf(sizing.affordable)} {baseCurrency}（{sizing.affordable} 张），或者把杠杆调高。
               </p>
             )}
             <div className="acts">

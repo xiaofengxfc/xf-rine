@@ -810,6 +810,20 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: var(--text-2);
 }
 .size-min-line b { color: var(--text-1); font-weight: 600; }
+
+/*
+ * 「实际下单 N 张 = X 币」那一行。
+ *
+ * 框里填的是币数，交易所能吃的是「张 × 每张币数」的整数倍，两个数常常差一点点。
+ * 这一行把差额摊在明面上：张数是亮的（真正提交的就是它），币数跟着写。
+ */
+.size-actual {
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.size-actual b { color: var(--accent); font-weight: 600; }
 .size-tip {
   position: absolute;
   left: 0;

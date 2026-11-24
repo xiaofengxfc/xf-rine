@@ -6,7 +6,10 @@ import {
 import { fmtMoney, fmtPrice, fmtPct, fmtUsd, fmtTime } from '../lib/format.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
 import { multiplierOf, pnlFromCost, pnlOf } from '../lib/position.ts';
-import { floorToSizeStep, isOnSizeStep } from '../lib/sizing.ts';
+import { floorToSizeStep } from '../lib/sizing.ts';
+import {
+  coinDecimalsOf, coinStepOf, coinsToContracts, coinsToInput, contractsToCoins, fmtCoins,
+} from '../lib/units.ts';
 import {
   bracketOf as findBracket, dirLabel, protectionState, triggerKind, type Dir,
 } from '../lib/protective.ts';
@@ -45,6 +48,57 @@ function cleanDecimalInput(value: string): string {
   return point < 0 ? cleaned : cleaned.slice(0, point + 1) + cleaned.slice(point + 1).replace(/\./g, '');
 }
 
+/** 合约简称：BTC_USDT → BTC。写币数时要用它 */
+function baseOf(contract: string): string {
+  return contract.split('_')[0] || '币';
+}
+
+/**
+ * 一个合约的下单规矩：张那一侧的步进和上下限，加上折成币之后的小数位。
+ *
+ * 服务端和交易所的记账单位都是张，填进框里的是币 —— 规矩只有一套，
+ * 界面上要显示哪个单位，现折。
+ */
+interface SizeRules {
+  /** 张的步进 */
+  step: number;
+  /** 每张多少币 */
+  mult: number;
+  /** 币的小数位 */
+  decimals: number;
+  /** 币的步进 */
+  coinStep: number;
+  /** 张的最小下单量 */
+  min: number;
+  /** 张的最大下单量，0 表示没上限 */
+  max: number;
+}
+
+function sizeRulesOf(info: ContractInfo): SizeRules {
+  const step = info.sizeStep && info.sizeStep > 0 ? info.sizeStep : 1;
+  const mult = info.multiplier > 0 ? info.multiplier : 0;
+  return {
+    step,
+    mult,
+    decimals: coinDecimalsOf(mult, step),
+    coinStep: coinStepOf(mult, step),
+    min: info.sizeMin > 0 ? info.sizeMin : step,
+    max: info.sizeMax > 0 ? floorToSizeStep(info.sizeMax, step) : 0,
+  };
+}
+
+/** 张 → 币的显示串。乘数读不到时给「—」，让调用方去说读不到 */
+function coinsIn(rules: SizeRules, contracts: number): string {
+  return contracts > 0 && rules.mult > 0
+    ? fmtCoins(contractsToCoins(contracts, rules.mult), rules.decimals)
+    : '—';
+}
+
+/** 币 → 张：向下取整到步进，不够一张就是 0 */
+function contractsIn(rules: SizeRules, coins: number): number {
+  return coinsToContracts(coins, rules.mult, rules.step);
+}
+
 /** 平仓顺带撤掉的东西，写成一句能读的话 */
 function cleanupText(c: CanceledTrades | undefined): string {
   const parts: string[] = [];
@@ -63,25 +117,25 @@ export default function PositionsCard({
    * 在 BTC 的 0.1 底下显示 DOGE 的 0.15 会被写成 0.2 —— 一个不对的价。
    */
   const roundOf = (contract: string) => rounds?.get(contract) ?? priceRound;
+
+  /** 这一边的仓写成「币数（张数）」。乘数读不到就只说张，不编一个数 */
+  const sizeText = (p: Position): string => {
+    const mult = multiplierOf(p);
+    const size = Math.abs(p.size);
+    return mult > 0
+      ? `${fmtCoins(contractsToCoins(size, mult), 12)} ${baseOf(p.contract)}（${size} 张）`
+      : `${size} 张`;
+  };
   const [tab, setTab] = useState<'pos' | 'ord' | 'trig'>('pos');
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const [confirmReverse, setConfirmReverse] = useState<string | null>(null);
-  const [adding, setAdding] = useState<{ key: string; size: string; step: number } | null>(null);
+  const [adding, setAdding] = useState<{ key: string; qty: string; rules: SizeRules } | null>(null);
   const [edit, setEdit] = useState<BracketEdit | null>(null);
-  const [orderEdit, setOrderEdit] = useState<{ id: string; contract: string; maxSize: number; step: number; price: string; size: string } | null>(null);
+  const [orderEdit, setOrderEdit] = useState<{ id: string; contract: string; maxSize: number; rules: SizeRules; price: string; qty: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   async function contractInfo(contract: string): Promise<ContractInfo> {
     return jget<ContractInfo>('/api/contracts/' + encodeURIComponent(contract));
-  }
-
-  function sizeRules(info: ContractInfo) {
-    const step = info.sizeStep && info.sizeStep > 0 ? info.sizeStep : 1;
-    return {
-      step,
-      min: info.sizeMin > 0 ? info.sizeMin : step,
-      max: info.sizeMax > 0 ? floorToSizeStep(info.sizeMax, step) : 0,
-    };
   }
 
   // 仓没了就把对着它弹的确认收掉，别让人对着旧数字点确认
@@ -168,11 +222,12 @@ export default function PositionsCard({
     const k = keyOf(p.contract, p.direction);
     setBusy('info-add-' + k);
     try {
-      const rules = sizeRules(await contractInfo(p.contract));
+      const rules = sizeRulesOf(await contractInfo(p.contract));
+      // 默认给现有仓位的一半，折成币数填进框 —— 框里的单位是币，不是张
       let size = floorToSizeStep(Math.abs(p.size) / 2, rules.step);
       if (size < rules.min) size = rules.min;
       if (rules.max > 0 && size > rules.max) size = rules.max;
-      setAdding({ key: k, size: String(size), step: rules.step });
+      setAdding({ key: k, qty: coinsToInput(contractsToCoins(size, rules.mult), rules.decimals), rules });
     } catch (e) {
       onToast('err', '读取合约参数失败', (e as Error).message);
     } finally { setBusy(null); }
@@ -180,14 +235,23 @@ export default function PositionsCard({
 
   async function addPosition(p: Position) {
     if (!token || !adding) return;
-    const qty = Number(adding.size);
+    const coins = Number(adding.qty) || 0;
     const k = keyOf(p.contract, p.direction);
     setBusy('add-' + k);
     try {
-      const rules = sizeRules(await contractInfo(p.contract));
-      if (!Number.isFinite(qty) || qty < rules.min || (rules.max > 0 && qty > rules.max)
-        || !isOnSizeStep(qty, rules.step)) {
-        onToast('err', '张数不对', `张数需在 ${rules.min}${rules.max > 0 ? ` 至 ${rules.max}` : ''} 之间，并按 ${rules.step} 张递增`);
+      const rules = sizeRulesOf(await contractInfo(p.contract));
+      // 框里填币，发出去的是张。不够一张要直说，别拿 0 去发单
+      const qty = contractsIn(rules, coins);
+      const base = baseOf(p.contract);
+      if (!(coins > 0) || qty <= 0) {
+        onToast('err', '数量不对', `低于最低下单量 ${coinsIn(rules, rules.min)} ${base}（${rules.min} 张）`);
+        return;
+      }
+      if (qty < rules.min || (rules.max > 0 && qty > rules.max)) {
+        onToast(
+          'err', '数量不对',
+          `数量需在 ${coinsIn(rules, rules.min)}${rules.max > 0 ? ` 至 ${coinsIn(rules, rules.max)}` : ''} ${base} 之间（${rules.min}${rules.max > 0 ? ` 至 ${rules.max}` : ''} 张）`,
+        );
         return;
       }
       const r = await jsend<{ order: { id: string; status: string; fillPrice: number } }>(
@@ -195,7 +259,11 @@ export default function PositionsCard({
         { contract: p.contract, direction: p.direction, size: qty },
         token,
       );
-      onToast('ok', '加仓 ' + qty + ' 张已提交', p.contract + ' ' + dirLabel(p.direction) + '单 · ' + r.order.status);
+      onToast(
+        'ok',
+        '加仓 ' + coinsIn(rules, qty) + ' ' + base + ' 已提交',
+        p.contract + ' ' + dirLabel(p.direction) + '单 · ' + qty + ' 张 · ' + r.order.status,
+      );
       setAdding(null);
       onRefresh();
     } catch (e) {
@@ -214,10 +282,15 @@ export default function PositionsCard({
         token,
       );
       const cleaned = cleanupText(r.canceled);
+      const mult = multiplierOf(p);
+      // 结果的张数折成币写出来；乘数读不到就只说张，不编一个数
+      const held = mult > 0
+        ? `${fmtCoins(contractsToCoins(r.size, mult), 12)} ${baseOf(p.contract)}（${r.size} 张）`
+        : `${r.size} 张`;
       onToast(
         'ok',
         '已反手',
-        '平掉' + dirLabel(p.direction) + '单，现在持有 ' + r.size + ' 张' + dirLabel(r.direction) + '单'
+        '平掉' + dirLabel(p.direction) + '单，现在持有 ' + held + dirLabel(r.direction) + '单'
         + (cleaned ? ' · ' + cleaned : ''),
       );
       setConfirmReverse(null);
@@ -264,15 +337,21 @@ export default function PositionsCard({
   async function saveOrderEdit() {
     if (!token || !orderEdit) return;
     const price = Number(orderEdit.price) || 0;
-    const size = Number(orderEdit.size);
+    const coins = Number(orderEdit.qty) || 0;
     if (!(price > 0)) { onToast('err', '价格不对', '填一个大于 0 的限价'); return; }
     setBusy('amend-' + orderEdit.id);
     try {
+      // 合约参数现取一次：框里填的币数要按最新的步进折回张，差一位交易所就不收
+      const rules = sizeRulesOf(await contractInfo(orderEdit.contract));
       const left = orderEdit.maxSize;
-      const rules = sizeRules(await contractInfo(orderEdit.contract));
-      if (!Number.isFinite(size) || size < rules.min || size > left
-        || (rules.max > 0 && size > rules.max) || !isOnSizeStep(size, rules.step)) {
-        onToast('err', '张数不对', `张数需在 ${rules.min} 至 ${Math.min(left, rules.max || left)} 之间，并按 ${rules.step} 张递增`);
+      const size = contractsIn(rules, coins);
+      const ceiling = Math.min(left, rules.max || left);
+      if (!(coins > 0) || size <= 0 || size < rules.min || size > ceiling) {
+        const base = baseOf(orderEdit.contract);
+        onToast(
+          'err', '数量不对',
+          `数量需在 ${coinsIn(rules, rules.min)} 至 ${coinsIn(rules, ceiling)} ${base} 之间（${size <= 0 ? '不够一张' : `按 ${coinsIn(rules, rules.step)} ${base} 递增`}）`,
+        );
         return;
       }
       const r = await jsend<{ replaced: { oldId: string; id: string; price: number; size: number; status: string } }>(
@@ -280,7 +359,12 @@ export default function PositionsCard({
         { price, size },
         token,
       );
-      onToast('ok', '改单完成，新委托号 #' + r.replaced.id, '旧单已撤 · ' + Math.abs(r.replaced.size) + ' 张 @' + r.replaced.price);
+      onToast(
+        'ok',
+        '改单完成，新委托号 #' + r.replaced.id,
+        '旧单已撤 · ' + coinsIn(rules, Math.abs(r.replaced.size)) + ' ' + baseOf(orderEdit.contract)
+        + '（' + Math.abs(r.replaced.size) + ' 张） @' + r.replaced.price,
+      );
       setOrderEdit(null);
       onRefresh();
     } catch (e) {
@@ -291,14 +375,16 @@ export default function PositionsCard({
   async function startOrderEdit(o: OpenOrder) {
     setBusy('info-amend-' + o.id);
     try {
-      const info = await contractInfo(o.contract);
+      const rules = sizeRulesOf(await contractInfo(o.contract));
+      const left = Math.abs(o.left ?? o.size);
       setOrderEdit({
         id: o.id,
         contract: o.contract,
-        maxSize: Math.abs(o.left ?? o.size),
-        step: info.sizeStep && info.sizeStep > 0 ? info.sizeStep : 1,
+        maxSize: left,
+        rules,
         price: o.price > 0 ? String(o.price) : '',
-        size: String(Math.abs(o.left ?? o.size)),
+        // 框里默认填剩余量，单位是币
+        qty: coinsToInput(contractsToCoins(left, rules.mult), rules.decimals),
       });
     } catch (e) {
       onToast('err', '读取合约参数失败', (e as Error).message);
@@ -488,7 +574,7 @@ export default function PositionsCard({
                   ) : confirmReverse === k ? (
                     <div className="confirm">
                       <p>
-                        市价平掉 {Math.abs(p.size)} 张{isLong ? '多' : '空'}单，马上反向开 {Math.abs(p.size)} 张{isLong ? '空' : '多'}单。
+                        市价平掉 {sizeText(p)}{isLong ? '多' : '空'}单，马上反向开 {sizeText(p)}{isLong ? '空' : '多'}单。
                         分两步走：平仓没成交会停手，不会多开一边。
                       </p>
                       <div className="acts">
@@ -514,13 +600,14 @@ export default function PositionsCard({
                       {adding && adding.key === k ? (
                         <div className="pos-acts two">
                           <div className="field">
-                            <label>张数（步进 {adding.step}）</label>
+                            <label>数量（{baseOf(p.contract)}）</label>
                             <input
                               className="input sm"
                               inputMode="decimal"
-                              placeholder="张数"
-                              value={adding.size}
-                              onChange={(ev) => setAdding({ ...adding, size: cleanDecimalInput(ev.target.value) })}
+                              placeholder={`最小 ${coinsIn(adding.rules, adding.rules.min)}`}
+                              title={`按 ${fmtCoins(adding.rules.coinStep, adding.rules.decimals)} ${baseOf(p.contract)} 递增；最低 ${coinsIn(adding.rules, adding.rules.min)}`}
+                              value={adding.qty}
+                              onChange={(ev) => setAdding({ ...adding, qty: cleanDecimalInput(ev.target.value) })}
                             />
                           </div>
                           <button className={'btn ' + (isLong ? 'long' : 'short')} disabled={!armed || busy === 'add-' + k} onClick={() => addPosition(p)}>
@@ -531,13 +618,13 @@ export default function PositionsCard({
                         <div className="pos-acts">
                           <button
                             className="btn ghost"
-                            title={armed ? '按市价在这一边加张数' : '先解锁交易'}
+                            title={armed ? '按市价在这一边加数量' : '先解锁交易'}
                             disabled={!armed || busy === 'info-add-' + k}
                             onClick={() => void startAddPosition(p)}
                           >
                             {busy === 'info-add-' + k ? '读取参数…' : '加仓'}
                           </button>
-                          <button className="btn ghost" disabled={!armed} title={armed ? '平掉这一边，再反向开同样的张数' : '先解锁交易'} onClick={() => setConfirmReverse(k)}>
+                          <button className="btn ghost" disabled={!armed} title={armed ? '平掉这一边，再反向开同样的数量' : '先解锁交易'} onClick={() => setConfirmReverse(k)}>
                             反手
                           </button>
                           <button className="btn danger" disabled={!armed} onClick={() => setConfirmClose(k)}>平仓</button>
@@ -568,12 +655,13 @@ export default function PositionsCard({
                       />
                     </div>
                     <div className="field">
-                      <label>剩余张数（≤ {Math.abs(o.left ?? o.size)}，步进 {orderEdit.step}）</label>
+                      <label>剩余数量（≤ {coinsIn(orderEdit.rules, orderEdit.maxSize)} {baseOf(o.contract)}）</label>
                       <input
                         className="input sm"
                         inputMode="decimal"
-                        value={orderEdit.size}
-                        onChange={(ev) => setOrderEdit({ ...orderEdit, size: cleanDecimalInput(ev.target.value) })}
+                        title={`按 ${fmtCoins(orderEdit.rules.coinStep, orderEdit.rules.decimals)} ${baseOf(o.contract)} 递增`}
+                        value={orderEdit.qty}
+                        onChange={(ev) => setOrderEdit({ ...orderEdit, qty: cleanDecimalInput(ev.target.value) })}
                       />
                     </div>
                   </div>
@@ -603,7 +691,7 @@ export default function PositionsCard({
                   <span style={{ display: 'flex', gap: 2 }}>
                     <button
                       className="x edit"
-                      title={o.left === 0 ? '没有剩余张数，不能改单' : '改价 / 改量'}
+                      title={o.left === 0 ? '没有剩余数量，不能改单' : '改价 / 改量'}
                       disabled={!armed || o.left === 0 || busy === 'info-amend-' + o.id}
                       onClick={() => void startOrderEdit(o)}
                     >
