@@ -31,11 +31,20 @@ export class SidecarError extends Error {
   code: string;
   /** 没起来 / 正在冷却 —— 界面据此显示「引擎未就绪」而不是「算错了」 */
   unavailable: boolean;
-  constructor(code: string, message: string, unavailable = false) {
+  /**
+   * 这次该回给调用方什么 HTTP 状态。
+   *
+   * 以前一律 500：引擎说「找不到数据文件」「缺少 dir 或 symbol」这种
+   * **用户参数写错**，也被报成服务端故障 —— 页面弹红字，日志看着像引擎崩了，
+   * 而真正要做的是换个品种或者补个参数。
+   */
+  httpStatus: number;
+  constructor(code: string, message: string, unavailable = false, httpStatus = 500) {
     super(message);
     this.name = 'SidecarError';
     this.code = code;
     this.unavailable = unavailable;
+    this.httpStatus = httpStatus;
   }
 }
 
@@ -275,7 +284,13 @@ async function call<T>(path: string, params: Record<string, string | number | bo
     try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text.slice(0, 400) }; }
     if (!res.ok) {
       const j = json as { error?: string; type?: string };
-      throw new SidecarError(j.type || 'HTTP_' + res.status, j.error || '关键位引擎返回 ' + res.status);
+      const message = j.error || '关键位引擎返回 ' + res.status;
+      /**
+       * 引擎自己报的是 4xx（参数不对、品种不存在），就原样带回去。
+       * 只有它 5xx 才是「引擎算挂了」——那才值得当服务端故障。
+       */
+      const forward = res.status >= 400 && res.status < 500 ? res.status : 500;
+      throw new SidecarError(j.type || 'HTTP_' + res.status, message, false, forward);
     }
     return json as T;
   } catch (e) {

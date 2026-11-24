@@ -85,11 +85,29 @@ export function mountResearch(router: Router, deps: ResearchDeps): void {
     res.json(out);
   }));
 
+  /**
+   * 扫描只认数据集里真的存在的周期代号。
+   *
+   * 以前任何字符串都往下传（`?tf=XYZ`）→ 引擎匹配不到文件 → 返回 total: 0 的空扫描。
+   * 页面看到的是「扫了 0 个品种」，而不是「这个周期不存在」——
+   * 两种情形在界面上长得一样，但要做的事完全不同。
+   */
+  const SCAN_TFS = ['M1', 'M5', 'M15', 'M30', 'H1', 'H2', 'H4', 'H8', 'D1', 'W1'];
+
   /** 全市场扫描 */
   router.get('/research/scan', deps.wrap(async (req, res) => {
     const dir = deps.getDataDir();
+    const tf = String(req.query.tf ?? 'D1').trim().toUpperCase();
+    if (!SCAN_TFS.includes(tf)) {
+      throw new SidecarError(
+        'BAD_TF',
+        '周期「' + tf + '」不认识。可用的是 ' + SCAN_TFS.join(' / '),
+        false,
+        400,
+      );
+    }
     const out: ResearchScan = await sr.scan(dir, {
-      tf: String(req.query.tf ?? 'D1').trim().toUpperCase(),
+      tf,
       window: num(req.query.window, 40, 10, 500),
       n_zones: num(req.query.n_zones, 3, 1, 8),
       direction: direction(req.query.direction),

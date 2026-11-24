@@ -246,7 +246,8 @@ function fail(res: Response, err: unknown): void {
    * 显示「关键位引擎未就绪」并给出原因，而不是弹一条红色的 500。
    */
   if (err instanceof SidecarError) {
-    const status = err.unavailable ? 503 : 500;
+    // 参数类错误按它自己的状态回（4xx），别把「品种写错」报成「服务端崩了」
+    const status = err.unavailable ? 503 : (err.httpStatus ?? 500);
     res.status(status).json({ error: err.code, detail: err.message, engine: true });
     return;
   }

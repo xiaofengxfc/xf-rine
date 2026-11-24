@@ -214,6 +214,23 @@ setTimeout(() => {
 }, 6000).unref();
 setInterval(() => { void refreshProxy(); }, 60_000).unref();
 
+/**
+ * /api 下没匹配到的路径回 JSON，不要落到 Express 默认的 HTML 错误页。
+ *
+ * 必须放在**所有** /api 路由之后：放在 `app.use('/api', router)` 后面就错了 ——
+ * /api/health、/api/update/* 这些是挂在 app 上的，会被这条中间件提前吞掉，
+ * 健康检查直接 404（我踩过这一次）。
+ *
+ * 为什么要它：页面所有请求都按 JSON 解析，拿到一段 HTML 时报的是
+ * 「Unexpected token <」，和真正的原因（接口名写错了）毫无关系。
+ */
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'NOT_FOUND',
+    detail: '没有这个接口：' + req.method + ' ' + req.originalUrl.split('?')[0],
+  });
+});
+
 const server = createServer(app);
 
 // WebSocket 也过同一道口令。浏览器升级请求带不了自定义头，所以口令走查询参数。
