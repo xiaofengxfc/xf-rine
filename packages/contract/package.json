@@ -1,0 +1,13 @@
+{
+  "name": "@xfrine/contract",
+  "version": "0.0.0",
+  "private": true,
+  "description": "web 与 server 共用的接口形状（只有类型，没有运行时代码）",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    }
+  }
+}

@@ -9,6 +9,9 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
+  "paths": {
+    "@xfrine/contract": ["../packages/contract/src/index.ts"]
+  },
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "types": [

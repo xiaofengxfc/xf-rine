@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import type { CandlesResponse, ContractInfo, Ticker } from '@xfrine/contract';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -426,7 +427,11 @@ router.get('/contracts/:name', wrap(async (req, res) => {
     exchange().publicContract(name),
     tradableNames(),
   ]);
-  res.json({
+  /**
+   * 按 @xfrine/contract 的 ContractInfo 写，而不是随手 res.json 一个字面量：
+   * 字段改名、加字段忘了同步页面时，tsc 在这里就报，不用等到页面读到 undefined。
+   */
+  const body: ContractInfo = {
     // 当前环境（尤其模拟盘）能不能交易它
     tradable: tradable === null ? true : tradable.has(c.name),
     name: c.name,
@@ -446,7 +451,8 @@ router.get('/contracts/:name', wrap(async (req, res) => {
     makerFee: Number(c.maker_fee_rate),
     orderPriceDeviate: Number(c.order_price_deviate),
     status: c.status,
-  });
+  };
+  res.json(body);
 }));
 
 type GateCandle = XCandle;
@@ -704,7 +710,7 @@ router.get('/candles', wrap(async (req, res) => {
   // 这一页给出去之后，顺手把再往前的一页取回来：下一步多半就是往那边拖
   if (page.bars.length > 0 && !page.exhausted) warmOlder(contract, interval, limit, page.bars[0]!.time);
   // exhausted 是「交易所真没了」，前端只认它；hasMore 留给老前端兜底
-  res.json({
+  const body: CandlesResponse = {
     contract,
     interval,
     bars: page.bars,
@@ -712,7 +718,8 @@ router.get('/candles', wrap(async (req, res) => {
     exhausted: page.exhausted,
     // 这段历史中间有洞（上游少给）。前端的自愈和体检脚本按它判断，不影响正常画图
     gap: page.gap === true,
-  });
+  };
+  res.json(body);
 }));
 
 // ---------- 档位 ----------
@@ -1178,9 +1185,17 @@ async function tradableNames(
   }
 }
 
-interface TickerRow {
-  contract: string; last: number; mark: number; change24h: number; volume24hUsd: number;
-  fundingRate: number; multiplier: number; openInterest: number; priceRound: number; tradable: boolean;
+/**
+ * 服务端手里这一行。
+ *
+ * 在契约的 Ticker 之上把乘数、未平仓、最小变动价这几个定死 —— 内部算账时它们必须存在，
+ * 而页面上读的是可选字段。extends 而不是再抄一份：契约加字段，这里跟着就要求填。
+ */
+interface TickerRow extends Ticker {
+  multiplier: number;
+  openInterest: number;
+  priceRound: number;
+  tradable: boolean;
 }
 
 /** 全部行情也是一大坨，拉一次十几秒。缓存起来，页面每 12 秒问一次就直接给上次的，后台换新的 */
@@ -1218,9 +1233,10 @@ function refreshTickers(): Promise<void> {
       at: Date.now(),
       exchange: selectedExchange,
       env: selectedEnv,
+      // 按契约的 Ticker 写：页面读得到、也算得出的字段都在这里，别两处各记一份
       rows: list
         .filter((t) => Number(t.last) > 0)
-        .map((t) => ({
+        .map((t): TickerRow => ({
           contract: t.contract,
           last: Number(t.last),
           mark: Number(t.mark_price),

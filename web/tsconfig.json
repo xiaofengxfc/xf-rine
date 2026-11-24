@@ -9,6 +9,9 @@
     ],
     "module": "ESNext",
     "skipLibCheck": true,
+  "paths": {
+    "@xfrine/contract": ["../packages/contract/src/index.ts"]
+  },
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
