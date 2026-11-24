@@ -995,24 +995,59 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     if (target > 0) jobs.push({ kind: 'target', price: target, rule: dir === 'long' ? 1 : 2 });
 
     const created: { kind: string; id: string; triggerPrice: number }[] = [];
-    for (const job of jobs) {
+    /**
+     * 能合并的交易所（Bitget）一张单挂两边。
+     *
+     * 不能合并的（Gate）仍然是两次独立下单 —— 那边一张触发单只有一个价。
+     * 分开下两次在 Bitget 上会把前一张覆盖掉：实测列表里只剩止盈，
+     * stopLoss 读回来是空串，页面显示「止损未设」。
+     */
+    const adapter = exchange();
+    if (adapter.combinedTriggers && jobs.length === 2) {
+      const [first, second] = jobs as [typeof jobs[0], typeof jobs[0]];
       try {
-        const r = await exchange().placeTrigger({
+        const r = await adapter.placeTrigger({
           initial: {
-            contract,
-            size: 0,
-            price: '0',
-            tif: 'ioc',
-            reduce_only: true,
-            close: false,
-            // auto_size 指明平哪一边，单仓和双向持仓都吃这套；isclose 在双向模式下有歧义
+            contract, size: 0, price: '0', tif: 'ioc', reduce_only: true, close: false,
             auto_size: dir === 'long' ? 'close_long' : 'close_short',
           },
-          trigger: { strategy: 0, price_type: 0, price: String(job.price), rule: job.rule, expiration: PROTECT_EXPIRATION_SEC },
+          trigger: {
+            strategy: 0, price_type: 0, price: String(first.price), rule: first.rule,
+            expiration: PROTECT_EXPIRATION_SEC,
+          },
+          companion: { price: String(second.price), rule: second.rule },
         });
-        created.push({ kind: job.kind, id: String(r.id), triggerPrice: job.price });
+        /**
+         * 交易所只回一个策略单号，我们这边按「一条一张」建模，所以拆成两条。
+         * 号码沿用 adapter 的前缀格式（stop: / target:），这样创建、列表、撤单
+         * 三处用的是同一个号 —— 以前这三处格式不一致，页面撤不到自己刚挂的单。
+         */
+        const base = String(r.cancel_id ?? r.id);
+        created.push({ kind: first.kind, id: `${first.kind}:${base}`, triggerPrice: first.price });
+        created.push({ kind: second.kind, id: `${second.kind}:${base}`, triggerPrice: second.price });
       } catch (e) {
-        errors.push(`${job.kind}: ${e instanceof GateError ? `${e.label} ${e.detail}` : String(e)}`);
+        errors.push(`${first.kind}/${second.kind}: ${e instanceof GateError ? `${e.label} ${e.detail}` : String(e)}`);
+      }
+    } else {
+      for (const job of jobs) {
+        try {
+          const r = await adapter.placeTrigger({
+            initial: {
+              contract,
+              size: 0,
+              price: '0',
+              tif: 'ioc',
+              reduce_only: true,
+              close: false,
+              // auto_size 指明平哪一边，单仓和双向持仓都吃这套；isclose 在双向模式下有歧义
+              auto_size: dir === 'long' ? 'close_long' : 'close_short',
+            },
+            trigger: { strategy: 0, price_type: 0, price: String(job.price), rule: job.rule, expiration: PROTECT_EXPIRATION_SEC },
+          });
+          created.push({ kind: job.kind, id: String(r.id), triggerPrice: job.price });
+        } catch (e) {
+          errors.push(`${job.kind}: ${e instanceof GateError ? `${e.label} ${e.detail}` : String(e)}`);
+        }
       }
     }
 

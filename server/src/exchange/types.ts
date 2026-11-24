@@ -181,8 +181,17 @@ export interface XOrderSpec {
   auto_size?: 'close_long' | 'close_short';
 }
 
-/** 挂一张触发单（止损 / 止盈） */
+/**
+ * 挂一张触发单（止损 / 止盈）。
+ *
+ * companion：同一张单里顺手带的另一边。
+ * 有些交易所（Bitget 的 tpsl 策略单）一张单就能同时挂止损和止盈，
+ * 分开下两次的话后一次会把前一次那个槽位覆盖掉 —— 实测只留下止盈，止损变空串。
+ * 只在这种「能合并」的交易所上用；Gate 那条路仍然是两次独立下单。
+ */
 export interface XTriggerSpec {
+  /** 另一边的价格；只有 combinedTriggers 的交易所会用到 */
+  companion?: { price: string; rule: number };
   initial: {
     contract: string;
     size: number;
@@ -247,6 +256,13 @@ export interface Exchange {
   cancelOrder(id: string): Promise<void>;
   triggers(): Promise<XTrigger[]>;
   placeTrigger(spec: XTriggerSpec): Promise<XTrigger>;
+  /**
+   * 一张单能不能同时挂止损和止盈。
+   *
+   * 能的话，调用方把两边合成一次 placeTrigger（带 companion），
+   * 而不是下两次 —— 下两次会被交易所覆盖掉一边。
+   */
+  readonly combinedTriggers?: boolean;
   cancelTrigger(id: string): Promise<void>;
   /** 设杠杆，顺手把保证金模式定下来（模式只能从这个口子设） */
   setLeverage(name: string, opts: { lev: number; cross: boolean }): Promise<{

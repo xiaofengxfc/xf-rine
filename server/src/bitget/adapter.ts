@@ -315,6 +315,8 @@ function stateOf(raw: RawOrder): string {
 
 export class BitgetExchange implements Exchange {
   readonly id = 'bitget' as const;
+  /** 一张 tpsl 策略单能同时挂止损和止盈（见 placeTrigger 里的说明） */
+  readonly combinedTriggers = true;
   readonly label = 'Bitget';
   /** Bitget 没有 8h / 7d / 10s，页面只列这些都有的那几个 */
   readonly intervals = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
@@ -831,6 +833,20 @@ export class BitgetExchange implements Exchange {
     const price = Number(spec.trigger.price);
     if (!(price > 0)) throw new GateError(400, 'BAD_INPUT', '触发价不合法', 'Bitget');
 
+    /**
+     * 一张 tpsl 策略单里同时放止损和止盈。
+     *
+     * 实测踩到的 bug：分开下两次，第二次会把第一次那张单覆盖掉 ——
+     * 列表里只剩止盈，stopLoss 读回来是空串，页面上「止损未设」，
+     * 而用户明明刚挂了。策略单本来就是「一边平仓策略带两个价」，就按它的语义来。
+     */
+    const companion = spec.companion;
+    const companionIsLoss = companion
+      ? (dir === 'long') === (Number(companion.rule) === 2)
+      : false;
+    const lossPrice = isLoss ? price : companionIsLoss ? Number(companion!.price) : 0;
+    const profitPrice = !isLoss ? price : companion && !companionIsLoss ? Number(companion.price) : 0;
+
     const body: Record<string, unknown> = {
       symbol: sym,
       category: PRODUCT,
@@ -840,9 +856,12 @@ export class BitgetExchange implements Exchange {
       reduceOnly: 'yes',
       marginMode: await this.marginModeFor(name, await this.multiplierOf(name)),
       ...(posMode === 'hedge_mode' ? { posSide: dir } : {}),
-      ...(isLoss
-        ? { stopLoss: fixed(price, pricePlace), slTriggerBy: 'market', slOrderType: 'market' }
-        : { takeProfit: fixed(price, pricePlace), tpTriggerBy: 'market', tpOrderType: 'market' }),
+      ...(lossPrice > 0
+        ? { stopLoss: fixed(lossPrice, pricePlace), slTriggerBy: 'market', slOrderType: 'market' }
+        : {}),
+      ...(profitPrice > 0
+        ? { takeProfit: fixed(profitPrice, pricePlace), tpTriggerBy: 'market', tpOrderType: 'market' }
+        : {}),
     };
 
     const data = await bgPrivate<{ orderId?: string }>(
@@ -850,8 +869,17 @@ export class BitgetExchange implements Exchange {
     );
     const id = String(data?.orderId ?? '');
     if (!id) throw new GateError(502, 'BAD_RESPONSE', 'Bitget 没有回止盈止损单号', 'Bitget');
+    /**
+     * 单号必须带上这一条是止损还是止盈，和读取侧同一个格式（见 mapBitgetStrategyTriggers）。
+     *
+     * Bitget 的一张「策略单」可以同时挂止损和止盈，读回来是一条记录里两个字段；
+     * 我们这边按「一条触发单一张」建模，所以拆成 `stop:单号` / `target:单号`。
+     *
+     * 实测踩到过：这里回裸单号、读取侧回带前缀的号，两个 id 对不上 ——
+     * 页面拿着创建时那个号去撤单，撤不到；而且止损止盈会显示成同一条。
+     */
     return {
-      id,
+      id: (isLoss ? 'stop:' : 'target:') + id,
       cancel_id: id,
       initial: { ...spec.initial },
       trigger: { ...spec.trigger, price: String(price) },
@@ -861,8 +889,15 @@ export class BitgetExchange implements Exchange {
 
   async cancelTrigger(id: string): Promise<void> {
     this.requireKeys();
+    /**
+     * 我们这边的 id 带 `stop:` / `target:` 前缀（见 mapBitgetStrategyTriggers），
+     * 因为 Bitget 会把止损止盈合在一张策略单里，而页面是按「一条一张」用的。
+     * 但交易所撤单只认裸单号 —— 直接前缀发过去会被回 40017
+     * 「Parameter verification failed orderId」，看着像参数校验失败，其实是格式不对。
+     */
+    const orderId = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
     await bgPrivate('POST', '/api/v3/trade/cancel-strategy-order', {}, {
-      orderId: id,
+      orderId,
     });
   }
 
