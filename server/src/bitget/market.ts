@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import { WebSocket as UndiciWS } from 'undici';
 import { wsDispatcherFor, wsRouteOrder } from '../net.js';
 import { isStale, routeOnTrouble, type NetRoute } from '../wsRoute.js';
-import { instrumentField, instrumentFromSymbol } from '@xfrine/instrument';
+import { instrumentField, instrumentFromSymbol, parseInstrument } from '@xfrine/instrument';
 
 /** 双写：老的 contract 照发，新的 instrument 带上交易所和市场（见 gate/market.ts 同一处说明） */
 const instrumentOf = (symbol: string): string | undefined =>
@@ -137,9 +137,16 @@ export class BitgetMarketHub {
   private onClientMessage(client: Client, rawMsg: string): void {
     let msg: any;
     try { msg = JSON.parse(rawMsg); } catch { return; }
-    if (msg?.type !== 'subscribe' || typeof msg.contract !== 'string') return;
+    /**
+     * 订阅两种写法都认，和 gate/market.ts 同一套规则：
+     * 带 instrument 就用它的符号，只带 contract 的老客户端照旧。
+     * 身份写错或属于别家，退回 contract，不把整条订阅拒掉。
+     */
+    const instrumentSymbol = typeof msg?.instrument === 'string' ? parseInstrument(msg.instrument) : null;
+    const subscribed = instrumentSymbol && instrumentSymbol.venue === 'bitget' ? instrumentSymbol.symbol : '';
+    if (msg?.type !== 'subscribe' || (!subscribed && typeof msg.contract !== 'string')) return;
     // 合约名只挡控制字符和空白；长度按交易所上限截
-    const contract = String(msg.contract).replace(/[\u0000-\u001f\u007f\s]/g, '').slice(0, 40);
+    const contract = String(subscribed || msg.contract).replace(/[\u0000-\u001f\u007f\s]/g, '').slice(0, 40);
     const interval = typeof msg.interval === 'string' && CHANNEL_TF[msg.interval] ? msg.interval : '1m';
     const instId = symbolOf(contract);
     // 单连接只保持一组订阅，切合约时先退旧的
