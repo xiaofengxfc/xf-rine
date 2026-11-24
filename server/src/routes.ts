@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import type { CandlesResponse, ContractInfo, Ticker } from '@xfrine/contract';
+import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -852,7 +852,7 @@ router.get('/levels', wrap(async (req, res) => {
       atr: r.engine.atr, live: r.current_price,
     });
     const zones = set.current;
-    res.json({
+    const body: LevelsResponse = {
       contract: r.symbol,
       interval: r.tf,
       source: 'local',
@@ -869,7 +869,8 @@ router.get('/levels', wrap(async (req, res) => {
       summary: r.summary,
       engine: r.engine,
       mtf_zones: r.mtf_zones,
-    });
+    };
+    res.json(body);
     return;
   }
 
@@ -892,7 +893,7 @@ router.get('/levels', wrap(async (req, res) => {
     atr: r.engine.atr, live: live || r.current_price,
   });
   const zones = set.current;
-  res.json({
+  const body: LevelsResponse = {
     contract,
     interval,
     source: 'gate',
@@ -907,7 +908,8 @@ router.get('/levels', wrap(async (req, res) => {
     summary: r.summary,
     engine: r.engine,
     mtf_zones: r.mtf_zones,
-  });
+  };
+  res.json(body);
 }));
 
 

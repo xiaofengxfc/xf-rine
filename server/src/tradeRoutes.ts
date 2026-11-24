@@ -5,7 +5,19 @@ import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
 import type { XContract, XPosition, XOrder, XTrigger, XOrderSpec } from './exchange/types.js';
 import { isSizeOnStep } from './exchange/size.js';
-import type { Direction } from './sr/types.js';
+import {
+  bodyOf, flag, numberOr, oneOf, oneOfOr, optionalNumber, requiredNumber, requiredText,
+} from './http/params.js';
+import type { Account, OpenOrder, Position, PriceOrder, PrivateState } from '@xfrine/contract';
+
+/**
+ * 交易这一侧只有两边。
+ *
+ * 以前这里借的是关键位模块的 Direction，它多一个 'both' —— 那是「两边都算」的
+ * 分析语义，跟下单无关。借用它会让「这个方向上有仓吗」这类判断看上去可以传 'both'，
+ * 而代码里其实永远不会，编译器也就不再帮我们排除它。
+ */
+type Direction = 'long' | 'short';
 
 interface TradeRouteDeps {
   wrap: (fn: (req: Request, res: Response) => Promise<void>) => (req: Request, res: Response) => void;
@@ -82,7 +94,8 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
 
   type GatePosition = XPosition;
 
-  async function readAccount() {
+  /** 按契约的 Account 写：字段对不上时 tsc 在这里报，别等页面读到 undefined */
+  async function readAccount(): Promise<Account> {
     const a = await exchange().account();
     return {
       total: a.total,
@@ -150,7 +163,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
    * 只靠每次轮询带回来的那个数，价一动它就已经旧了，而且多空两边看不到同一个口径。
    * 这个式子和交易所的 unrealised_pnl 完全一致（模拟盘上多空各 1 张实测过），所以两边不会打架。
    */
-  async function readPositions() {
+  async function readPositions(): Promise<Position[]> {
     const list = await exchange().positions();
     /**
      * 按张数过滤，必须转成数字再比。
@@ -203,9 +216,9 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     return n;
   }
 
-  async function readOpenOrders(contract?: string) {
+  async function readOpenOrders(contract?: string): Promise<OpenOrder[]> {
     const list = await exchange().openOrders(contract);
-    return list.map((o) => ({
+    return list.map((o): OpenOrder => ({
       id: String(o.id),
       contract: String(o.contract),
       size: Number(o.size),
@@ -225,10 +238,12 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     res.json(await readOpenOrders(contract));
   }));
 
-  interface Trigger {
-    id: string;
+  /**
+   * 一张触发单。字段就是契约里的 PriceOrder —— 再抄一份的话，
+   * 契约加一个字段，这边会静默漏掉（页面读到的就是 undefined）。
+   */
+  interface Trigger extends PriceOrder {
     cancelId: string;
-    contract: string;
     /** auto_size 直接写明平哪一边。空字符串表示认不出来（交易所网页上挂的、老的 isclose 单） */
     direction: Direction | '';
     /**
@@ -320,14 +335,15 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
       ...(priceOrdersResult.status === 'rejected' ? { priceOrders: errText(priceOrdersResult.reason) } : {}),
     };
     // armed 让页面每 3 秒对一次账：令牌没了就把「已解锁」收掉，而不是等下一次下单被拒
-    res.json({
+    const body: PrivateState = {
       ...(accountResult.status === 'fulfilled' ? { account: accountResult.value } : {}),
       ...(positionsResult.status === 'fulfilled' ? { positions: positionsResult.value } : {}),
       ...(ordersResult.status === 'fulfilled' ? { orders: ordersResult.value } : {}),
       ...(priceOrdersResult.status === 'fulfilled' ? { priceOrders: priceOrdersResult.value } : {}),
       ...(Object.keys(errors).length > 0 ? { errors } : {}),
       armed: armValid(req),
-    });
+    };
+    res.json(body);
   }));
 
   router.get('/daily-pnl', wrap(async (req, res) => {
@@ -446,8 +462,9 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
   // ---------- 交易 ----------
 
   router.post('/trade/arm', wrap(async (req, res) => {
-    const { on } = req.body ?? {};
-    if (on === false) {
+    // 只有明确说「关」才落锁；不传或者传 true 都是解锁
+    const body = bodyOf(req.body);
+    if (body.on !== undefined && !flag(body.on)) {
       armTokens.clear();
       res.json({ armed: false });
       return;
@@ -469,15 +486,15 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
    */
   router.post('/leverage', wrap(async (req, res) => {
     requireArm(req);
-    const { contract: contractRaw, leverage, mode } = req.body ?? {};
-    const contract = String(contractRaw ?? '');
-    const lev = Math.round(Number(leverage));
-    if (!contract || !Number.isFinite(lev)) throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 leverage');
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    const lev = Math.round(requiredNumber(body.leverage, 'leverage', { positive: true }));
+    // 不传按逐仓（账户默认是全仓，不说一声就等于拿整个余额兜底）
+    const cross = oneOfOr(body.mode, 'mode', ['cross', 'isolated'] as const, 'isolated') === 'cross';
     const c = await tradeContract(contract);
     if (lev < Number(c.leverage_min) || lev > Number(c.leverage_max)) {
       throw new GateError(400, 'LEVERAGE_RANGE', `该合约杠杆范围 ${c.leverage_min} - ${c.leverage_max}`);
     }
-    const cross = mode === 'cross';
     // 各家的写法差得远（Gate 靠 leverage=0 表示全仓，Bitget 是单独的保证金模式接口），
     // 这一层翻译在适配器里
     const r = await exchange().setLeverage(contract, { lev, cross });
@@ -488,21 +505,6 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
       crossLeverageLimit: r.crossLeverageLimit,
     });
   }));
-
-  interface OrderBody {
-    contract: string;
-    size: number;          // 张数，正数买正数卖由 side 决定
-    side: 'long' | 'short';// long = 买入开多 / short = 卖出开空
-    price?: number;        // 0 或不传 = 市价
-    tif?: 'gtc' | 'ioc' | 'poc' | 'fok';
-    reduceOnly?: boolean;
-    stop?: number;         // 可选，开仓顺手挂的止损价，0 或不传 = 不挂
-    target?: number;       // 可选，开仓顺手挂的止盈价，0 或不传 = 不挂
-    /** 逐仓还是全仓。不传按逐仓：账户默认是全仓，不说一声就等于拿整个余额兜底 */
-    marginMode?: 'isolated' | 'cross';
-    /** 开仓用的杠杆。切保证金模式要一起带上，不然逐仓会用交易所原来的倍数 */
-    leverage?: number;
-  }
 
   interface PlaceSpec {
     contract: string;
@@ -682,29 +684,40 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
 
   router.post('/order', wrap(async (req, res) => {
     requireArm(req);
-    const body = req.body as Partial<OrderBody> ?? {};
-    const contract = String(body.contract ?? '');
-    if (!contract) throw new GateError(400, 'BAD_INPUT', '缺少 contract');
-    const side: Direction = body.side === 'short' ? 'short' : 'long';
-    const stop = Number(body.stop ?? 0) || 0;
-    const target = Number(body.target ?? 0) || 0;
+    /**
+     * 先把外部输入变成确定的类型，再往下走。
+     *
+     * 以前是 `Number(body.size)` 直接交给 placeOrder：字段漏传时是 NaN，
+     * 一路飘到「张数不够最小」之类的下游判断，报出来的话跟真正的原因对不上。
+     */
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    const side = oneOfOr(body.side, 'side', ['long', 'short'] as const, 'long');
+    const size = requiredNumber(body.size, 'size', { positive: true });
+    const price = numberOr(body.price, 'price', 0, { min: 0 });
+    const stop = numberOr(body.stop, 'stop', 0, { min: 0 });
+    const target = numberOr(body.target, 'target', 0, { min: 0 });
+    const reduceOnly = flag(body.reduceOnly);
+    const tif = body.tif === undefined || body.tif === null || body.tif === ''
+      ? undefined
+      : oneOf(body.tif, 'tif', ['gtc', 'ioc', 'poc', 'fok'] as const);
     // 开仓前先清掉这一边没人管的触发单（上一个仓已经没了的那种）。
     // 清不掉不影响下单，顶多在回执里少报一项。
-    const cleared = body.reduceOnly ? [] : await clearOrphanTriggers(contract, side).catch(() => [] as string[]);
+    const cleared = reduceOnly ? [] : await clearOrphanTriggers(contract, side).catch(() => [] as string[]);
     // 开仓前把保证金模式定下来。平仓（reduceOnly）不动它：平仓和模式无关，白跑一趟还可能被交易所拒。
-    const marginMode: 'isolated' | 'cross' = body.marginMode === 'cross' ? 'cross' : 'isolated';
-    const openLev = Math.round(Number(body.leverage ?? 0)) || 10;
-    const margin = body.reduceOnly ? null : await ensureMarginMode(contract, side, openLev, marginMode);
+    const marginMode = oneOfOr(body.marginMode, 'marginMode', ['isolated', 'cross'] as const, 'isolated');
+    const openLev = Math.round(numberOr(body.leverage, 'leverage', 10, { positive: true })) || 10;
+    const margin = reduceOnly ? null : await ensureMarginMode(contract, side, openLev, marginMode);
     const { prepared, order } = await placeOrder({
       contract,
       side,
-      size: Number(body.size),
-      price: Number(body.price ?? 0),
-      tif: body.tif,
-      reduceOnly: Boolean(body.reduceOnly),
+      size,
+      price,
+      tif,
+      reduceOnly,
     });
     // 开仓顺手挂保护。两个价都空着就是纯开仓，不碰现有的触发单。
-    const bracket = (stop > 0 || target > 0) && !body.reduceOnly
+    const bracket = (stop > 0 || target > 0) && !reduceOnly
       ? await attachAfterEntry(contract, side, stop, target)
       : null;
     res.json({
@@ -739,7 +752,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
   router.post('/order/:id/amend', wrap(async (req, res) => {
     requireArm(req);
     const id = String(req.params.id);
-    const body = req.body ?? {};
+    const body = bodyOf(req.body);
     const o = await exchange().order(id);
     if (!o || !o.id) throw new GateError(404, 'ORDER_NOT_FOUND', '找不到这张委托，可能已经成交或撤掉了');
     if (String(o.status ?? '') !== 'open') {
@@ -751,13 +764,15 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     const left = Math.abs(Number(o.left ?? origSize));
     const side: Direction = origSize > 0 ? 'long' : 'short';
 
-    const rawSize = body.size === undefined || body.size === null || body.size === '' ? left : Math.abs(Number(body.size));
-    if (!Number.isFinite(rawSize) || rawSize <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
+    // 没填张数就按剩余量改价；填了就必须是正数
+    const sizeIn = optionalNumber(body.size, 'size', { positive: true });
+    const rawSize = sizeIn === undefined ? left : Math.abs(sizeIn);
     if (rawSize > left) {
       throw new GateError(400, 'AMEND_SIZE_MAX', `这张单只剩 ${left} 张没成交，改单只能改到 ${left} 张以内。想加大请重新下单`);
     }
 
-    const rawPrice = body.price === undefined || body.price === null || body.price === '' ? Number(o.price ?? 0) : Number(body.price);
+    const priceIn = optionalNumber(body.price, 'price', { positive: true });
+    const rawPrice = priceIn === undefined ? Number(o.price ?? 0) : priceIn;
     if (!(rawPrice > 0)) throw new GateError(400, 'AMEND_PRICE', '市价单没有价格可改，只能撤掉重下');
 
     const tif = String(o.tif ?? 'gtc');
@@ -833,9 +848,12 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
    */
   router.post('/close-position', wrap(async (req, res) => {
     requireArm(req);
-    const { contract: contractRaw, direction } = req.body ?? {};
-    if (!contractRaw) throw new GateError(400, 'BAD_INPUT', '缺少 contract');
-    const contract = String(contractRaw);
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    // 不指明方向就平掉这一边全部
+    const direction = body.direction === undefined || body.direction === null || body.direction === ''
+      ? undefined
+      : oneOf(body.direction, 'direction', ['long', 'short'] as const);
     const sides = await readSides(contract);
     const wanted = sides.filter((s) => s.size > 0 && (!direction || s.direction === direction));
     if (wanted.length === 0) throw new GateError(400, 'NO_POSITION', '当前没有持仓');
@@ -997,11 +1015,12 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
 
   router.post('/bracket', wrap(async (req, res) => {
     requireArm(req);
-    const { contract: contractRaw, direction, stop, target } = req.body ?? {};
-    if (!contractRaw || !['long', 'short'].includes(String(direction))) {
-      throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
-    }
-    const r = await applyBracket(String(contractRaw), direction as Direction, Number(stop ?? 0), Number(target ?? 0));
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    const direction = oneOf(body.direction, 'direction', ['long', 'short'] as const);
+    const stop = numberOr(body.stop, 'stop', 0, { min: 0 });
+    const target = numberOr(body.target, 'target', 0, { min: 0 });
+    const r = await applyBracket(contract, direction, stop, target);
     res.json({ ok: r.errors.length === 0, ...r });
   }));
 
@@ -1012,14 +1031,11 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
    */
   router.post('/add-position', wrap(async (req, res) => {
     requireArm(req);
-    const { contract: contractRaw, direction, size, price } = req.body ?? {};
-    if (!contractRaw || !['long', 'short'].includes(String(direction))) {
-      throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
-    }
-    const contract = String(contractRaw);
-    const dir = direction as Direction;
-    const qty = Math.abs(Number(size));
-    if (!Number.isFinite(qty) || qty <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    const dir = oneOf(body.direction, 'direction', ['long', 'short'] as const);
+    const qty = Math.abs(requiredNumber(body.size, 'size', { positive: true }));
+    const price = numberOr(body.price, 'price', 0, { min: 0 });
 
     const sides = await readSides(contract);
     const mine = sides.find((s) => s.direction === dir && s.size > 0);
@@ -1027,7 +1043,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
       throw new GateError(400, 'NO_POSITION', `当前没有${dir === 'long' ? '多' : '空'}头持仓。开新仓请用下单面板`);
     }
 
-    const { prepared, order } = await placeOrder({ contract, side: dir, size: qty, price: Number(price ?? 0) });
+    const { prepared, order } = await placeOrder({ contract, side: dir, size: qty, price });
     res.json({
       ok: true,
       order: orderReceipt(order),
@@ -1043,20 +1059,17 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
    */
   router.post('/reverse-position', wrap(async (req, res) => {
     requireArm(req);
-    const { contract: contractRaw, direction, size } = req.body ?? {};
-    if (!contractRaw || !['long', 'short'].includes(String(direction))) {
-      throw new GateError(400, 'BAD_INPUT', '缺少 contract 或 direction');
-    }
-    const contract = String(contractRaw);
-    const dir = direction as Direction;
+    const body = bodyOf(req.body);
+    const contract = requiredText(body.contract, 'contract', { max: 64 });
+    const dir = oneOf(body.direction, 'direction', ['long', 'short'] as const);
 
     const sides = await readSides(contract);
     const mine = sides.find((s) => s.direction === dir && s.size > 0);
     if (!mine) {
       throw new GateError(400, 'NO_POSITION', `当前没有${dir === 'long' ? '多' : '空'}头持仓，没有可反的仓`);
     }
-    const qty = Math.abs(Number(size ?? mine.size));
-    if (!Number.isFinite(qty) || qty <= 0) throw new GateError(400, 'BAD_INPUT', '张数不合法');
+    // 不填张数就按当前持仓量反手
+    const qty = Math.abs(optionalNumber(body.size, 'size', { positive: true }) ?? mine.size);
     if (qty > mine.size) {
       throw new GateError(400, 'REVERSE_SIZE_MAX', `反向张数不能超过当前持仓的 ${mine.size} 张。想加大请反手之后再点加仓`);
     }

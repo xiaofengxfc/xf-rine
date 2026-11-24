@@ -204,6 +204,13 @@ export interface LevelsResponse {
   summary: AnalysisSummary;
   engine: EngineInfo;
   mtf_zones: MtfGroup[];
+  /**
+   * 邻居周期里「和本周期不重位」的那几条，挑出来单独画。
+   *
+   * 服务端一直在发，页面目前一条都没读（图上画的是 zones + historyZones）。
+   * 先留在契约里，等哪天决定不画了再删 —— 删之前得确认没有别的客户端在读。
+   */
+  mtfZones?: Zone[];
 }
 
 export interface Position {
@@ -218,7 +225,10 @@ export interface Position {
 
 export interface OpenOrder {
   id: string; contract: string; size: number; left: number; price: number; fillPrice: number;
-  status: string; reduceOnly: boolean;
+  status: string;
+  /** 成交完是什么：filled / cancelled。服务端会带，页面暂时没用 */
+  finishAs?: string | null;
+  reduceOnly: boolean;
   /** 下单时间，unix 秒（服务端已经统一过单位） */
   createTime: number;
   tif: string;
