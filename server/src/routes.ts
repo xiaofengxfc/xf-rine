@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { bodyOf, textOr } from './http/params.js';
+import { instrumentOf } from './exchange/instrument.js';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -436,6 +437,7 @@ router.get('/contracts/:name', wrap(async (req, res) => {
     // 当前环境（尤其模拟盘）能不能交易它
     tradable: tradable === null ? true : tradable.has(c.name),
     name: c.name,
+    instrument: instrumentOf(c.name),
     multiplier: Number(c.quanto_multiplier),
     sizeMin: Number(c.order_size_min) > 0 ? c.order_size_min : (c.size_step ?? 1),
     sizeStep: c.size_step ?? 1,
@@ -713,6 +715,7 @@ router.get('/candles', wrap(async (req, res) => {
   // exhausted 是「交易所真没了」，前端只认它；hasMore 留给老前端兜底
   const body: CandlesResponse = {
     contract,
+    instrument: instrumentOf(contract),
     interval,
     bars: page.bars,
     hasMore: page.bars.length >= limit,
@@ -1243,6 +1246,7 @@ function refreshTickers(): Promise<void> {
         .filter((t) => Number(t.last) > 0)
         .map((t): TickerRow => ({
           contract: t.contract,
+          instrument: instrumentOf(t.contract),
           last: Number(t.last),
           mark: Number(t.mark_price),
           change24h: Number(t.change_percentage),

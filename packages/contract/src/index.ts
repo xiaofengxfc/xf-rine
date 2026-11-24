@@ -12,6 +12,8 @@
 
 export interface ContractInfo {
   name: string;
+  /** 完整身份，形如 gate:perp:BTC_USDT。过渡期与 name 双写，老客户端不认也不影响 */
+  instrument?: string;
   multiplier: number;
   sizeMin: number;
   /** 下单张数步进（接口未返回时由最小量回退推算） */
@@ -36,6 +38,8 @@ export interface ContractInfo {
 
 export interface Ticker {
   contract: string;
+  /** 完整身份（venue:market:symbol）。双写期字段，见 ContractInfo.instrument */
+  instrument?: string;
   last: number;
   mark: number;
   change24h: number;
@@ -54,6 +58,8 @@ export interface Ticker {
 /** GET /api/candles：一页 K 线 */
 export interface CandlesResponse {
   contract: string;
+  /** 完整身份（venue:market:symbol） */
+  instrument?: string;
   interval: string;
   bars: Bar[];
   /** 还有更早的历史可取 */
@@ -214,7 +220,10 @@ export interface LevelsResponse {
 }
 
 export interface Position {
-  contract: string; size: number; direction: 'long' | 'short'; leverage: number;
+  contract: string;
+  /** 完整身份（venue:market:symbol） */
+  instrument?: string;
+  size: number; direction: 'long' | 'short'; leverage: number;
   entryPrice: number; markPrice: number; liqPrice: number; unrealisedPnl: number;
   value: number; mode: string;
   /** Some exchanges return the margin mode separately from leverage. */
@@ -224,7 +233,10 @@ export interface Position {
 }
 
 export interface OpenOrder {
-  id: string; contract: string; size: number; left: number; price: number; fillPrice: number;
+  id: string; contract: string;
+  /** 完整身份（venue:market:symbol） */
+  instrument?: string;
+  size: number; left: number; price: number; fillPrice: number;
   status: string;
   /** 成交完是什么：filled / cancelled。服务端会带，页面暂时没用 */
   finishAs?: string | null;
@@ -235,7 +247,10 @@ export interface OpenOrder {
 }
 
 export interface PriceOrder {
-  id: string; contract: string; direction: '' | 'long' | 'short';
+  id: string; contract: string;
+  /** 完整身份（venue:market:symbol） */
+  instrument?: string;
+  direction: '' | 'long' | 'short';
   triggerPrice: number; triggerRule: number; size: number;
   /** 到价平仓的保护单。靠 auto_size / isclose 判定，不能看 reduce_only（Gate 回读成 false） */
   protective: boolean;
@@ -306,6 +321,8 @@ export interface PrivateState {
 /** 行情推送上来的那一帧：最新价、标记价、24 小时涨跌、资金费 */
 export interface LiveTicker {
   contract: string;
+  /** 完整身份（venue:market:symbol）。行情帧双写期字段 */
+  instrument?: string;
   last: number;
   mark: number;
   change24h: number;
@@ -383,9 +400,9 @@ export interface LiveBar {
 
 /** 服务端 /ws 推下来的东西 */
 export type WsMessage =
-  | { type: 'candle'; contract: string; bar: LiveBar }
+  | { type: 'candle'; contract: string; instrument?: string; bar: LiveBar }
   | ({ type: 'ticker' } & LiveTicker)
-  | { type: 'trade'; contract: string; price: number; size: number; ts: number }
+  | { type: 'trade'; contract: string; instrument?: string; price: number; size: number; ts: number }
   | { type: 'hello'; ts: number }
   | { type: 'subscribed'; contract: string; interval: string }
   /**

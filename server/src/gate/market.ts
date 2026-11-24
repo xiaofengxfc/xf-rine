@@ -2,6 +2,17 @@ import WebSocket from 'ws';
 import type { WebSocketServer } from 'ws';
 import { marketWsUrl } from '../config.js';
 import { isStale } from '../wsRoute.js';
+import { instrumentField, instrumentFromSymbol } from '@xfrine/instrument';
+
+/**
+ * 播给页面的每一条行情都同时带「裸合约名」和「完整身份」。
+ *
+ * 过渡期的双写：老的 contract 字段保持原样，老代码一行都不用动；
+ * 新的 instrument 形如 gate:perp:BTC_USDT，页面以后按它区分交易所和市场。
+ * 等前端全部改读 instrument 之后，contract 才能谈删除。
+ */
+const instrumentOf = (symbol: string): string | undefined =>
+  instrumentField(instrumentFromSymbol(symbol, 'gate'));
 
 /** 连上以后一直没有数据多久算假死。Gate 20 秒一次心跳，留足余量 */
 const STALE_MS = (() => {
@@ -221,6 +232,7 @@ export class MarketHub {
       this.broadcast({
         type: 'candle',
         contract,
+        instrument: instrumentOf(contract),
         bar: {
           time: Number(c.t),
           open: Number(c.o),
@@ -240,6 +252,7 @@ export class MarketHub {
         this.broadcast({
           type: 'ticker',
           contract: t.contract,
+          instrument: instrumentOf(t.contract),
           last: Number(t.last),
           mark: Number(t.mark_price),
           change24h: Number(t.change_percentage),
@@ -255,6 +268,7 @@ export class MarketHub {
         this.broadcast({
           type: 'trade',
           contract: t.contract,
+          instrument: instrumentOf(t.contract),
           price: Number(t.price),
           size: t.size,
           ts: t.create_time_ms,

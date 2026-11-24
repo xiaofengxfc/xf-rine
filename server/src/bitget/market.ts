@@ -3,6 +3,11 @@ import WebSocket from 'ws';
 import { WebSocket as UndiciWS } from 'undici';
 import { wsDispatcherFor, wsRouteOrder } from '../net.js';
 import { isStale, routeOnTrouble, type NetRoute } from '../wsRoute.js';
+import { instrumentField, instrumentFromSymbol } from '@xfrine/instrument';
+
+/** 双写：老的 contract 照发，新的 instrument 带上交易所和市场（见 gate/market.ts 同一处说明） */
+const instrumentOf = (symbol: string): string | undefined =>
+  instrumentField(instrumentFromSymbol(symbol, 'bitget'));
 
 /** 官方行情地址。诊断时可以用 XF_WS_URL 指到别处（例如自建镜像） */
 const WS_LIVE = (process.env.XF_WS_URL ?? '').trim() || 'wss://ws.bitget.com/v2/ws/public';
@@ -390,6 +395,7 @@ export class BitgetMarketHub {
         this.broadcast({
           type: 'candle',
           contract,
+          instrument: instrumentOf(contract),
           bar: {
             time: t,
             open: Number(row[1]),
@@ -413,6 +419,7 @@ export class BitgetMarketHub {
         this.broadcast({
           type: 'ticker',
           contract: nameOf(String(t?.instId ?? instId)),
+          instrument: instrumentOf(nameOf(String(t?.instId ?? instId))),
           last,
           mark: Number(t?.markPrice ?? last),
           // Bitget 给的是比例，页面要的是百分数
@@ -431,6 +438,7 @@ export class BitgetMarketHub {
         this.broadcast({
           type: 'trade',
           contract: nameOf(String(t?.instId ?? instId)),
+          instrument: instrumentOf(nameOf(String(t?.instId ?? instId))),
           price,
           size: Number(t?.size ?? 0),
           ts: Number(t?.ts ?? Date.now()),

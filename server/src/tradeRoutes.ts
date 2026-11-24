@@ -9,6 +9,7 @@ import {
   bodyOf, flag, numberOr, oneOf, oneOfOr, optionalNumber, requiredNumber, requiredText,
 } from './http/params.js';
 import type { Account, OpenOrder, Position, PriceOrder, PrivateState } from '@xfrine/contract';
+import { instrumentOf } from './exchange/instrument.js';
 
 /**
  * 交易这一侧只有两边。
@@ -181,6 +182,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
       const multiplier = size > 0 && mark > 0 && value > 0 ? Number((value / (size * mark)).toPrecision(6)) : 0;
       return {
         contract: p.contract,
+        instrument: instrumentOf(p.contract),
         size,
         direction: sideOf(String(p.mode ?? ''), Number(p.size)),
         leverage: Number(p.leverage),
@@ -221,6 +223,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     return list.map((o): OpenOrder => ({
       id: String(o.id),
       contract: String(o.contract),
+      instrument: instrumentOf(String(o.contract)),
       size: Number(o.size),
       left: Number(o.left),
       price: Number(o.price),
@@ -294,6 +297,7 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
         id: String(o.id),
         cancelId: String(o.cancel_id ?? o.id),
         contract: String(initial.contract ?? ''),
+        instrument: instrumentOf(String(initial.contract ?? '')),
         direction: auto.includes('long') ? 'long' : auto.includes('short') ? 'short' : '',
         protective: closeAll || auto !== '',
         reduceOnly: Boolean(initial.reduce_only),

@@ -15,6 +15,7 @@
     "check:update": "tsx scripts/check-update.ts"
   },
   "dependencies": {
+    "@xfrine/instrument": "workspace:*",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "hyparquet": "^1.33.0",

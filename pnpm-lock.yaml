@@ -54,8 +54,13 @@ importers:
 
   packages/contract: {}
 
+  packages/instrument: {}
+
   server:
     dependencies:
+      '@xfrine/instrument':
+        specifier: workspace:*
+        version: link:../packages/instrument
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
@@ -105,6 +110,9 @@ importers:
       '@capawesome/capacitor-nodejs':
         specifier: ^0.2.0
         version: 0.2.0(@capacitor/core@8.6.0)
+      '@xfrine/instrument':
+        specifier: workspace:*
+        version: link:../packages/instrument
       lightweight-charts:
         specifier: ^5.2.1
         version: 5.2.1

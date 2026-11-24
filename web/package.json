@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@capacitor/app": "^8.0.0",
+    "@xfrine/instrument": "workspace:*",
     "@capacitor/core": "^8.6.0",
     "@capawesome/capacitor-nodejs": "^0.2.0",
     "lightweight-charts": "^5.2.1",
