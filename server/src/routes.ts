@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
 import { bodyOf, textOr } from './http/params.js';
 import { instrumentOf, resolveSymbol } from './exchange/instrument.js';
+import { contractNameProblem } from './exchange/contractName.js';
 import { capabilitiesFor, instrumentField, parseInstrument } from '@xfrine/instrument';
 import { spotCandles } from './gate/spot.js';
 import { config, envLabel, exchangeLabel } from './config.js';
@@ -438,7 +439,10 @@ void refreshContracts();
  * 一次下单、一次刷持仓都跟着卡十几秒。
  */
 const tradeContractCache = new Map<string, { at: number; c: GateContract }>();
+
 async function tradeContract(name: string): Promise<GateContract> {
+  const bad = contractNameProblem(name);
+  if (bad) throw new DataError(400, 'BAD_CONTRACT_NAME', bad);
   // 键里带交易所：同一个 BTC_USDT 在两家是两份不同的合约参数
   const key = config.exchange + ':' + name;
   const hit = tradeContractCache.get(key);

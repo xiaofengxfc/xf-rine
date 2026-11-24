@@ -54,7 +54,15 @@ async function request<T>(
     const ts = Math.floor(Date.now() / 1000).toString();
     headers.KEY = config.key;
     headers.Timestamp = ts;
-    headers.SIGN = sign(method, fullPath, query, bodyStr, ts);
+    /**
+     * 签名用的是**解码后的**查询串。
+     *
+     * 实测：私有接口带非 ASCII 合约名（Gate 上有 牛逼_USDT 这种）时，
+     * 用编码过的 %E7%89%9B… 去签，交易所回 INVALID_SIGNATURE ——
+     * 于是这些币在页面上行情正常、却一张单都下不出去，而报错说的是「签名不对」，
+     * 看着像密钥配错了。交易所那边还原的是解码后的原文，这里就按原文签。
+     */
+    headers.SIGN = sign(method, fullPath, decodeURIComponent(query), bodyStr, ts);
   }
 
   const ac = new AbortController();

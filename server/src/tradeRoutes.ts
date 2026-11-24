@@ -10,6 +10,7 @@ import {
 } from './http/params.js';
 import type { Account, OpenOrder, Position, PriceOrder, PrivateState } from '@xfrine/contract';
 import { instrumentOf } from './exchange/instrument.js';
+import { contractNameProblem } from './exchange/contractName.js';
 
 /**
  * 交易这一侧只有两边。
@@ -136,6 +137,17 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
   }
 
   async function readSides(contract: string): Promise<Side[]> {
+    /**
+     * 名字先验，再去问交易所。
+     *
+     * 这里是下单、平仓、加仓、反手、挂保护单的第一跳。不先验的话：
+     * - 写成 BTC（少下划线）会走到交易所回 CONTRACT_NOT_FOUND，
+     *   被翻成「这个合约在模拟盘没有上市」——把「写错」讲成「没上市」；
+     * - 带空格的名字会走到签名环节，回 INVALID_SIGNATURE ——
+     *   把输入错误报成「密钥不对」，用户会去重填 API key（实测踩到过）。
+     */
+    const bad = contractNameProblem(contract);
+    if (bad) throw new GateError(400, 'BAD_CONTRACT_NAME', bad);
     const raw = await exchange().positions(contract);
     const rows = Array.isArray(raw) ? raw : [raw];
     const out: Side[] = [];
