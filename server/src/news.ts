@@ -6,34 +6,15 @@
  */
 
 import { netFetch } from './net.js';
+import type { FeedStat, NewsDigest, NewsItem } from '@xfrine/contract';
 
-export interface NewsItem {
-  title: string;
-  url: string;
-  source: string;
-  publishedAt: number;
-  score: number;
-  sentiment: number;
-  matched: string[];
-}
-
-export interface FeedStat {
-  name: string;
-  ok: boolean;
-  count: number;
-  error?: string;
-}
-
-export interface NewsDigest {
-  contract: string;
-  base: string;
-  fetchedAt: number;
-  items: NewsItem[];
-  feeds: FeedStat[];
-  sentiment: number;
-  stance: 'bullish' | 'neutral' | 'bearish';
-  note: string;
-}
+/**
+ * 这三个形状就是发给页面的那三个，契约里已经有了。
+ *
+ * 以前这里也抄了一份：两份完全相同的拷贝，改一边忘一边，编译器不会说话 ——
+ * 只有页面读到 undefined 的时候才知道。现在服务端直接用契约那一份。
+ */
+export type { FeedStat, NewsDigest, NewsItem };
 
 interface RawItem {
   title: string;

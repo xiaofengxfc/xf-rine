@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import type { CandlesResponse, ContractInfo, LevelsResponse, Ticker } from '@xfrine/contract';
+import { bodyOf, textOr } from './http/params.js';
 import { config, envLabel, exchangeLabel } from './config.js';
 import { GateError } from './exchange/errors.js';
 import { exchange } from './exchange/index.js';
@@ -997,7 +998,7 @@ router.post('/data/dir', wrap(async (req, res) => {
   // 只认本机、不要 arm 令牌：这一步不碰交易所、不动钱，只是记住「读哪个目录」。
   // 要令牌的话就得先配密钥、先点解锁 —— 而想用本地数据的人往往根本不下单。
   requireLocal(req, '选本地数据目录');
-  const dir = storeDataDir(String((req.body as { dir?: string })?.dir ?? ''));
+  const dir = storeDataDir(textOr(bodyOf(req.body).dir, 'dir', '', { max: 1024 }));
   try {
     const out = await sr.instruments(dir);
     res.json({
@@ -1117,8 +1118,10 @@ async function buildSnapshot(contract: string, interval: string): Promise<AiSnap
 }
 
 router.post('/ai/analyze', wrap(async (req, res) => {
-  const contract = String(req.body?.contract ?? 'BTC_USDT').toUpperCase();
-  const interval = INTERVALS.has(String(req.body?.interval)) ? String(req.body.interval) : '15m';
+  const body = bodyOf(req.body);
+  const contract = textOr(body.contract, 'contract', 'BTC_USDT', { max: 64 }).toUpperCase();
+  const intervalRaw = textOr(body.interval, 'interval', '15m', { max: 8 });
+  const interval = INTERVALS.has(intervalRaw) ? intervalRaw : '15m';
   const snapshot = await buildSnapshot(contract, interval);
   res.json(await analyze(snapshot));
 }));
@@ -1127,7 +1130,7 @@ router.post('/ai/test', wrap(async (req, res) => {
   if (!isLoopbackAddress(req.socket.remoteAddress ?? '')) {
     throw new GateError(403, 'LOCAL_ONLY', '测试连接只允许本机访问');
   }
-  const body = req.body ?? {};
+  const body = bodyOf(req.body);
   const override = {
     baseUrl: typeof body.baseUrl === 'string' && body.baseUrl.trim() ? body.baseUrl.trim() : config.ai.baseUrl,
     apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : config.ai.apiKey,

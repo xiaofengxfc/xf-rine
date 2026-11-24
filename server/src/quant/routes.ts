@@ -12,6 +12,7 @@
  */
 
 import { Router, type Request, type Response } from 'express';
+import { bodyOf } from '../http/params.js';
 import { exchange } from '../exchange/index.js';
 import { config, exchangeLabel } from '../config.js';
 import { getSeries } from './data.js';
@@ -211,7 +212,7 @@ export function mountQuant(router: Router, deps: {
 
   router.post('/quant/strategies', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '保存策略');
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body = bodyOf(req.body);
     const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
     const name = String(body.name ?? '').trim() || '未命名策略';
     // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
@@ -252,7 +253,7 @@ export function mountQuant(router: Router, deps: {
    */
   router.post('/quant/strategies/:id/rename', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '改策略名');
-    const name = String((req.body ?? {}).name ?? '');
+    const name = String(bodyOf(req.body).name ?? '');
     try {
       const s = renameStrategy(String(req.params.id), name);
       if (!s) {
@@ -283,7 +284,7 @@ export function mountQuant(router: Router, deps: {
    */
   router.post('/quant/strategies/:id/run', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '记录回测结论');
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body = bodyOf(req.body);
     // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
     const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
     const interval = String(body.interval ?? '1h').trim();
@@ -392,7 +393,7 @@ export function mountQuant(router: Router, deps: {
    */
   router.post('/quant/research', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '跑 AI 研究');
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body = bodyOf(req.body);
     // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
     const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
     const interval = String(body.interval ?? '1h').trim();
@@ -541,7 +542,7 @@ export function mountQuant(router: Router, deps: {
    */
   router.post('/quant/backtest/stream', async (req: Request, res: Response) => {
     try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const body = bodyOf(req.body);
       const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
       const interval = String(body.interval ?? '1h').trim();
       const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
@@ -703,7 +704,7 @@ export function mountQuant(router: Router, deps: {
    * 和 AI 研究用的是同一个引擎、同一个判定，所以两边的数不会打架。
    */
   router.post('/quant/backtest', wrap(async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body = bodyOf(req.body);
     // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
     const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
     const interval = String(body.interval ?? '1h').trim();

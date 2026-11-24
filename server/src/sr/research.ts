@@ -17,6 +17,7 @@
 import { Router, type Request, type Response } from 'express';
 import { SidecarError } from './client.js';
 import * as sr from './client.js';
+import type { ResearchAnalysis, ResearchScan } from '@xfrine/contract';
 import type { Direction } from './types.js';
 
 export interface ResearchDeps {
@@ -70,7 +71,8 @@ export function mountResearch(router: Router, deps: ResearchDeps): void {
     const dir = deps.getDataDir();
     const symbol = String(req.query.symbol ?? '').trim();
     const tf = String(req.query.tf ?? 'D1').trim().toUpperCase();
-    const out = await sr.analyzeLocal({
+    // 按契约标注：引擎那边多给少给一个字段，这里就报
+    const out: ResearchAnalysis = await sr.analyzeLocal({
       dir,
       symbol,
       tf,
@@ -86,7 +88,7 @@ export function mountResearch(router: Router, deps: ResearchDeps): void {
   /** 全市场扫描 */
   router.get('/research/scan', deps.wrap(async (req, res) => {
     const dir = deps.getDataDir();
-    const out = await sr.scan(dir, {
+    const out: ResearchScan = await sr.scan(dir, {
       tf: String(req.query.tf ?? 'D1').trim().toUpperCase(),
       window: num(req.query.window, 40, 10, 500),
       n_zones: num(req.query.n_zones, 3, 1, 8),

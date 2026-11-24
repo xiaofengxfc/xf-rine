@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { bodyOf } from './http/params.js';
 import {
   config, keyHint, keyHintFor, writeEnv, restBaseUrl, envLabel, keySlot, aiKeyHint, aiEndpoint,
   remoteAccess, ENV_PATH, exchangeLabel, exchangeIntervals, type GateEnv,
@@ -74,7 +75,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/config/keys', wrap(async (req, res) => {
     requireLocal(req, '写密钥');
-    const { key, secret, passphrase, liveTrading, slotEnv } = req.body ?? {};
+    const { key, secret, passphrase, liveTrading, slotEnv } = bodyOf(req.body);
     const targetEnv: GateEnv = slotEnv === 'testnet' || slotEnv === 'live' ? slotEnv : config.env;
     const slot = keySlot(targetEnv);
     const patch: Record<string, string> = {};
@@ -86,7 +87,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
     }
     if (typeof liveTrading === 'boolean') patch.LIVE_TRADING = liveTrading ? 'true' : 'false';
     // AI 三个字段各管各的：传了就写，字符串为空表示清除，不传就不动
-    const { aiBaseUrl, aiApiKey, aiModel } = req.body ?? {};
+    const { aiBaseUrl, aiApiKey, aiModel } = bodyOf(req.body);
     if (typeof aiBaseUrl === 'string' && aiBaseUrl.trim()) patch.AI_BASE_URL = aiBaseUrl.trim();
     if (typeof aiApiKey === 'string') patch.AI_API_KEY = aiApiKey.trim();
     if (typeof aiModel === 'string' && aiModel.trim()) patch.AI_MODEL = aiModel.trim();
@@ -115,7 +116,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/config/env', wrap(async (req, res) => {
     requireLocal(req, '切环境');
-    const { env } = req.body ?? {};
+    const { env } = bodyOf(req.body);
     if (env !== 'testnet' && env !== 'live') throw new GateError(400, 'BAD_ENV', 'env 只能是 testnet 或 live');
     // 换环境＝换账户。旧令牌是在另一个账户上解锁的，不能跟着过来：
     // 从模拟盘切到实盘时它要是还有效，就等于绕过了一次「用真钱」的确认。
@@ -148,7 +149,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/config/exchange', wrap(async (req, res) => {
     requireLocal(req, '切换交易所');
-    const { exchange: next } = req.body ?? {};
+    const { exchange: next } = bodyOf(req.body);
     if (next !== 'gate' && next !== 'bitget') {
       throw new GateError(400, 'BAD_EXCHANGE', 'exchange 只能是 gate 或 bitget');
     }
@@ -188,7 +189,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/backup/export', wrap(async (req, res) => {
     requireLocal(req, '导出备份');
-    const { password, local } = req.body ?? {};
+    const { password, local } = bodyOf(req.body);
     const server = collectBackup();
     const browser = sanitizeLocal(local);
     const envelope = encryptBackup(server, browser, password);
@@ -216,7 +217,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/backup/import', wrap(async (req, res) => {
     requireLocal(req, '恢复备份');
-    const { password, envelope } = req.body ?? {};
+    const { password, envelope } = bodyOf(req.body);
     const payload = decryptBackup(envelope, password);
     const { applied } = applyBackupFiles(payload.server);
 
@@ -272,7 +273,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
 
   /** 用户反馈：服务端用内嵌的 163 信箱直接寄出去，页面上不出现任何邮箱配置 */
   router.post('/feedback', wrap(async (req, res) => {
-    const body = req.body ?? {};
+    const body = bodyOf(req.body);
     const kind = typeof body.kind === 'string' && ['bug', 'idea', 'other'].includes(body.kind) ? body.kind : 'other';
     const title = String(body.title ?? '').trim();
     const text = String(body.body ?? '').trim();
@@ -311,7 +312,7 @@ export function mountSystemRoutes(router: Router, deps: SystemRouteDeps): void {
    */
   router.post('/ai/models', wrap(async (req, res) => {
     requireLocal(req, '拉模型列表');
-    const body = req.body ?? {};
+    const body = bodyOf(req.body);
     const override = {
       baseUrl: typeof body.baseUrl === 'string' && body.baseUrl.trim() ? body.baseUrl.trim() : config.ai.baseUrl,
       apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : config.ai.apiKey,

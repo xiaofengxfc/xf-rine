@@ -11,6 +11,7 @@ import { getStrategy as getSavedStrategy, listStrategies as listSavedStrategies 
 import { chatJson, type AiSnapshot } from './ai.js';
 import type { Direction } from './sr/types.js';
 import type { TradeServices } from './tradeRoutes.js';
+import { bodyOf, flag } from './http/params.js';
 
 interface AiTradingRouteDeps {
   wrap: (fn: (req: Request, res: Response) => Promise<void>) => (req: Request, res: Response) => void;
@@ -177,7 +178,7 @@ export function mountAiTradingRoutes(router: Router, deps: AiTradingRouteDeps) {
    */
   router.post('/ai/strategy', wrap(async (req, res) => {
     requireLocal(req, '改 AI 策略');
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body = bodyOf(req.body);
     const current = loadStrategy();
     const merged = sanitizeStrategy(body, current);
     // 熔断是运行期状态，不该由页面顺手改掉；要解只能在页面上明确点「解除熔断」
@@ -301,7 +302,7 @@ export function mountAiTradingRoutes(router: Router, deps: AiTradingRouteDeps) {
     requireLocal(req, '停 AI 交易');
     aiRunner.stop();
     const cfg = loadStrategy();
-    const halt = (req.body ?? {}).halt === true;
+    const halt = flag(bodyOf(req.body).halt);
     const saved = saveStrategy(
       halt
         ? { ...cfg, enabled: false, haltReason: '手动急停', haltUntil: Date.now() + 24 * 3600_000 }
