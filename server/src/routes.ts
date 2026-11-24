@@ -720,6 +720,15 @@ router.get('/candles', wrap(async (req, res) => {
       throw new DataError(400, 'OTHER_VENUE',
         '这个品种属于 ' + asSpot.venue + '，当前服务端连的是 ' + config.exchange);
     }
+    /**
+     * 现货只有 Gate 这一条实现。Bitget 的现货 K 线还没写，
+     * 不能让它落到 Gate 的接口上去 —— 那会拿另一个市场的价格当本家的数据，
+     * 而页面看不出区别。这里明确说「还没接」，和 perp 那边同一个口径。
+     */
+    if (asSpot.venue !== 'gate') {
+      throw new DataError(501, 'MARKET_NOT_WIRED',
+        asSpot.venue + ' 的现货 K 线还没接。现在只有 Gate 现货能看（仍然只读）');
+    }
     const spotInterval = INTERVALS.has(String(req.query.interval)) ? String(req.query.interval) : '1m';
     const spotLimit = Math.round(qnum(req.query.limit, 500, 50, 1000));
     const beforeRaw = Number(req.query.before);
