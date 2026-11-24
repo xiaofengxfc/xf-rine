@@ -5,8 +5,9 @@
  * 这几条都是纯函数，拿构造的数据就能验，不需要网络也不需要起服务。
  */
 import {
+  FLAT_BODY_PX, FLAT_WICK_PX,
   INTERVAL_SEC, isFlatBar, isNoTradeBar, mergeNewer, mergeOlder, normalizeBars, paintBars,
-  paintBarsIncrementally, snapTime, sparseStats, upsertBar,
+  paintBarsIncrementally, scaleBucket, snapTime, sparseStats, upsertBar,
   type Bar,
 } from '../src/lib/candles.ts';
 import { backfill } from '../src/lib/backfill.ts';
@@ -75,11 +76,28 @@ const sample: Bar[] = [
   bar(240, 10.5, 12, 10, 11, 30),
 ];
 
-ok('paintBars：条数、顺序、开盘量都不动', () => {
+ok('paintBars：条数、顺序、成交量都不动', () => {
   const out = paintBars(sample, 0.01);
   eq(out.length, sample.length, '条数');
   eq(out.map((b) => b.time), sample.map((b) => b.time), '时间序列');
-  eq(out.map((b) => [b.open, b.close, b.volume]), sample.map((b) => [b.open, b.close, b.volume]), '开收量');
+  eq(out.map((b) => b.volume), sample.map((b) => b.volume), '成交量');
+});
+
+ok('paintBars：平价线只撑形状，中心仍钉在真实收盘价上', () => {
+  const out = paintBars(sample, 0.01);
+  if (out.length !== sample.length) throw new Error('条数变了');
+  for (let i = 0; i < out.length; i += 1) {
+    const src = sample[i]!;
+    const painted = out[i]!;
+    if (!isFlatBar(src)) {
+      eq(painted, { ...src, flat: false }, `第 ${i} 根正常 K 线不该动`);
+      continue;
+    }
+    // 平价线：开收和影线都被撑开了，但中心还是那个真实成交价
+    if (Math.abs((painted.open + painted.close) / 2 - src.close) > 1e-12) throw new Error('实体中心跑掉了');
+    if (Math.abs((painted.high + painted.low) / 2 - src.close) > 1e-12) throw new Error('影线中心跑掉了');
+    eq(painted.realClose, src.close, '原始收盘价留在 realClose 上');
+  }
 });
 
 ok('paintBars：平价线撑开后能画出来，且收盘价仍在高低之间', () => {
@@ -110,11 +128,67 @@ ok('paintBars：不改调用方传进来的数组', () => {
   eq(JSON.stringify(sample), before, '原始数据');
 });
 
+/**
+ * 像素撑开：这一批用例守的是「K 线之间断连」那个毛病。
+ *
+ * 撑半个最小变动价在多数合约上不到一个像素，一根平价线就只剩一行小横杠。
+ * 量得出屏幕比例时，实体和影线一律按像素撑，两根之间才连得上。
+ */
+const pxPerPx = 0.001; // 一个像素值 0.001 个价格
+
+ok('paintBars：量得出像素时实体和影线都按像素撑开', () => {
+  const out = paintBars(sample, 0.01, pxPerPx);
+  for (const b of out) {
+    if (!(b.high > b.low)) throw new Error(`${b.time} 还是画不出来`);
+  }
+  const flat = out[1]!;
+  const body = flat.close - flat.open;
+  const wick = flat.high - flat.low;
+  if (Math.abs(body - FLAT_BODY_PX * pxPerPx) > 1e-9) throw new Error(`实体高度应是 ${FLAT_BODY_PX}px：${body}`);
+  if (Math.abs(wick - FLAT_WICK_PX * pxPerPx) > 1e-9) throw new Error(`影线高度应是 ${FLAT_WICK_PX}px：${wick}`);
+  // 撑开之后实体仍然以真实收盘价为中心：位置不许挪
+  const mid = (flat.high + flat.low) / 2;
+  if (Math.abs(mid - 10.5) > 1e-9) throw new Error(`平价线中心跑掉了：${mid}`);
+});
+
+ok('paintBars：撑开过的收盘价另存一份，折线要用真实的', () => {
+  const out = paintBars(sample, 0.01, pxPerPx);
+  eq(out[1]!.realClose, 10.5, '平价线原始收盘价');
+  if (out[1]!.close === out[1]!.realClose) throw new Error('撑开之后 close 应当已经不同');
+  eq(out[0]!.realClose, undefined, '正常 K 线不需要另存');
+});
+
+ok('paintBars：没有像素信息时退回按最小变动价撑开', () => {
+  const out = paintBars(sample, 0.01, 0);
+  const flat = out[1]!;
+  if (Math.abs((flat.high - flat.low) - 0.01) > 1e-12) throw new Error('应撑开一个最小变动价');
+  // 实体跟着撑开一半，位置仍以真实收盘价为中心
+  if (Math.abs((flat.open + flat.close) / 2 - 10.5) > 1e-12) throw new Error('实体中心跑掉了');
+  if (!(flat.close > flat.open)) throw new Error('实体要有高度，否则又只剩一行小横杠');
+  eq(flat.realClose, 10.5, '原始收盘价留在 realClose 上');
+});
+
+ok('scaleBucket：差一成不换档，翻倍才换档', () => {
+  eq(scaleBucket(0.001), scaleBucket(0.0011), '差 10% 同一档');
+  if (scaleBucket(0.001) === scaleBucket(0.002)) throw new Error('翻倍应换档');
+  eq(scaleBucket(0), 0, '量不出来算 0 档');
+  eq(scaleBucket(Number.NaN), 0, 'NaN 算 0 档');
+});
+
+ok('增量撑开：像素当量变了要整段重算', () => {
+  const previous = paintBars(sample, 0.01, pxPerPx);
+  const incremental = paintBarsIncrementally(sample, 0.01, pxPerPx * 2, {
+    bars: sample, tick: 0.01, px: pxPerPx, painted: previous,
+  });
+  eq(incremental, paintBars(sample, 0.01, pxPerPx * 2), '与整段重算结果一致');
+  if (incremental[1] === previous[1]) throw new Error('像素当量变了却复用了旧的撑开结果');
+});
+
 ok('增量撑开：实时更新时复用未变化的历史 K 线', () => {
   const previous = paintBars(sample, 0.01);
   const next = sample.slice();
   next[next.length - 1] = bar(240, 10.5, 12.5, 10, 11.5, 32);
-  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  const incremental = paintBarsIncrementally(next, 0.01, 0, { bars: sample, tick: 0.01, px: 0, painted: previous });
   eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
   if (incremental[0] !== previous[0] || incremental[1] !== previous[1]) {
     throw new Error('未变化的 K 线应复用转换结果');
@@ -123,7 +197,7 @@ ok('增量撑开：实时更新时复用未变化的历史 K 线', () => {
 
 ok('增量撑开：最小变动价变化时重新计算全部 K 线', () => {
   const previous = paintBars(sample, 0.01);
-  const incremental = paintBarsIncrementally(sample, 0.1, { bars: sample, tick: 0.01, painted: previous });
+  const incremental = paintBarsIncrementally(sample, 0.1, 0, { bars: sample, tick: 0.01, px: 0, painted: previous });
   eq(incremental, paintBars(sample, 0.1), '与整段重算结果一致');
   if (incremental[1] === previous[1] || incremental[1]!.high === previous[1]!.high) {
     throw new Error('最小变动价变化后平价 K 线应重新撑开');
@@ -133,7 +207,7 @@ ok('增量撑开：最小变动价变化时重新计算全部 K 线', () => {
 ok('增量撑开：追加新 K 线时复用全部已有 K 线', () => {
   const previous = paintBars(sample, 0.01);
   const next = [...sample, bar(300, 11, 12, 10.5, 11.5, 26)];
-  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  const incremental = paintBarsIncrementally(next, 0.01, 0, { bars: sample, tick: 0.01, px: 0, painted: previous });
   eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
   if (incremental.slice(0, sample.length).some((item, index) => item !== previous[index])) {
     throw new Error('追加 K 线后已有转换结果应复用');
@@ -143,7 +217,7 @@ ok('增量撑开：追加新 K 线时复用全部已有 K 线', () => {
 ok('增量撑开：滑动数据窗口时复用未变化的重叠 K 线', () => {
   const previous = paintBars(sample, 0.01);
   const next = [sample[1]!, sample[2]!, sample[3]!, bar(300, 11, 12, 10.5, 11.5, 26)];
-  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  const incremental = paintBarsIncrementally(next, 0.01, 0, { bars: sample, tick: 0.01, px: 0, painted: previous });
   eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
   if (incremental[0] !== previous[1] || incremental[2] !== previous[3]) {
     throw new Error('滑动窗口中未变化的 K 线应复用转换结果');
@@ -154,7 +228,7 @@ ok('增量撑开：补入更早历史时复用已有 K 线', () => {
   const previous = paintBars(sample, 0.01);
   const older = bar(30, 8, 9, 7, 8.5);
   const next = [older, ...sample];
-  const incremental = paintBarsIncrementally(next, 0.01, { bars: sample, tick: 0.01, painted: previous });
+  const incremental = paintBarsIncrementally(next, 0.01, 0, { bars: sample, tick: 0.01, px: 0, painted: previous });
   eq(incremental, paintBars(next, 0.01), '与整段重算结果一致');
   if (incremental[1] !== previous[0] || incremental[2] !== previous[1]) {
     throw new Error('补历史后已有 K 线应复用转换结果');

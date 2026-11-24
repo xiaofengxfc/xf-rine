@@ -25,7 +25,9 @@ import type { Account, Bar, OpenOrder, Position, PriceOrder, Zone } from '../lib
 import {
   firstIndexAtOrAfter,
   normalizeBars,
+  paintBars,
   paintBarsIncrementally,
+  scaleBucket,
   sparseStats,
   type PaintedBar,
 } from '../lib/candles.ts';
@@ -55,8 +57,12 @@ const MOBILE_CHART_FONT_SIZE = 10;
  *
  * 以前固定 160 根：桌面上 866px 的面板一根只剩 4.9px，实体只有 3px、影线 1px，
  * 一整排看下来就是条形码。按「一根占多少像素」算，宽屏窄屏都落在实体画得出来的区间。
+ *
+ * 7.6 那个值实体只有 5px、两边各空 2~3px，一排看下来还是一根一条、连不上；
+ * 压到 6.4 之后实体仍是 5px，空当收到 1~1.5px，前后就挨得住了。
+ * 再密下去实体就要被压窄，所以到此为止。
  */
-const DEFAULT_BAR_PIXELS = 7.6;
+const DEFAULT_BAR_PIXELS = 6.4;
 const DEFAULT_MIN_BARS = 60;
 const DEFAULT_MAX_BARS = 140;
 /** 量柱占面板底部多大一条：上面的价格区跟着让位，两张不会叠在一起 */
@@ -87,6 +93,32 @@ function localTick(time: number, type: TickMarkType): string {
 function localCrosshair(time: number): string {
   const d = new Date(time * 1000);
   return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * 一个像素值多少价格。
+ *
+ * 平价 K 线要撑多高是按屏幕像素算的（见 candles.ts 的 FLAT_BODY_PX）：
+ * 撑半个最小变动价在多数合约上连一个像素都不到，一根平价线就只剩一行 1px 的小横杠，
+ * 一排看下来就是「K 线之间断连」。价格的坐标换算是线性的，拿这一份数据自己的
+ * 最高最低量一次斜率就够 —— 取整那一点误差摊到整幅画上可以忽略。
+ */
+function pricePerPixel(series: { priceToCoordinate(price: number): number | null }, list: Bar[]): number {
+  if (list.length === 0) return 0;
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  for (const b of list) {
+    if (b.low < lo) lo = b.low;
+    if (b.high > hi) hi = b.high;
+  }
+  if (!(hi > lo)) return 0;
+  try {
+    const y1 = series.priceToCoordinate(lo);
+    const y2 = series.priceToCoordinate(hi);
+    if (y1 === null || y2 === null) return 0;
+    const dy = Math.abs(y2 - y1);
+    return dy > 0 ? (hi - lo) / dy : 0;
+  } catch { return 0; }
 }
 
 /** 视口里平价占比超过这个数，就要说一句「这币成交稀疏」 */
@@ -384,13 +416,43 @@ export default function ChartPane({
    * 由可见区间的订阅更新（见下面视口那段）。
    */
   const followRef = useRef(true);
+  /**
+   * 「该按新的缩放重画一次平价 K 线」的计数器。
+   *
+   * 平价线撑多高是按屏幕像素算的，价格轴一动它就过期了；可数据那条 effect 只跟
+   * K 线、主题走，缩放不会叫醒它。这个计数就是叫醒它的那一下，见 requestRepaintOnScale。
+   */
+  const [paintEpoch, setPaintEpoch] = useState(0);
+  /** 上一次叫醒的时间，免得缩放中连着叫、整段重画一串 */
+  const lastBumpRef = useRef(0);
   /** 画图用的那版 K 线（平价线已撑开）。同一份数据只算一次，别每秒拷两万根 */
   const paintRef = useRef<{
     src: Bar[] | null;
     bars: Bar[];
     tick: number;
+    /** 画这一批平价线时一个像素值多少价格。缩放动了它才变 */
+    px: number;
+    /** px 分的档。同一档里不重算，免得拖一下图就整段重画 */
+    bucket: number;
     out: PaintedBar[];
-  }>({ src: null, bars: [], tick: -1, out: [] });
+  }>({ src: null, bars: [], tick: -1, px: 0, bucket: 0, out: [] });
+  /**
+   * 价格轴变过档就请求重画一次平价线。
+   *
+   * 差一成两成的缩放看着没区别，攒够一档才动 —— 每拖一下都整段重画的话，
+   * 一次补历史要看几十次闪烁。
+   */
+  const requestRepaintOnScale = useCallback(() => {
+    const price = priceRef.current;
+    const list = barsRef.current;
+    if (!price || list.length === 0) return;
+    const bucket = scaleBucket(pricePerPixel(price, list));
+    if (bucket === paintRef.current.bucket) return;
+    const now = Date.now();
+    if (now - lastBumpRef.current < 400) return;
+    lastBumpRef.current = now;
+    setPaintEpoch((n) => n + 1);
+  }, []);
   /**
    * 当前这套色板。
    *
@@ -698,11 +760,17 @@ export default function ChartPane({
     });
 
     // 美国线与 K 线共享同一份 OHLC 数据；K 线序列保留为绘图管理器的锚点。
+    /**
+     * 美国线。
+     *
+     * thinBars 关掉：开着的时候这一根只有 1px 宽，两边各空出三四个像素，
+     * 一整屏看下来就是一排断开的细针。关掉之后宽度跟蜡烛实体一样，前后挨得上。
+     */
     const bar = chart.addSeries(BarSeries, {
       upColor: c.up,
       downColor: c.down,
       openVisible: true,
-      thinBars: true,
+      thinBars: false,
       priceLineVisible: false,
       priceLineColor: c.priceLine,
       priceLineStyle: LineStyle.Dashed,
@@ -774,15 +842,23 @@ export default function ChartPane({
       }
       const volumeIndex = firstIndexAtOrAfter(barsRef.current, time);
       const volumeBar = barsRef.current[volumeIndex];
+      /**
+       * 读数按**原始** K 线取，不按序列里的那一份。
+       *
+       * 平价 K 线喂给图表的是撑开过的形状（见 paintBars）：开收被拉开了一点，
+       * 才有实体可画。读数要是跟着序列走，鼠标停在无成交的那几根上会读出一个
+       * 从来没成交过的开收价。
+       */
+      const raw = volumeBar && volumeBar.time === time ? volumeBar : null;
       // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
-      if (!d && !frame) { setLegend(null); return; }
+      if (!raw && !d && !frame) { setLegend(null); return; }
       setLegend({
-        o: d ? d.open : null,
-        h: d ? d.high : null,
-        l: d ? d.low : null,
-        c: d ? d.close : frame!.value,
-        v: v?.value ?? 0,
-        turnover: volumeBar?.time === time && volumeBar.turnover != null,
+        o: raw ? raw.open : d ? d.open : null,
+        h: raw ? raw.high : d ? d.high : null,
+        l: raw ? raw.low : d ? d.low : null,
+        c: raw ? raw.close : d ? d.close : frame!.value,
+        v: raw ? (raw.turnover ?? raw.volume) : v?.value ?? 0,
+        turnover: raw ? raw.turnover != null : volumeBar?.time === time && volumeBar.turnover != null,
         t: time,
         pattern: patternMapRef.current.get(time) ?? null,
       });
@@ -1346,7 +1422,7 @@ export default function ChartPane({
       upColor: c.up,
       downColor: c.down,
       openVisible: true,
-      thinBars: true,
+      thinBars: false,
       priceLineVisible: american,
       lastValueVisible: american,
     });
@@ -1373,14 +1449,20 @@ export default function ChartPane({
      */
     const painted = (): PaintedBar[] => {
       const cache = paintRef.current;
-      if (cache.src === bars && cache.tick === priceRound) return cache.out;
       const normalized = normalizeBars(bars);
-      const out = paintBarsIncrementally(normalized, priceRound, {
-        bars: cache.bars,
-        tick: cache.tick,
-        painted: cache.out,
-      });
-      paintRef.current = { src: bars, bars: normalized, tick: priceRound, out };
+      const px = pricePerPixel(price, normalized);
+      const bucket = scaleBucket(px);
+      if (cache.src === bars && cache.tick === priceRound && cache.bucket === bucket) return cache.out;
+      /**
+       * 同一档缩放里走增量，换了档就整段重画：撑开的当量变了，每一根平价线
+       * 都得重算，增量只补尾巴是补不上的。
+       */
+      const out = cache.bucket === bucket
+        ? paintBarsIncrementally(normalized, priceRound, px, {
+          bars: cache.bars, tick: cache.tick, px: cache.px, painted: cache.out,
+        })
+        : paintBars(normalized, priceRound, px);
+      paintRef.current = { src: bars, bars: normalized, tick: priceRound, px, bucket, out };
       return out;
     };
     /** 空心样式下实体内部就是底色，平价线也一样，不然一片灰会盖住网格 */
@@ -1400,9 +1482,13 @@ export default function ChartPane({
       ? { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close, color: colorsRef.current.flat }
       : { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close };
     const writeBar = (b: PaintedBar) => bar.update(barPoint(b));
-    /** 折线只用收盘价：稀疏合约看着就是价格的台阶，比一排小方块清楚 */
-    const writeLine = (b: PaintedBar) => line.update({ time: b.time as UTCTimestamp, value: b.close });
-    const lineData = (list: PaintedBar[]) => list.map((b) => ({ time: b.time as UTCTimestamp, value: b.close }));
+    /**
+     * 折线只用收盘价：稀疏合约看着就是价格的台阶，比一排小方块清楚。
+     * 平价线的 close 已经被撑开过（见 paintBars），折线要用撑开之前那个数。
+     */
+    const closeOf = (b: PaintedBar) => b.realClose ?? b.close;
+    const writeLine = (b: PaintedBar) => line.update({ time: b.time as UTCTimestamp, value: closeOf(b) });
+    const lineData = (list: PaintedBar[]) => list.map((b) => ({ time: b.time as UTCTimestamp, value: closeOf(b) }));
     /**
      * 成交量的颜色是逐根写在数据上的（涨绿跌红），台账里没有「按根变色」这个选项。
      * 深浅两套的浓淡不一样：同样的 0.28 落在白底上等于没画。
@@ -1615,6 +1701,9 @@ export default function ChartPane({
     };
 
     try {
+      const beforeBucket = paintRef.current.bucket;
+      /** 图上装的是不是还是这一份数据：是的话，形状变了才轮得到「重画」 */
+      const paintedOnChart = drawnSrcRef.current === bars;
       const cleanBars = painted();
       /**
        * 主题换了：平价线的中性灰和成交量那层淡色是**写在每根数据上**的，
@@ -1622,6 +1711,21 @@ export default function ChartPane({
        * 重画走 redraw：换的只是颜色，视口该在哪儿还在哪儿。
        */
       if (paintThemeRef.current && paintThemeRef.current !== theme) {
+        paintThemeRef.current = theme;
+        redraw(cleanBars);
+        return;
+      }
+      /**
+       * 平价线撑开的那一档变了：整批形状都跟着变，增量补不上。
+       *
+       * 增量只从图上最后一根往后写，前面那些平价线还留着上一档的高度 ——
+       * 要么是缩放换了档（见 requestRepaintOnScale），要么是刚铺完第一遍数据、
+       * 那会儿价格轴还没量出来（撑的是最小变动价），量出来之后要走这一条纠正。
+       *
+       * 判据用 drawnSrcRef：图上装的确实还是这一份数据，才谈得上「重画」。
+       * 视口不动，只把数据重画一遍。
+       */
+      if (paintedOnChart && beforeBucket !== paintRef.current.bucket && lastKeyRef.current === resetKey) {
         paintThemeRef.current = theme;
         redraw(cleanBars);
         return;
@@ -1803,7 +1907,8 @@ export default function ChartPane({
       try { fullLoad(); } catch { /* 实在不行就保持现状 */ }
     }
     // theme 也在依赖里：换主题要按新配色重画一遍（见上面那段）
-  }, [bars, resetKey, storageKey, theme]);
+    // paintEpoch：缩放换了档，平价线要按新当量重画一遍
+  }, [bars, resetKey, storageKey, theme, paintEpoch]);
 
   /**
    * 形态标记跟着 K 线和主题刷新。
@@ -1917,6 +2022,8 @@ export default function ChartPane({
         try { localStorage.setItem(viewKey, JSON.stringify(saved)); } catch { /* 存不了就算了 */ }
         // 提示跟着可视范围走：缩到有成交的那一段，那句「成交稀疏」就该自己消失
         refreshSparse();
+        // 缩放/平移之后价格轴变了：平价线要按新的像素当量重画一次
+        requestRepaintOnScale();
       }, 400);
 
       // 贴到最左边了：到头说明这时候才有意义
@@ -1944,14 +2051,21 @@ export default function ChartPane({
       window.clearTimeout(saveTimer);
       ts.unsubscribeVisibleLogicalRangeChange(handler);
     };
-  }, [onNeedOlder, resetKey, viewKey, refreshSparse]);
+  }, [onNeedOlder, resetKey, viewKey, refreshSparse, requestRepaintOnScale]);
 
   // ---- 新数据落地之后（含实时补课）重新数一次平价占比 ----
   useEffect(() => {
     // 等这一帧把图写完再量视口，早了拿到的是上一次的区间
-    const id = requestAnimationFrame(() => refreshSparse());
+    const id = requestAnimationFrame(() => {
+      refreshSparse();
+      /**
+       * 第一遍铺数据时价格轴还没量出来，平价线是按最小变动价撑的；
+       * 图落下去之后轴才有值，这里补一次 —— 撑开的当量换成像素，平价线才画得出来。
+       */
+      requestRepaintOnScale();
+    });
     return () => cancelAnimationFrame(id);
-  }, [bars, resetKey, refreshSparse]);
+  }, [bars, resetKey, refreshSparse, requestRepaintOnScale]);
 
   useChartPriceLines({
     refs: { price: priceRef, bar: barRef, line: lineRef, lines: levelLinesRef, bars: barsRef },

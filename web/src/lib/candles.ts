@@ -168,29 +168,89 @@ export function isNoTradeBar(b: Bar): boolean {
 export interface PaintedBar extends Bar {
   /** 原始数据是平价线，画之前已经被撑开过 */
   flat: boolean;
+  /**
+   * 撑开前的收盘价。
+   *
+   * 平价线的实体是靠撑开开收价画出来的（见 paintBars），撑开之后 close 已经不是
+   * 原来那个数了。折线、箭头这些按收盘价定位的还要用真实那个。
+   */
+  realClose?: number;
 }
 
 export interface PaintedBarsCache {
   bars: Bar[];
   tick: number;
+  /** 一个像素值多少价格。缩放动过它就变，撑开的当量也就跟着变 */
+  px: number;
   painted: PaintedBar[];
+}
+
+/**
+ * 平价 K 线撑开成多大一根（屏幕像素）。
+ *
+ * 以前撑的是半个最小变动价。可一跳在屏上常常连一个像素都不到：BTC 一分钟图上
+ * 一跳 0.1，整屏却有两千多个价位，撑开之后既没有实体也没有影线，一根平价 K 线
+ * 就只剩一行 1px 高的小横杠 —— 配上两侧的空当，看着就是「K 线之间断连」。
+ *
+ * 所以改成按像素定：实体至少 FLAT_BODY_PX 高，影线整个至少 FLAT_WICK_PX 高。
+ * 屏幕上多少价格算一个像素由调用方量出来传进来（见 ChartPane 里的 pricePerPixel）。
+ */
+export const FLAT_BODY_PX = 2.5;
+export const FLAT_WICK_PX = 7;
+
+/**
+ * 缩放变化超过这个倍数才重算撑开的当量。
+ *
+ * 每一档缩放都重算的话，拖一次图就要整段重画；差一成两成看不出区别，
+ * 攒够一个档再动一次就够了。
+ */
+export const FLAT_SCALE_STEP = 1.35;
+
+/** 缩放分档。同一档里不重算，见 FLAT_SCALE_STEP */
+export function scaleBucket(px: number): number {
+  return Number.isFinite(px) && px > 0 ? Math.round(Math.log(px) / Math.log(FLAT_SCALE_STEP)) : 0;
 }
 
 /**
  * 画图前把平价 K 线撑开。
  *
- * 撑的是影线（high/low），开、收、量一个数都不动：图上多出来的那半跳只为了
- * 让这一根能画出来，而不是「图上缺了一块」。形态、档位、盈亏这些要算数的，
- * 一律用原始数据，不许过这个函数。
+ * 撑开的是这一根的**形状**，不是它的数：平价线上根本没有成交，开收高低本来就该
+ * 是一个点。撑出来的高度只为了让它像一根 K 线那样看得见、连得上 ——
+ * 形态、档位、盈亏、读数一律用原始数据，不许过这个函数。
+ *
+ * 开收价也跟着撑（否则实体高度是 0，图上只剩一行 1px 的小横杠，那正是
+ * 「K 线之间断连」的样子），但撑开是**对称**的：实体和影线都以真实收盘价为
+ * 中心，位置不挪。真实收盘价另存一份在 realClose 上，折线、箭头要用它。
+ *
+ * @param px 一个像素值多少价格。给 0 时退回「撑半个最小变动价」的老做法。
  */
-export function paintBars(bars: Bar[], tick: number): PaintedBar[] {
+export function paintBars(bars: Bar[], tick: number, px = 0): PaintedBar[] {
   const out: PaintedBar[] = new Array(bars.length);
+  const perPixel = Number.isFinite(px) && px > 0 ? px : 0;
   for (let i = 0; i < bars.length; i += 1) {
     const b = bars[i]!;
     if (!isFlatBar(b)) { out[i] = { ...b, flat: false }; continue; }
-    // 没拿到最小变动价时按万分之几撑开：只影响像素，不参与任何计算
-    const half = (tick > 0 ? tick : Math.max(Math.abs(b.close) * 2e-4, 1e-9)) / 2;
-    out[i] = { ...b, high: b.close + half, low: b.close - half, flat: true };
+    /**
+     * 量得出像素就按像素撑：实体 FLAT_BODY_PX 高、影线 FLAT_WICK_PX 高。
+     *
+     * 量不出（第一遍铺数据时价格轴还没值）就退回老做法 —— 撑半个最小变动价，
+     * 好歹让这一根占住自己的格。这只影响画出来的样子，不参与任何计算。
+     */
+    const bodyHalf = perPixel > 0
+      ? perPixel * (FLAT_BODY_PX / 2)
+      : (tick > 0 ? tick : Math.max(Math.abs(b.close) * 2e-4, 1e-9)) / 4;
+    const wickHalf = perPixel > 0
+      ? perPixel * (FLAT_WICK_PX / 2)
+      : (tick > 0 ? tick : Math.max(Math.abs(b.close) * 2e-4, 1e-9)) / 2;
+    out[i] = {
+      ...b,
+      open: b.close - bodyHalf,
+      close: b.close + bodyHalf,
+      high: b.close + wickHalf,
+      low: b.close - wickHalf,
+      realClose: b.close,
+      flat: true,
+    };
   }
   return out;
 }
@@ -199,10 +259,11 @@ export function paintBars(bars: Bar[], tick: number): PaintedBar[] {
 export function paintBarsIncrementally(
   bars: Bar[],
   tick: number,
+  px: number,
   previous: PaintedBarsCache,
 ): PaintedBar[] {
-  if (previous.tick !== tick || previous.painted.length !== previous.bars.length) {
-    return paintBars(bars, tick);
+  if (previous.tick !== tick || previous.px !== px || previous.painted.length !== previous.bars.length) {
+    return paintBars(bars, tick, px);
   }
   if (previous.bars === bars) return previous.painted;
 
@@ -229,16 +290,16 @@ export function paintBarsIncrementally(
     ) {
       overlap += 1;
     }
-    if (overlap === 0) return paintBars(bars, tick);
+    if (overlap === 0) return paintBars(bars, tick, px);
 
     return [
       ...previous.painted.slice(offset, offset + overlap),
-      ...paintBars(bars.slice(overlap), tick),
+      ...paintBars(bars.slice(overlap), tick, px),
     ];
   }
 
   const changedEnd = bars.length - suffix;
-  const changed = paintBars(bars.slice(prefix, changedEnd), tick);
+  const changed = paintBars(bars.slice(prefix, changedEnd), tick, px);
   return [
     ...previous.painted.slice(0, prefix),
     ...changed,
