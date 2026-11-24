@@ -121,11 +121,26 @@ export const quantile = (sorted: number[], p: number): number =>
 
 // ---------- 累积器 ----------
 export interface Acc {
+  /** 命中次数（含平局样本）。门的样本数门槛用它 */
   n: number;
+  /**
+   * 逐持有期的**有方向**样本数：收益为 0 的那几笔不算。
+   * 胜率必须以它为分母。用 n 当分母的话，平局会被记成「没赢」，
+   * 而基准那边把平局跳过了 —— 两侧口径不一致，翻转口径下就会对不上。
+   */
+  decided: number[];
   wins: number[];
   edges: number[];
+  /**
+   * 这个形态在这一桶里的**有效方向**：命中之后赌的是多还是空。
+   * 正常口径下由形态自身决定（看涨 → long，看跌 → short）。
+   * 翻转口径（fade）下整个反过来 —— 基准也要跟着取另一侧，
+   * 否则会拿「随便做多」的胜率去比一个做空信号。
+   */
+  dir: 'long' | 'short';
 }
-export const newAcc = (): Acc => ({ n: 0, wins: HORIZONS.map(() => 0), edges: HORIZONS.map(() => 0) });
+export const newAcc = (dir: 'long' | 'short' = 'long'): Acc =>
+  ({ n: 0, decided: HORIZONS.map(() => 0), wins: HORIZONS.map(() => 0), edges: HORIZONS.map(() => 0), dir });
 
 export interface Bucket {
   /** 基准的原始计数，最后再除 —— 存比率再反推次数会累积误差 */
@@ -163,7 +178,26 @@ export const baseShort = (b: Bucket): number[] => b.baseCount.map((c, i) => (c >
  *   · 训练段末尾要带一段历史给趋势上下文用，但收益不能看过去；
  *   · 测试段要从起点之后才算命中，但 ATR 和 SMA 需要起点之前的历史。
  */
-export function feed(bucket: Bucket, bars: Bar[], from = 0, to = bars.length, horizonEnd = bars.length): void {
+export interface FeedOptions {
+  /**
+   * 翻转口径：把形态当成「趋势延续」信号，而不是「反转」信号。
+   *
+   * 反转形态说「看涨」，翻转口径就赌「看跌」。成交方向翻转之后，基准也要换成另一侧
+   * （看跌形态的基准是「随便做空」的胜率），否则比的是两件不同的事。
+   *
+   * 同一根 K 线的形态判定完全不变 —— 换的只是「这个形状之后该往哪边下注」这个假设。
+   */
+  fade?: boolean;
+}
+
+export function feed(
+  bucket: Bucket,
+  bars: Bar[],
+  from = 0,
+  to = bars.length,
+  horizonEnd = bars.length,
+  opts: FeedOptions = {},
+): void {
   const lo = Math.max(0, from);
   const hi = Math.min(to, bars.length);
   if (hi <= lo) return;
@@ -213,14 +247,20 @@ export function feed(bucket: Bucket, bars: Bar[], from = 0, to = bars.length, ho
     const a = atr[confirm];
     const close = bars[confirm]!.close;
     if (!Number.isFinite(a) || a <= 0 || close <= 0) continue;
+    // 有效方向：形态说看跌就做空；翻转口径下整个对调
+    const rawShort = meta.direction === 'bearish';
+    const effectiveShort = opts.fade ? !rawShort : rawShort;
     let acc = bucket.patterns.get(id);
-    if (!acc) { acc = newAcc(); bucket.patterns.set(id, acc); }
+    if (!acc) { acc = newAcc(effectiveShort ? 'short' : 'long'); bucket.patterns.set(id, acc); }
     let counted = false;
     for (let hi = 0; hi < HORIZONS.length; hi += 1) {
       const h = HORIZONS[hi]!;
       if (confirm + h >= limit) continue;
       const r = (bars[confirm + h]!.close - close) / close;
-      const signed = meta.direction === 'bearish' ? -r : r;
+      // 平局不进胜率分母：基准那边也是这么跳过的，两侧口径必须一致
+      if (r === 0) continue;
+      const signed = effectiveShort ? -r : r;
+      acc.decided[hi]! += 1;
       acc.wins[hi]! += signed > 0 ? 1 : 0;
       // 单笔贡献上限 10 倍 ATR：低波动段偶尔会有一根 ATR 极小的，不夹住均值会被它拉跑
       const edge = Math.max(-10, Math.min(10, signed / (a / close)));
@@ -244,9 +284,10 @@ export function mergeBuckets(target: Bucket, src: Bucket): void {
   target.lastTime = Math.max(target.lastTime, src.lastTime);
   for (const [id, acc] of src.patterns) {
     let cur = target.patterns.get(id);
-    if (!cur) { cur = newAcc(); target.patterns.set(id, cur); }
+    if (!cur) { cur = newAcc(acc.dir); target.patterns.set(id, cur); }
     cur.n += acc.n;
     for (let hi = 0; hi < HORIZONS.length; hi += 1) {
+      cur.decided[hi]! += acc.decided[hi]!;
       cur.wins[hi]! += acc.wins[hi]!;
       cur.edges[hi]! += acc.edges[hi]!;
     }
@@ -284,11 +325,15 @@ export function rowsOf(bucket: Bucket, applyFdr = true): Row[] {
   const shorts = baseShort(bucket);
   const rows: Row[] = [];
   for (const [id, acc] of bucket.patterns) {
-    const meta = getPatternMetadata(id);
-    const base = meta?.direction === 'bearish' ? shorts[primaryIdx]! : longs[primaryIdx]!;
+    // 基准跟着**有效方向**走，不跟着形态的教科书方向走：翻转口径下这一点会不同
+    const baseSeries = acc.dir === 'short' ? shorts : longs;
+    const base = baseSeries[primaryIdx]!;
     if (!Number.isFinite(base)) continue;
-    const win = acc.n > 0 ? acc.wins[primaryIdx]! / acc.n : 0;
-    const z = acc.n > 0 && base > 0 && base < 1 ? (win - base) / Math.sqrt((base * (1 - base)) / acc.n) : 0;
+    // 分母用「有方向的样本」：平局两边都不计，基准那边本来也是跳过的
+    const decided = acc.decided[primaryIdx]!;
+    const win = decided > 0 ? acc.wins[primaryIdx]! / decided : 0;
+    const z = decided > 0 && base > 0 && base < 1
+      ? (win - base) / Math.sqrt((base * (1 - base)) / decided) : 0;
     rows.push({
       id, acc, win, base,
       excess: win - base,
@@ -296,7 +341,7 @@ export function rowsOf(bucket: Bucket, applyFdr = true): Row[] {
       p: pRight(z),
       q: 1,
       edgeAtr: acc.n > 0 ? acc.edges[primaryIdx]! / acc.n : 0,
-      winByHorizon: HORIZONS.map((_, hi) => (acc.n > 0 ? acc.wins[hi]! / acc.n : 0)),
+      winByHorizon: HORIZONS.map((_, hi) => (acc.decided[hi]! > 0 ? acc.wins[hi]! / acc.decided[hi]! : 0)),
     });
   }
   if (applyFdr && rows.length > 0) {
@@ -367,7 +412,11 @@ export interface FoldReport {
  *   · 测试段 [trainEnd, testEnd)：命中必须确认在测试段内，收益也只能看到 testEnd；
  *   · 各折测试段合并 —— 下面这张表就是「从没见过的那部分数据」上的表现。
  */
-export function walkForward(series: Series[], folds: number): { test: Bucket; reports: FoldReport[] } {
+export function walkForward(
+  series: Series[],
+  folds: number,
+  opts: FeedOptions = {},
+): { test: Bucket; reports: FoldReport[] } {
   const test = newBucket();
   const reports: FoldReport[] = [];
   // 每一折的测试段都单独建桶，最后再按形态合并（不能共用一个桶，否则各折的基准会串）
@@ -391,7 +440,7 @@ export function walkForward(series: Series[], folds: number): { test: Bucket; re
     // 训练段：可以看到整段历史，收益只到 trainEnd
     for (const { s, win } of perSeries) {
       const end = Math.min(s.bars.length, win.trainEnd + hLast);
-      feed(train, s.bars.slice(0, end), 0, win.trainEnd);
+      feed(train, s.bars.slice(0, end), 0, win.trainEnd, end, opts);
     }
 
     const trainRows = rowsOf(train);
@@ -405,7 +454,7 @@ export function walkForward(series: Series[], folds: number): { test: Bucket; re
     for (const { s, win } of perSeries) {
       const fromPad = Math.max(0, win.trainEnd - pad);
       const end = Math.min(s.bars.length, win.testEnd + hLast);
-      feed(seg, s.bars.slice(fromPad, end), win.trainEnd - fromPad, win.testEnd - fromPad);
+      feed(seg, s.bars.slice(fromPad, end), win.trainEnd - fromPad, win.testEnd - fromPad, end, opts);
     }
 
     // 只把训练段选中的形态并进汇总：测试段是给「选」做检验，不是重新选一遍
@@ -421,13 +470,15 @@ export function walkForward(series: Series[], folds: number): { test: Bucket; re
       if (cur) {
         cur.n += row.acc.n;
         for (let hi = 0; hi < HORIZONS.length; hi += 1) {
+          cur.decided[hi]! += row.acc.decided[hi]!;
           cur.wins[hi]! += row.acc.wins[hi]!;
           cur.edges[hi]! += row.acc.edges[hi]!;
         }
       } else {
-        const acc = newAcc();
+        const acc = newAcc(row.acc.dir);
         acc.n = row.acc.n;
         for (let hi = 0; hi < HORIZONS.length; hi += 1) {
+          acc.decided[hi] = row.acc.decided[hi]!;
           acc.wins[hi] = row.acc.wins[hi]!;
           acc.edges[hi] = row.acc.edges[hi]!;
         }

@@ -58,6 +58,8 @@ interface Options {
   key: 'all' | 'interval';
   folds: number;
   walk: boolean;
+  /** 翻转口径：把形态当成趋势延续信号来验 */
+  fade: boolean;
 }
 const ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
@@ -73,6 +75,7 @@ function parseArgs(argv: string[]): Options {
     key: 'all',
     folds: 3,
     walk: true,
+    fade: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
@@ -86,6 +89,7 @@ function parseArgs(argv: string[]): Options {
     else if (a === '--cache') opt.cache = next();
     else if (a === '--folds') opt.folds = Math.max(2, Math.min(6, Number(next()) || 3));
     else if (a === '--no-walk') opt.walk = false;
+    else if (a === '--fade') opt.fade = true;
     else if (a === '--key') {
       const v = next();
       if (v !== 'all' && v !== 'interval') throw new Error('--key 只能是 all 或 interval');
@@ -132,10 +136,11 @@ async function main(): Promise<void> {
   const lastTime = Math.max(...series.map((s) => s.bars[s.bars.length - 1]!.time));
   const iso = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
 
-  const walked = opt.walk && opt.folds >= 2 ? walkForward(series, opt.folds) : null;
+  const feedOpts = { fade: opt.fade };
+  const walked = opt.walk && opt.folds >= 2 ? walkForward(series, opt.folds, feedOpts) : null;
   const bucket = walked ? walked.test : (() => {
     const b = newBucket();
-    for (const s of series) feed(b, s.bars);
+    for (const s of series) feed(b, s.bars, 0, s.bars.length, s.bars.length, feedOpts);
     return b;
   })();
 
@@ -161,8 +166,13 @@ async function main(): Promise<void> {
   lines.push(' * excess = win − base 才是这个形态的增量。q 是 Benjamini-Hochberg 校正后的假发现率。');
   lines.push(' * tier 0 = 样本不足或校正后没有增量，1~3 = 增量越显著越高。');
   lines.push(' *');
+  if (opt.fade) {
+    lines.push(' * **这份表是翻转口径（--fade）。** 形态判定不变，但赌的方向和教科书相反：');
+    lines.push(' * 反转形态被当成「趋势延续」信号来验。基准也换成对应的另一侧。');
+    lines.push(' *');
+  }
   lines.push(' * 注意：tier **不是**上不上图的门槛。实测一个形态都过不了线，按门槛筛会让整个开关变成');
-  lines.push(' * 死功能。界面只按 tier 决定稀疏程度和排序，标记本身只标位置、不标方向（见 patterns.ts）。');
+  lines.push(' * 死功能。界面只按 tier 决定稀疏程度和排序；标记画的是教科书的涨跌方向（见 patterns.ts）。');
   lines.push(' */');
   lines.push('');
   lines.push('export type StatTier = 0 | 1 | 2 | 3;');
@@ -214,6 +224,7 @@ async function main(): Promise<void> {
   for (const s of series) {
     let b = byInterval.get(s.interval);
     if (!b) { b = newBucket(); byInterval.set(s.interval, b); }
+    // 趋势对齐度只跟形态的教科书方向有关，翻转口径不影响它，所以这里不传 fade
     feed(b, s.bars);
   }
   lines.push('export const TREND_SENSITIVITY: Record<string, number> = {');
@@ -240,6 +251,8 @@ async function main(): Promise<void> {
     minExcess: MIN_EXCESS,
     /** null = 没分折（全样本，既选又验） */
     folds: walked ? opt.folds : null,
+    /** true = 翻转口径（把反转形态当成趋势延续来验） */
+    fade: opt.fade,
     source: opt.dir ? 'dir:' + opt.dir : 'gate-futures',
   }, null, 2) + ';');
   lines.push('');
