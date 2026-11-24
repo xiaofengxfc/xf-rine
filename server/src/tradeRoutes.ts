@@ -578,6 +578,25 @@ export function mountTradeRoutes(router: Router, deps: TradeRouteDeps) {
     // 价格偏离保护：限价单价格不能离现价太远，防手滑
     if (!isMarket) {
       const last = Number(c.last_price);
+      /**
+       * 方向和幅度是两件事，以前只查了幅度。
+       *
+       * 买单挂在现价上方、卖单挂在下方，都是「一挂出去就能成交」的价：交易所那边
+       * 会拒，但回的是 PRICE_TOO_DEVIATED，而那条文案说的是「盘口没有能成交的价」——
+       * 于是一个填错方向的限价单，被解释成行情太薄。两句话都不假，但都对不上真正的原因。
+       *
+       * 只对 gtc / poc 查方向：ioc / fok 本来就是「允许吃单、吃不掉就撤」，
+       * 穿过现价是它们的正常用法。
+       */
+      const buy = spec.side === 'long';
+      const crosses = buy ? price > last : price < last;
+      if (crosses && (spec.tif === undefined || spec.tif === 'gtc' || spec.tif === 'poc')) {
+        throw new GateError(400, 'PRICE_SIDE',
+          (buy ? '买' : '卖') + '单的限价挂在现价 ' + last + ' '
+          + (buy ? '上方' : '下方') + '，挂出去就会立刻成交。'
+          + (buy ? '买单要低于现价' : '卖单要高于现价')
+          + '；想「到价再进」请用触发单，不是限价单');
+      }
       const deviate = Math.abs(price - last) / last;
       const cap = Math.max(0.05, Number(c.order_price_deviate) || 0.05);
       if (deviate > cap) {

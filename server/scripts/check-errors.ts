@@ -83,6 +83,20 @@ check('非 GateError 原样返回', translate(plain) === plain, true);
 
 // ---- 7. 撤一张已经不在的单：要翻成人话 ----
 // Gate 只回一个码（{"label":"ORDER_NOT_FOUND"}），以前 detail 里是整段原始 JSON。
+/**
+ * 限价被拒和市价被拒不是一回事。
+ * 以前两个码共用「盘口没有能成交的价」那句 —— 限价单走到那儿，多半是方向填反了，
+ * 说成行情太薄会让人去查盘口，而真正要改的是输进去的价。
+ */
+const limitDeviated = translate(new GateError(400, 'PRICE_TOO_DEVIATED', 'price deviation')) as GateError;
+const marketDeviated = translate(new GateError(400, 'MARKET_PRICE_TOO_DEVIATED', 'price deviation')) as GateError;
+check('限价被拒时提示检查方向，而不是说盘口太薄',
+  /方向/.test(limitDeviated.detail) && /买单要低于现价/.test(limitDeviated.detail),
+  true);
+check('市价被拒仍然说是盘口的问题',
+  /盘口/.test(marketDeviated.detail),
+  true);
+
 const notFound = translate(new GateError(404, 'ORDER_NOT_FOUND', 'ORDER_NOT_FOUND')) as GateError;
 check('委托找不到时换成 400 并保留错误码',
   { label: notFound.label, status: notFound.status },

@@ -343,7 +343,20 @@ export function translate(e: unknown): unknown {
       '这张委托已经不在挂着了：可能刚成交、或者已经被撤掉。刷新一下委托列表看看');
   }
 
-  if (e.label === 'MARKET_PRICE_TOO_DEVIATED' || e.label === 'PRICE_TOO_DEVIATED') {
+  /**
+   * 限价单被拒，和市价单被拒不是一回事。
+   *
+   * 以前两个码共用一句「盘口另一边没有能成交的价」—— 那是市价单的情形。
+   * 限价单走到这里，多半是挂在了会立刻成交的一侧（方向填反），说成「盘口太薄」
+   * 会让人去查行情，而真正要改的是输进去的那个价。
+   */
+  if (e.label === 'PRICE_TOO_DEVIATED') {
+    return new GateError(400, 'PRICE_TOO_DEVIATED',
+      '交易所拒了这张限价单：价格离盘口太远，或者挂在了会立刻成交的一侧。'
+      + '检查一下方向 —— 买单要低于现价、卖单要高于现价；想「到价再进」请用触发单');
+  }
+
+  if (e.label === 'MARKET_PRICE_TOO_DEVIATED') {
     // 这句最常出现在平仓上：盘口是空的，市价平不掉，用户会以为程序坏了
     return new GateError(
       400,
