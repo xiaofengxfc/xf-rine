@@ -33,6 +33,7 @@ import {
 } from '../lib/candles.ts';
 import { followRange, viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { chartStorageKeys, clearChartValue, readChartValue, writeChartValue } from '../lib/chartStorage.ts';
+import type { MarketCapabilities } from '../lib/instrument.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
@@ -248,6 +249,8 @@ interface Props {
    * 可选：配置还没回来时没有它，退回只用裸符号的老键（见 lib/chartStorage.ts）。
    */
   instrument?: string;
+  /** 当前市场能干哪些事。没有就按永续的既有行为走（有强平价） */
+  capabilities?: MarketCapabilities;
   interval: string;
   bars: Bar[];
   zones: Zone[];
@@ -312,7 +315,7 @@ interface Props {
 export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
-  contract, instrument, interval, bars, zones, positions, orders, account, priceOrders = [], multiplier, markPrice, priceRound,
+  contract, instrument, capabilities, interval, bars, zones, positions, orders, account, priceOrders = [], multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, historyEndHint, backfilling, onIntervalChange, onManualLevels,
   intervals = INTERVALS as unknown as string[],
   canClose, onClosePosition, onPickPrice, hasPosition, research = false,
@@ -2147,7 +2150,12 @@ export default function ChartPane({
    * 数字全部由 pnlOf 现算 —— 和持仓卡、和交易所是同一个口径，多空两边也一样。
    */
   const positionViews = positions.map((p) => {
-    const liqPrice = positionLiquidationPrice(p, account, stale ? 0 : markPrice);
+    /**
+     * 没有强平价的市场（现货）不去估算：现货没有「这一笔能亏到哪」这条线，
+     * 硬算出来的是个看着像真数据的数。capabilities 还没拿到时按永续的老行为走。
+     */
+    const noLiquidation = capabilities?.hasLiquidation === false;
+    const liqPrice = noLiquidation ? 0 : positionLiquidationPrice(p, account, stale ? 0 : markPrice);
     return {
       p,
       // 数据停更时别拿实时的价去配旧的持仓：那一行会变成「旧开仓 + 新价格」，
@@ -2155,6 +2163,7 @@ export default function ChartPane({
       live: pnlOf(p, stale ? 0 : markPrice, multiplier),
       liqPrice,
       estimatedLiq: !(p.liqPrice > 0) && liqPrice > 0,
+      noLiquidation,
       // 这一边挂着的止损止盈。和图上那两条虚线是同一份数据，读数不会两边不一样
       prot: bracketOf(priceOrders, p.contract, p.direction),
     };
@@ -2419,7 +2428,7 @@ export default function ChartPane({
         )}
         {positionViews.length > 0 && (
           <div className={'chart-pos' + (stale ? ' stale' : '')}>
-            {positionViews.map(({ p, live, liqPrice, estimatedLiq, prot }) => {
+            {positionViews.map(({ p, live, liqPrice, estimatedLiq, prot, noLiquidation }) => {
               const isLong = p.direction === 'long';
               const asking = closing === p.direction;
               return (
@@ -2433,7 +2442,7 @@ export default function ChartPane({
                       {live.pct !== null && <span className="dim"> ({fmtPct(live.pct, 2)})</span>}
                     </span>
                   </div>
-                  {liqPrice > 0 && (
+                  {liqPrice > 0 && !noLiquidation && (
                     <div className="cp-liq-mobile warn">
                       强平 {estimatedLiq ? '≈ ' : ''}{fmtPrice(liqPrice, priceRound)}
                     </div>
@@ -2441,7 +2450,7 @@ export default function ChartPane({
                   <div className="cp-mid">
                     <span className="cp-entry">开仓 {fmtPrice(p.entryPrice, priceRound)}</span>
                     <span className="cp-mark">标记 {fmtPrice(live.price, priceRound)}</span>
-                    {liqPrice > 0 && <span className="warn">强平 {estimatedLiq ? '≈ ' : ''}{fmtPrice(liqPrice, priceRound)}</span>}
+                    {liqPrice > 0 && !noLiquidation && <span className="warn">强平 {estimatedLiq ? '≈ ' : ''}{fmtPrice(liqPrice, priceRound)}</span>}
                     {/* 止损止盈：没设就直说「未设」，别让一行空白看起来像没读到 */}
                     <span className={prot.stop ? 'down' : 'dim'}>
                       止损 {prot.stop ? fmtPrice(prot.stop.triggerPrice, priceRound) : '未设'}

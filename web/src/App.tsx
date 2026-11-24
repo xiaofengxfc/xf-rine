@@ -640,6 +640,7 @@ export default function App() {
           <ChartPane
             contract={contract}
             instrument={instrument}
+            capabilities={config?.capabilities}
             interval={interval}
             bars={bars}
             // 历史位一起交给图：这次没算出来但还留着的那几条，画淡一点
