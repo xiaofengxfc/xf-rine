@@ -488,38 +488,92 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .pm-foot { padding: 5px 8px 2px; font-size: 10px; color: var(--text-2); }
 
 /**
- * 图上左上角那排 O/H/L/C。
+ * 手机上取价菜单是底部那一张卡片，不是贴在手指边的小浮层。
  *
- * 它是悬停时才有的一行读数，压在 K 线上面 —— 不加底衬的话，蜡烛正好穿过去，
- * 数字和影线混成一片。做成一片半透明的圆角底，既不挡图，也读得清。
+ * 原来的位置按鼠标坐标算，手机上要么压住刚点的那一根，要么一半在屏幕外。
+ * 底部贴着手指够得着的地方，行高按手指尺寸放大。
+ */
+.price-menu.sheet {
+  left: 8px;
+  right: 8px;
+  bottom: calc(8px + var(--inset-bottom));
+  top: auto;
+  width: auto;
+  min-width: 0;
+  padding: 6px;
+  border-radius: 12px;
+  box-shadow: 0 -10px 34px rgba(0, 0, 0, 0.4);
+}
+.price-menu.sheet .pm-head { padding: 7px 6px 8px; }
+.price-menu.sheet .pm-item { padding: 12px 10px; font-size: 13px; border-radius: 7px; }
+.price-menu.sheet .pm-hint { font-size: 10.5px; }
+.price-menu.sheet .pm-foot { padding: 8px 8px 4px; font-size: 10.5px; }
+
+/**
+ * 图上那一格读数（O/H/L/C + 成交量 + 形态）。
+ *
+ * 原来是一整颗「药丸」：一行字、999px 圆角、半透明底。桌面上放得下，手机上就散了 ——
+ * 四个价格加成交量一行 300px 起步，剩下的字被挤到第二行，圆角又把两头切掉一块，
+ * 底下的 K 线还从半透明里透出来。现在改成一块小卡片：
+ *
+ *   · 固定宽上限，右侧给价格轴让出 84px（轴上那排数字比这块读数更常用）；
+ *   · 圆角给小值，多行也不会变成歪的胶囊；
+ *   · 手机上 O/H/L/C 排成 2×2，一行两个价，读起来是竖着对齐的。
  */
 .chart-badge {
-  position: absolute; left: 10px; top: 8px; z-index: 4;
-  display: flex; align-items: center; gap: 9px;
-  padding: 2px 9px 2px 10px;
+  position: absolute; left: 8px; top: 8px; z-index: 5;
+  display: flex; flex-direction: column; gap: 3px;
+  max-width: calc(100% - 88px);
+  padding: 5px 9px 6px;
   border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: var(--overlay-1);
-  backdrop-filter: blur(6px);
+  border-radius: 9px;
+  background: var(--overlay-2);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
   pointer-events: none;
   font-size: 10.5px; color: var(--text-2); font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
-  line-height: 1.7;
-  /* 窄屏上这一行会顶到图的右边：允许换行，别让它被裁掉半截 */
-  max-width: calc(100% - 20px);
-  flex-wrap: wrap;
+  line-height: 1.6;
 }
+.chart-badge .cb-ohlc { display: flex; flex-wrap: wrap; gap: 1px 10px; }
 .chart-badge .up { color: var(--up); }
 .chart-badge .down { color: var(--down); }
-/* 「这一根是什么形态」：和 O/H/L/C 一起显示，但用一条细线隔开，别混成一组读数 */
-.badge-sep { width: 1px; height: 10px; background: var(--line); }
+/* 钉住的那一格：边框亮一点，表示「这一格先留着」 */
+.chart-badge.pinned { border-color: var(--line); background: var(--overlay-1); }
+/* 手机：O/H/L/C 分成 2×2 + 成交量和形态各占一整行 */
+.chart-badge.narrow { left: 6px; top: 6px; right: 80px; max-width: none; }
+.chart-badge.narrow .cb-ohlc {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 10px; row-gap: 0;
+}
+.chart-badge.narrow .cb-vol { grid-column: 1 / -1; }
+.chart-badge .cb-pattern { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+/**
+ * 卡片上的小按钮。整张卡片是 pointer-events: none（它压在 K 线上，不能吃掉拖图手势），
+ * 所以按钮这一行要把鼠标事件重新打开，否则点不动。
+ */
+.chart-badge .cb-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; pointer-events: auto; }
+.chart-badge .cb-act {
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-3);
+  color: var(--text-1);
+  font-size: 10.5px;
+  /* 手机上的主要落点：左右 11px、上下撑到 26px，手指点得中 */
+  min-height: 26px;
+  padding: 3px 11px;
+}
+.chart-badge .cb-act:hover { color: var(--text-0); border-color: var(--bg-4); }
 .badge-pattern { display: inline-flex; align-items: baseline; gap: 5px; color: var(--text-1); }
 .badge-pattern em { font-style: normal; font-weight: 600; }
-/* 方向用中性色：那是教科书的说法。实测数字跟在后面，才是能不能当真的依据 */
+/* 方向用中性色：那是教科书的说法，不替数据下结论。实测数字跟在后面，才是能不能当真的依据 */
 .badge-pattern.bull em,
 .badge-pattern.bear em { color: var(--text-1); }
 .badge-pattern .badge-stat { color: var(--text-2); }
+
+/* 图上有读数时，持仓摘要往下让 —— 两块都贴左上角，不让位就会叠在一起 */
+.chart-wrap.has-readout .chart-pos { top: 62px; }
 
 /* 图上的持仓摘要：已盈亏、止损止盈，以及打到那里各平出多少钱。
    纯展示，不接收鼠标 —— 挡在 K 线上方，但拖动、缩放、画线都照常。 */
@@ -562,24 +616,30 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .cp-acts { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; pointer-events: auto; }
 .btn.xs { width: auto; padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
 
-/* 私有数据停更：图上的均价/止损止盈都是旧快照，先说清楚再让人看 */
-.chart-stale {
-  position: absolute; right: 78px; top: 8px; z-index: 5;
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(240, 180, 41, 0.45);
-  background: rgba(240, 180, 41, 0.14);
-  color: var(--warn);
-  font-size: 10.5px;
-  font-family: var(--mono);
-  pointer-events: none;
-  max-width: calc(100% - 96px);
-}
 .chart-pos.stale { opacity: 0.5; }
 
-/* 成交稀疏：可视区里大半天没有成交，图上一片灰线。说一句，别让人以为 K 线残了 */
-.chart-sparse {
-  position: absolute; left: 12px; bottom: 12px; z-index: 5;
+/**
+ * 图上那几句提示，排成左下角的一列。
+ *
+ * 以前「持仓停更」在右上、「成交稀疏」在左下、「历史到头」在它上面一格 —— 三个绝对位置，
+ * 手机上一屏只放得下一条，停更那一条还正好盖住顶上的读数角标。改成同一列之后谁也不叠谁：
+ * 有几句就画几句，全都没有时整块不占地方。
+ */
+.chart-hints {
+  position: absolute;
+  left: 8px;
+  right: 84px;
+  bottom: 26px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  max-width: calc(100% - 96px);
+  pointer-events: none;
+}
+.chart-hint {
+  max-width: 100%;
   padding: 3px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
@@ -587,23 +647,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: var(--text-2);
   font-size: 10.5px;
   font-family: var(--mono);
-  pointer-events: none;
-  max-width: calc(100% - 24px);
+  line-height: 1.45;
+}
+.chart-hint.warn {
+  border-color: rgba(240, 180, 41, 0.45);
+  background: rgba(240, 180, 41, 0.14);
+  color: var(--warn);
 }
 
-/* 历史到头：交易所只留最近一段，翻到最老那根就在这里说一声，别让人以为卡死了 */
-.chart-edge {
-  position: absolute; left: 12px; bottom: 30px; z-index: 5;
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--overlay-2);
-  color: var(--text-1);
-  font-size: 10.5px;
-  font-family: var(--mono);
-  pointer-events: none;
-  max-width: calc(100% - 24px);
-}
+/**
+ * 图上那几句提示都用 .chart-hint 排在 .chart-hints 里，旧的三个绝对定位已经删掉：
+ * 它们在手机上会互相叠住，也会压到顶上的读数卡片。
+ */
 
 /* 关键价位带 */
 .levels-strip {
@@ -654,7 +709,11 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .ps-item {
   flex: none;
   display: inline-flex; align-items: baseline; gap: 6px;
-  padding: 1px 8px 2px;
+  /* 这一条现在是按钮：点一下就定位到图上那一根，所以要把浏览器默认的按钮样式清掉 */
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 8px 4px;
   border-radius: 999px;
   border: 1px solid var(--line-soft);
   background: var(--bg-2);
@@ -663,13 +722,19 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .ps-item .ps-time { color: var(--text-2); }
 .ps-item .ps-name { color: var(--text-0); font-weight: 600; }
 .ps-item .ps-dir { font-weight: 600; }
-/* 方向只是「教科书这么说」，用中性色：形态没有经得起检验的方向增量（见 patterns.ts 文件头） */
+/* 列表里的方向字同样用中性色：图上的箭头是教科书的颜色，这里的文字不必再喊一遍 */
 .ps-item.bull .ps-dir,
 .ps-item.bear .ps-dir { color: var(--text-1); }
 /* 实测胜率 / 基准，压得比名字淡一档：是背景信息，不是结论 */
 .ps-item .ps-stat { color: var(--text-2); font-size: 10px; }
 /* 不比基准高的形态把数字再压一档：它不构成任何方向暗示 */
 .ps-item .ps-stat.flat { opacity: 0.72; }
+.ps-item:hover { border-color: var(--line); background: var(--bg-3); }
+.ps-item:active { background: var(--bg-4); }
+/* 手机上点一条要能点中：横向留白按手指加一点，纵向至少 30px */
+@media (max-width: 760px) {
+  .ps-item { min-height: 30px; padding: 5px 9px 6px; align-items: center; }
+}
 
 
 .lv {
@@ -1579,6 +1644,67 @@ body:has(.modal-bg) { overflow: hidden; }
     height: calc(100dvh - 20px - var(--inset-top) - var(--inset-bottom));
   }
   .ip-row .input { font-size: 12px; }
+}
+
+/**
+ * 手机上的图表：读数卡片、提示列、和「摸得到」的按钮。
+ *
+ * 这一组都是 760 以下才生效的，桌面上那张图一个字都不改。
+ */
+@media (max-width: 760px) {
+  /* 有读数时持仓摘要再往下让一档：手机上角标是 3 行，桌面的 62px 不够 */
+  .chart-wrap.has-readout .chart-pos { top: 96px; }
+
+  /* 读数卡片别把 K 线盖死：半透明改实一点，图和字才不糊在一起 */
+  .chart-badge.narrow { font-size: 10px; background: var(--bg-1); }
+  .chart-badge.narrow .cb-pattern { row-gap: 1px; }
+  .chart-badge.narrow .badge-pattern .badge-stat { display: block; }
+
+  /* 提示列压在成交量那条上：那里本来就没有价格可读 */
+  .chart-hints { left: 6px; right: 74px; bottom: 22px; }
+  .chart-hint { font-size: 10px; padding: 2px 7px; }
+
+  /* 工具条上的按钮都在横向滚动里：给手指留够高度，别 24px 一条 */
+  .chart-tools { gap: 8px; padding: 7px 10px; }
+  .chart-tools .seg button { min-height: 30px; padding: 6px 11px; }
+  .chart-tools .tool-btn { min-height: 30px; padding: 6px 10px; font-size: 12px; }
+  .chart-tools .icon-btn { width: 36px; height: 36px; font-size: 15px; }
+  .chart-tools .tool-divider { height: 22px; }
+
+  /* 研究台/AI 台在手机上不显示行情和交易控件：它们只是 visibility:hidden，
+     位置照样占着，顶栏于是空出一整行（下面那 40px 的白条）。这里直接不占位。 */
+  .app.research-mode .ticker-head,
+  .app.research-mode .arm-btn,
+  .app.research-mode .topbar > .pill.wide-only,
+  .app.research-mode .brand .wide-only,
+  .app.ai-mode .ticker-head,
+  .app.ai-mode .arm-btn,
+  .app.ai-mode .topbar > .pill.wide-only,
+  .app.ai-mode .brand .wide-only { display: none; }
+
+  /* 顶栏第二行：价格 + 连接点 + 解锁 + 齿轮。价格块窄一点，一串东西才排得进一行 */
+  .topbar .ticker-head { flex-basis: 196px; width: 196px; }
+  .ticker-head .px { width: 92px; }
+  .ticker-head .chg { width: 58px; }
+  .topbar .arm-btn { flex-basis: 74px; width: 74px; }
+  /* 「未配置密钥」这颗胶囊在手机上单独占一行：压小到能跟齿轮挤一排 */
+  .topbar .market-warning-pill { font-size: 9.5px; padding: 1px 6px; }
+
+  /* 设置窗口：底部的按钮别贴着手势条 */
+  .modal { height: calc(100dvh - 12px - var(--inset-top) - var(--inset-bottom)); }
+  .modal footer { padding-bottom: 4px; }
+
+  /* 策略页：离场那四个控件在 390 宽上放不进两列 */
+  .quant-inline { flex-wrap: wrap; }
+  .quant-inline .select { flex: 1 1 100%; min-width: 0; }
+  .quant-inline .input { flex: 1 1 100%; width: auto; min-width: 0; }
+  .quant-section .row2 { grid-template-columns: minmax(0, 1fr); }
+  .quant-field .input, .quant-field .select { min-width: 0; }
+
+  /* 策略库一行放不下三样：名字一行，后面的合约和结论折到第二行 */
+  .quant-picker-row { flex-wrap: wrap; row-gap: 2px; }
+  .quant-picker-row .dim { margin-left: 0; }
+  .quant-picker-row > span:last-child { margin-left: auto; }
 }
 
 /**

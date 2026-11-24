@@ -6,6 +6,12 @@ interface Props {
   hits: PatternHit[];
   /** 最多列多少条。再多只是把这一行撑长，滑出去的部分没人看 */
   limit?: number;
+  /**
+   * 点一条：把那一根钉到图上。
+   *
+   * 手机上「去图上找那个箭头」比「点列表」难得多，列表本来就是给人挑的。
+   */
+  onPick?: (time: number) => void;
 }
 
 /**
@@ -21,9 +27,11 @@ interface Props {
  * 新的排在前面：看盘的人先关心刚刚那根是什么，不是三天前那根。
  * 一条都没有时整块不渲染，不留一条空带子占着图的高度。
  */
-export default function PatternsStrip({ hits, limit = 10 }: Props) {
+export default function PatternsStrip({ hits, limit = 10, onPick }: Props) {
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [overflow, setOverflow] = useState(false);
+  /** 刚才是「拖着这一行找」还是「点了一条」：拖完抬手不该顺手选中一条 */
+  const draggedRef = useRef(false);
 
   // 放不下时会横向溢出，但滚动条是藏着的 —— 光靠默认行为鼠标根本滚不动
   useEffect(() => {
@@ -55,6 +63,7 @@ export default function PatternsStrip({ hits, limit = 10 }: Props) {
     let startLeft = 0;
     let moved = false;
     const onDown = (e: PointerEvent) => {
+      draggedRef.current = false;
       if (e.button !== 0 || el.scrollWidth <= el.clientWidth) return;
       down = true;
       moved = false;
@@ -78,6 +87,7 @@ export default function PatternsStrip({ hits, limit = 10 }: Props) {
       if (!down) return;
       down = false;
       el.classList.remove('dragging');
+      if (moved) draggedRef.current = true;
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -108,10 +118,16 @@ export default function PatternsStrip({ hits, limit = 10 }: Props) {
           ? '实测 ' + rate + '% · 基准 ' + base + '% · n=' + stat.n + ' · ' + verdict
           : '暂无统计';
         return (
-          <span
+          <button
             key={h.time + h.id}
-            className={'ps-item ' + h.direction}
+            type="button"
+            className={'ps-item ' + h.direction + (onPick ? ' tappable' : '')}
             title={fmtTime(h.time) + ' · ' + h.name + ' · 教科书语义' + dir + ' · ' + tail}
+            onClick={() => {
+              // 拖完抬手会落到某一条上：那不是「选中」，只是松手的地方
+              if (draggedRef.current) { draggedRef.current = false; return; }
+              onPick?.(h.time);
+            }}
           >
             <span className="ps-time">{fmtTime(h.time)}</span>
             <b className="ps-name">{h.name}</b>
@@ -121,7 +137,7 @@ export default function PatternsStrip({ hits, limit = 10 }: Props) {
                 {rate}% / 基准 {base}%
               </span>
             )}
-          </span>
+          </button>
         );
       })}
     </div>

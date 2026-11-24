@@ -10,7 +10,7 @@
  *      写死默认的 5 时实测：5m 上中位数只有 0.50（几乎全拒），1h/1d 上直接饱和到 1.0
  *      （门槛形同不设）。标定之后 0.9 表示「本周期内前 25% 的趋势对齐度」。
  *
- *   2. 图上标的是「位置」，不是「方向」。
+ *   2. 图上标的是「位置」，颜色和朝向用的是教科书的说法，不是统计结论。
  *      库自己在 patternMetadata 里写明 confidence 是「与上下文无关的固定值、已废弃」。
  *      实测（70456 根，BTC/ETH/DOGE/SOL × 5m~1d）比这更难看：25 个形态里没有一个在
  *      BH 校正后（FDR 10%）有正向方向增量，最显著的几个还是负的 —— 看涨吞没 z=−4.42、
@@ -18,8 +18,9 @@
  *      共同的毛病（反转的反面就是趋势延续），不是某一个形态的参数问题。
  *
  *      处理方式分两层：
- *        · 位置照标、方向不标 —— 「这里出现过吞没」是事实，可以标；「吞没＝看涨」是数据
- *          不支持的结论，不标。图上用中性色圆点，不用红绿箭头。
+ *        · 位置照标 —— 「这里出现过吞没」是事实；「吞没＝看涨」是数据不支持的结论，
+ *          所以箭头只复述教科书的归类。图上曾经只用中性色圆点，现在按产品要求改成
+ *          绿↑ / 红↓，形状和颜色两样都在替书说话 —— 读数里的实测胜率/基准才是能不能当真的依据。
  *        · 统计数字（历史正确率 / 同方向基准 / 样本数）放进角标和图下列表，谁都能自己判断。
  *
  *      为什么不干脆按门槛把标记全关掉：那样这个开关就是个死功能（实测一个都不剩）。
@@ -364,21 +365,42 @@ export function scanPatterns(previous: PatternScan | null, bars: Bar[], interval
  * （自检里也是拿未稀疏的结果比）。
  */
 export const MIN_GAP: Record<StatTier, number> = { 0: 6, 1: 3, 2: 3, 3: 3 };
+
+/** 同一根上挤了几个形态时留哪个：档位高的优先，再看方向增量，最后比有效置信度 */
+export function betterHit(a: PatternHit, b: PatternHit): boolean {
+  return a.tier > b.tier
+    || (a.tier === b.tier && (a.stat?.excess ?? 0) > (b.stat?.excess ?? 0))
+    || (a.tier === b.tier && (a.stat?.excess ?? 0) === (b.stat?.excess ?? 0) && a.fit > b.fit);
+}
+
 export function thinHits(hits: PatternHit[], gap: Record<StatTier, number> = MIN_GAP): PatternHit[] {
   const out: PatternHit[] = [];
   for (const hit of hits) {
     const prev = out[out.length - 1];
     const floor = Math.min(gap[hit.tier], gap[prev?.tier ?? hit.tier]);
     if (prev && hit.index - prev.index < floor) {
-      const better = hit.tier > prev.tier
-        || (hit.tier === prev.tier && (hit.stat?.excess ?? 0) > (prev.stat?.excess ?? 0))
-        || (hit.tier === prev.tier && (hit.stat?.excess ?? 0) === (prev.stat?.excess ?? 0) && hit.fit > prev.fit);
-      if (better) out[out.length - 1] = hit;
+      if (betterHit(hit, prev)) out[out.length - 1] = hit;
       continue;
     }
     out.push(hit);
   }
   return out;
+}
+
+/**
+ * 每一根上都有哪些形态（不稀疏化）。
+ *
+ * 图上的箭头只是稀疏之后的一小部分：两根挨着的时候只留了档位高的那个。
+ * 手指点在圆点正上方那一根时，命中的可能是被稀疏掉的那个 —— 点开却只看到「没有形态」，
+ * 看起来就是「点了没用」。所以点按走这一份全量的，同一个下标多选时用 betterHit 挑。
+ */
+export function groupHitsByIndex(hits: PatternHit[]): Map<number, PatternHit> {
+  const map = new Map<number, PatternHit>();
+  for (const hit of hits) {
+    const prev = map.get(hit.index);
+    if (!prev || betterHit(hit, prev)) map.set(hit.index, hit);
+  }
+  return map;
 }
 
 /**

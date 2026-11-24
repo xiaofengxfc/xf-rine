@@ -9,6 +9,7 @@
     "check:level-lines": "tsx scripts/check-level-lines.ts",
     "check:chart-lines": "tsx scripts/check-chart-price-lines.ts",
     "check:position-pnl": "tsx scripts/check-position-pnl.ts",
+    "check:chart-tap": "tsx scripts/check-chart-tap.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

@@ -17,6 +17,7 @@ import {
   type Time,
   type IPriceLine,
   type ISeriesApi,
+  type MouseEventParams,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { DrawingManager, defaultStyleFor, type DrawingKind, type DrawingLabel } from 'lightweight-charts-drawing';
@@ -32,11 +33,12 @@ import { followRange, viewportRange, type ViewSpan } from '../lib/viewport.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
-import { fmtDate, fmtMoney, fmtPct, fmtPrice, fmtVolume } from '../lib/format.ts';
+import { fmtDate, fmtMoney, fmtPct, fmtPrice, fmtTime, fmtVolume } from '../lib/format.ts';
 import { chartColors, getTheme, useTheme, type ChartColors } from '../lib/theme.ts';
 import { useCandleStyle } from '../lib/chartStyle.ts';
 import { useChartPriceLines } from '../hooks/useChartPriceLines.ts';
-import { scanPatterns, thinHits, type PatternHit, type PatternScan } from '../lib/patterns.ts';
+import { groupHitsByIndex, scanPatterns, thinHits, type PatternHit, type PatternScan } from '../lib/patterns.ts';
+import { hitTestTap } from '../lib/chartTap.ts';
 import PatternsStrip from './PatternsStrip.tsx';
 
 /**
@@ -111,6 +113,18 @@ function readPatterns(): boolean {
 }
 /** 形态关掉时复用的空数组：不要每次渲染都新建一个，下游的 effect 会跟着白跑 */
 const EMPTY_HITS: PatternHit[] = [];
+
+/**
+ * 手指点下去、还没抬起来（或者刚抬起来）多快算「一次点按」。
+ *
+ * 手机上滑图看历史，干净利落的一拖是 8~10px 起步；低于这个距离的多半是想点一下，
+ * 手只是抖了抖。抬起来之后按住不放，读数就一直留在那一根上 —— 这是手机端
+ * 「不用长按也能看数值」的关键：点一下、手指不用压在屏幕上。
+ */
+const TAP_MAX_MOVE = 8;
+
+/** 点按之后读数保留多久再自己消失。再点别处、或者拖图就先收掉 */
+const TAP_HOLD_MS = 8000;
 
 /** Position-tool labels are localized and identify their long/short side. */
 function formatPositionLabel(label: DrawingLabel): string | undefined {
@@ -399,8 +413,21 @@ export default function ChartPane({
    * 手机上只留「方向 + 价格 + 两个概率」，其余细节下面档位卡里本来就有。
    */
   const [narrow, setNarrow] = useState(() => (typeof window === 'undefined' ? false : window.innerWidth < 760));
+  /**
+   * 价格菜单走哪一套排版。
+   *
+   * 桌面是贴在鼠标旁边的小浮层（就地取价），手机上是底部那张卡片 —— 手指够得着、
+   * 不会被自己的手挡住。用 CSS 媒体查询也能做，但「贴着鼠标」这个位置是 JS 算的，
+   * 两处各判一次，总有一处会对不上。
+   *
+   * 和 narrow 一样跟窗口宽度走，但分开一个状态：将来窄屏也放得下浮层时，只改这里就够了。
+   */
+  const [sheet, setSheet] = useState(() => (typeof window === 'undefined' ? false : window.innerWidth < 760));
   useEffect(() => {
-    const onResize = () => setNarrow(window.innerWidth < 760);
+    const onResize = () => {
+      setNarrow(window.innerWidth < 760);
+      setSheet(window.innerWidth < 760);
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -482,6 +509,32 @@ export default function ChartPane({
    * 否则 5m 上「吞没」能把一屏标满。角标、箭头、图下列表都用这一份，口径一致。
    */
   const shownHits = useMemo(() => thinHits(patternHits), [patternHits]);
+  /**
+   * 点按要用的那一份：不稀疏化，每根都留一个最好的形态。
+   *
+   * 图上标的只是稀疏之后那一批。手指点在箭头正上方那根时，命中的可能是被稀疏掉的形态 ——
+   * 点开只看到「没有形态」，看起来就是「点了没反应」。所以手指走这一份全量的。
+   */
+  const tappableHits = useMemo(
+    () => (showPatterns ? groupHitsByIndex(patternHits) : new Map<number, PatternHit>()),
+    [patternHits, showPatterns],
+  );
+  /** 上面那份按时间索引的，建图那个 effect 只挂一次监听，走 ref 读最新的 */
+  const tappableRef = useRef<Map<number, PatternHit>>(new Map());
+  tappableRef.current = tappableHits;
+  /**
+   * 点按要用的那一列时间。
+   *
+   * 行情每 300ms 换一次 bars，两万根 map 一遍不能放在点按那一刻做 —— 手指按下去那一帧
+   * 要算两万次，直接就掉了。按数组身份记一份，行情换了才重来。
+   */
+  const tapShape = useMemo(() => {
+    const time: number[] = new Array(bars.length);
+    for (let i = 0; i < bars.length; i += 1) time[i] = bars[i]!.time;
+    return { time };
+  }, [bars]);
+  const tapShapeRef = useRef(tapShape);
+  tapShapeRef.current = tapShape;
   /** 十字线停在哪根，就按时间找它的形态。走 ref：那个回调建图时只挂一次 */
   const patternMapRef = useRef<Map<number, PatternHit>>(new Map());
   const patternMap = useMemo(() => {
@@ -500,8 +553,34 @@ export default function ChartPane({
     /** 这一根识别出的形态。没有命中就是 null，角标里不占位置 */
     pattern: PatternHit | null;
   } | null>(null);
+  /**
+   * 点按钉住的那一根。手机上没有光标，松手之后十字线就没了 ——
+   * 数值要留在屏幕上，就得靠自己记住「刚才点的是哪一根」。
+   *
+   * 只记时间不记下标：点完之后旁边补进来一页历史，下标会整体往后挪，时间不会。
+   */
+  const [pinned, setPinned] = useState<{ t: number } | null>(null);
+  /** 建图那个 effect 里读它，绕开「状态只在闭包里」的问题 */
+  const pinnedRef = useRef<{ t: number } | null>(null);
+  pinnedRef.current = pinned;
+  /** 钉住之后内容却认不出来了（数据被裁掉）时把读数一起收掉，别留一块没有来处的数字 */
+  useEffect(() => {
+    if (pinned && !legend) setPinned(null);
+  }, [pinned, legend]);
   /** 右键菜单：贴着鼠标的位置画，带了它取到的那根 K 线所在的价格 */
   const [menu, setMenu] = useState<{ x: number; y: number; price: number; time: number | null } | null>(null);
+  /** 建图那段里的「手势结束」：列表点选时也要能用同一个口子放开标记 */
+  const settleRef = useRef<(() => void) | null>(null);
+  /** 建图那段里的「收起钉住的读数」：手一移动就要用，那时候还是建图时的闭包 */
+  const dropPinRef = useRef<() => void>(() => {});
+  /**
+   * 这一次十字线移动是我们自己摆的，不是用户移的。
+   *
+   * setCrosshairPosition 会把越界的下标钳到可视区边缘：刚把视口移到很久以前那一根、
+   * 十字线还没落上去时，库可能先报一个「边缘那根」。读数据此判成「用户移到别处了」，
+   * 钉住状态当场被清掉。这个标记让紧接着的那一次读数跳过「让位」判断。
+   */
+  const syncingCrosshairRef = useRef(false);
 
   barsRef.current = bars;
   /** 右键取价按这个吸附。建图的 effect 只跑一次，所以走 ref 拿最新的 */
@@ -510,6 +589,11 @@ export default function ChartPane({
   /** 右键菜单里的动作也走 ref：effect 里挂的监听只挂一次 */
   const pickRef = useRef(onPickPrice);
   pickRef.current = onPickPrice;
+  /** 下面三件事也走 ref，理由同上：建图那次 effect 只跑一遍，读不到后来的状态 */
+  const toolRef = useRef<DrawingKind | null>(null);
+  const menuRef = useRef<boolean>(false);
+  toolRef.current = tool;
+  menuRef.current = menu !== null;
 
   // ---- 建图 ----
   useEffect(() => {
@@ -651,12 +735,43 @@ export default function ChartPane({
     });
     chart.priceScale('vol').applyOptions({ visible: false, scaleMargins: { top: VOLUME_TOP, bottom: 0 } });
 
-    chart.subscribeCrosshairMove((param) => {
-      if (!param.time || !param.point) { setLegend(null); return; }
-      const d = (param.seriesData.get(price) ?? param.seriesData.get(bar)) as { open: number; high: number; low: number; close: number } | undefined;
-      const frame = param.seriesData.get(line) as { value: number } | undefined;
-      const v = param.seriesData.get(vol) as { value: number } | undefined;
+    /**
+     * 十字线停在哪根，读数就换成哪根。两种来源共用这一条：
+     *
+     *   · 鼠标/手指在图上移动 —— 库自己发出来的十字线事件；
+     *   · 点按钉住 —— 我们主动把十字线摆到那一根上（见下面的 tapHit），
+     *     库里这条事件同样会发，于是读数顺着同一条路走，不必写两套。
+     *
+     * 手指松开 > 点按保留时长之后，钉住的那一格收掉；鼠标移开图外时保留
+     * （桌面端点一下想要留下数字，和手机是同一个诉求），再点一下就取消。
+     */
+    const readout = (param: MouseEventParams<Time>) => {
+      const hold = pinnedRef.current;
+      if (!param.time || !param.point) {
+        setLegend(null);
+        return;
+      }
+      const data = param.seriesData as Map<unknown, unknown>;
+      const d = (data.get(price) ?? data.get(bar)) as { open: number; high: number; low: number; close: number } | undefined;
+      const frame = data.get(line) as { value: number } | undefined;
+      const v = data.get(vol) as { value: number } | undefined;
       const time = Number(param.time);
+      /**
+       * 鼠标移到别处了：钉住的那一格让位。
+       *
+       * 按**下标距离**判，不按时间相等判：库的十字线是 Math.ceil 取整（往右那根），
+       * 点按是「吸附到最近那根」。两个算法在两根中间差一根，鼠标只是抖了一像素，
+       * 读数就被判成「移到别处了」—— 点住的那一格当场消失，看起来像点了个寂寞。
+       * 所以差一根以内都当作同一根，真移开两格以上才让位。
+       */
+      if (syncingCrosshairRef.current) {
+        // 这一下是我们自己摆的十字线（见 tapHit / pickPattern），别把它当成「用户移到别处」
+        syncingCrosshairRef.current = false;
+      } else if (hold) {
+        const holdIndex = firstIndexAtOrAfter(barsRef.current, hold.t);
+        const hoverIndex = firstIndexAtOrAfter(barsRef.current, time);
+        if (hoverIndex - holdIndex > 1 || holdIndex - hoverIndex > 1) setPinned(null);
+      }
       const volumeIndex = firstIndexAtOrAfter(barsRef.current, time);
       const volumeBar = barsRef.current[volumeIndex];
       // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
@@ -671,7 +786,121 @@ export default function ChartPane({
         t: time,
         pattern: patternMapRef.current.get(time) ?? null,
       });
-    });
+    };
+    chart.subscribeCrosshairMove(readout);
+
+    /**
+     * 点按：把十字线摆到点中那一根上，再交给 readout 去算读数。
+     *
+     * 库的默认手势是「长按 240ms 才进入看数值的模式」。手机上那是两步操作：
+     * 先按住不动，等十字线出来，再抬手。这里改成点一下就摆上去 ——
+     * 手指按下去的那一刻就已经知道落在哪根 K 线上了，没必要等。
+     *
+     * 拖图的判定放在 capture 阶段（见下面手势守卫那段）：抬手那一瞬间还在手势里，
+     * 就说明这一下是拖动，根本不会走到这里。所以这里不用再判距离。
+     */
+    const tapHit = (x: number) => {
+      const all = barsRef.current;
+      if (all.length === 0) return;
+      const count = countRef.current || all.length;
+      const geo = {
+        count,
+        indexToX: (index: number) => chart.timeScale().logicalToCoordinate(index as never) ?? null,
+      };
+      const hit = hitTestTap(x, tapShapeRef.current, geo);
+      // 没点中任何一根（点在右边空白里）：当作取消 —— 卡片和十字线一起收，
+      // 只收「钉住」的话，数字还挂在那儿，和「点了没反应」是同一个观感
+      if (!hit) {
+        setPinned(null);
+        setLegend(null);
+        try { chart.clearCrosshairPosition(); } catch { /* 图还没准备好 */ }
+        return;
+      }
+      const bar = all[hit.index]!;
+      /**
+       * 钉住的是同一根：收掉。
+       *
+       * 先判这个、再算别的，是因为「再点一次收起」只该看位置 —— 同一根上形态有没有变、
+       * 数据有没有刷过，都不影响「这一下是取消」这件事。
+       */
+      if (pinnedRef.current?.t === bar.time) {
+        setPinned(null);
+        setLegend(null);
+        try { chart.clearCrosshairPosition(); } catch { /* 图还没准备好 */ }
+        settle();
+        return;
+      }
+      /**
+       * 形态取「不稀疏化」的那一份：图上标的只是稀疏之后那一批，点在箭头正上方那根时，
+       * 命中的可能是被稀疏掉的形态 —— 用稀疏那份的话，点开只会看到「没有形态」。
+       * 顺带一提：点在 K 线身上、而这一根正好有形态时，形态那一段照样给出来 ——
+       * 用户是冲这一根来的，旁边那个箭头只是同一根上的标记，藏起来还要再点一次。
+       */
+      const pattern = tappableRef.current.get(bar.time) ?? patternMapRef.current.get(bar.time) ?? null;
+      /**
+       * 读数在这里自己算一遍，不等十字线事件。
+       *
+       * setCrosshairPosition 标的是 synthetic position，它不会像手指移动那样把读数推回来；
+       * 等它回调的话，手机上点一下总要慢半拍，还容易看起来像「点了没反应」。数据就在手里，直接填。
+       */
+      setLegend({
+        o: bar.open,
+        h: bar.high,
+        l: bar.low,
+        c: bar.close,
+        // 成交额和成交量都是有意义的量：有成交额就用成交额，和悬停那条路保持一致
+        v: bar.turnover ?? bar.volume,
+        turnover: bar.turnover != null,
+        t: bar.time,
+        pattern,
+      });
+      /**
+       * 十字线的纵向位置用这根 K 线的收盘价，不用手指的高度：
+       * 手指按在影线上沿还是下沿，读的都是同一根 K 线，横线不该跟着手指上下飘。
+       */
+      try {
+        syncingCrosshairRef.current = true;
+        chart.setCrosshairPosition(bar.close, bar.time as UTCTimestamp, price);
+      } catch { /* 图刚建好还没准备好：这一次点按就算了 */ }
+      setPinned({ t: bar.time });
+      // 点中之后立刻让位：手势标记放开，后面到的新 K 线可以马上对齐视口
+      settle();
+    };
+    const onClick = (param: MouseEventParams<Time>) => {
+      // 画线工具开着的时候，点一下是「落笔」，不是「看数值」
+      if (!param.point) return;
+      /**
+       * 这一下是不是「落笔」，看按下那一刻的工具状态。
+       *
+       * 不能读当前状态：画线库落完笔会自己 setTool(null)，click 来的时候已经晚了；
+       * 读 React 的 tool 状态又慢一拍。按下去那一刻才是「用户想干什么」。
+       */
+      if (armedAtDown) return;
+      tapHit(param.point.x);
+    };
+    chart.subscribeClick(onClick);
+    /**
+     * 双击也走同一条：库里两次点击相隔不到 500ms 会判成双击，只发这一条、不发 click。
+     *
+     * 用户的直觉是「点两下把这一格收掉」。不管的话第二下被吞掉，读数还钉在那儿，
+     * 看起来就是「再点一次没反应」。双击时 tapHit 会看到「钉住的正是这一根」，直接收掉。
+     */
+    chart.subscribeDblClick(onClick);
+
+    /**
+     * 鼠标离开整张图：没钉住就把读数收起来。
+     *
+     * 手机上「离开」就是松手，走的是点按那一条（读数会留着等几秒）；桌面上鼠标划出图外
+     * 还留着一行数字，会让人以为现在指着的还是它。
+     */
+    const onLeave = (event: MouseEvent) => {
+      if (pinnedRef.current) return;
+      const box = host.getBoundingClientRect();
+      const inside = event.clientX >= box.left && event.clientX <= box.right
+        && event.clientY >= box.top && event.clientY <= box.bottom;
+      if (!inside) setLegend(null);
+    };
+    host.addEventListener('mouseleave', onLeave);
 
     /**
      * 画线工具的吸附要拿 K 线做时间定位，鼠标每动一下它就会问一遍。
@@ -760,15 +989,58 @@ export default function ChartPane({
       pendingViewRef.current = null;
       if (pending) placeViewRef.current(pending);
     };
+    /**
+     * 这一次按下之后一共挪了多远（CSS 像素）。
+     *
+     * 只记「按下」和「抬起」两个点是不够的：手指从头到尾没离开图、只是在原地抖了一下，
+     * 也会走出几像素；而拖图的时候可能一路掠过去几百像素又绕回起点。所以移动时按最大值累加。
+     */
+    let downPoint: { x: number; y: number } | null = null;
+    let travel = 0;
+    /**
+     * 按下去那一刻画线工具是不是开着。
+     *
+     * 不能等到 click 再问：画线库落完笔会自己 setTool(null)（不在「保持画线模式」时），
+     * 等到 click 事件来的时候工具已经收了，这一下就会被当成「取读数」——
+     * 结果是画了一条线、还顺手钉了一格数字。
+     */
+    let armedAtDown = false;
+    settleRef.current = settle;
+    /**
+     * 现在有没有选中画线工具。
+     *
+     * 问管理器要，不读 React 状态：setTool 要等下一轮 effect 才同步过去，
+     * 点完工具按钮立刻点图时那边还没到位。注意别写成 `tool() ?? toolRef.current` ——
+     * 没选中时 tool() 返回的就是 null，?? 会把 null 当成「没取到」，退回旧状态。
+     */
+    const toolArmed = () => (dmRef.current ? dmRef.current.tool() !== null : toolRef.current !== null);
     const onDown = (e: PointerEvent) => {
+      armedAtDown = toolArmed();
       held.add(e.pointerId);
       window.clearTimeout(releaseTimer);
       releaseTimer = 0;
       window.clearTimeout(lostTimer);
       gestureRef.current = true;
       lostTimer = window.setTimeout(settle, GESTURE_LOST_MS);
+      // 只有一根手指按着才算「可能是点按」：双指是缩放，从来不是点按
+      if (held.size === 1) {
+        downPoint = { x: e.clientX, y: e.clientY };
+        travel = 0;
+      } else {
+        downPoint = null;
+      }
     };
-    const onMove = () => {
+    const onMove = (e: PointerEvent) => {
+      if (downPoint) {
+        travel = Math.max(travel, Math.hypot(e.clientX - downPoint.x, e.clientY - downPoint.y));
+        /**
+         * 手真动起来了：上一格读数当场收掉。
+         *
+         * 和「按下就收」不是一回事：按住不动是点按，按下去就要收的话，
+         * 「同一根再点一次收起」永远走不到。拖动才是「刚才那一格不要了」。
+         */
+        if (travel > TAP_MAX_MOVE && pinnedRef.current) dropPinRef.current();
+      }
       // 移动只说明手还在：把看门狗往后推一点，但别推太远（丢事件时要能自愈）
       if (gestureRef.current && lostTimer !== 0) {
         window.clearTimeout(lostTimer);
@@ -777,8 +1049,30 @@ export default function ChartPane({
     };
     const onUp = (e: PointerEvent) => {
       held.delete(e.pointerId);
-      if (held.size > 0) return; // 还有手指在图上（双指缩放），没松手
+      if (held.size > 0) { downPoint = null; return; } // 还有手指在图上（双指缩放），没松手
       window.clearTimeout(releaseTimer);
+      downPoint = null;
+      /**
+       * 手几乎没动：这是一次点按，不是拖图 —— 手势标记立刻放掉，别让库接下来
+       * 那两百多毫秒的看门狗把十字线按住不放（看起来就是「手指抬了、线还在」）。
+       * 真正的拖动照旧等惯性滑完再结算。
+       */
+      if (travel <= TAP_MAX_MOVE) {
+        // 排到当前这一轮事件之后：库自己的 tap 处理要先走完
+        window.setTimeout(settle, 0);
+        return;
+      }
+      /**
+       * 这是拖图，不是点按：钉住的那一格作废。
+       *
+       * 桌面拖动时库会让十字线跟着鼠标走，读数于是被一路重算 —— 停下之后那块数字
+       * 是「鼠标正好停在这根」，不是刚才点的那根，但它还带着钉住的边框，看着就是
+       * 「我点的那一格被挪了」。收掉标签，让读数回到普通悬停。
+       */
+      if (pinnedRef.current) {
+        setPinned(null);
+        try { chart.clearCrosshairPosition(); } catch { /* 图可能已经没了 */ }
+      }
       // 松手之后还有惯性滑动，那几帧同样不能插进去，等它滑完再结算
       releaseTimer = window.setTimeout(settle, GESTURE_HOLD_MS);
     };
@@ -791,6 +1085,8 @@ export default function ChartPane({
      * placeView 会当场把视口挪一下 —— 手感上就是「滚着滚着画面自己跳一下」。
      */
     const onWheel = () => {
+      // 滚轮就是在拖视口：钉住的那一格和它指的位置已经对不上了，收掉
+      if (pinnedRef.current) dropPinRef.current();
       gestureRef.current = true;
       window.clearTimeout(releaseTimer);
       releaseTimer = 0;
@@ -827,11 +1123,45 @@ export default function ChartPane({
       if (t !== null) time = Number(t);
       e.preventDefault();
       e.stopPropagation();
-      setMenu({ x, y, price: snapped, time });
       // 研究台不看盘下单：右键取价那一套（带入限价/止损/止盈）在那儿没有去处
       if (researchRef.current) return;
+      setMenu({ x, y, price: snapped, time });
     };
     host.addEventListener('contextmenu', onContextMenu);
+
+    /**
+     * 收起钉住的那一格。
+     *
+     * 它是「刚才点过这儿」的证据，不是一直挂着的标注 —— 下一次要读哪根，点下去就是了。
+     * 什么时候收：开始拖图、开始滚轮、按 Esc。**按下那一刻不收**：
+     * 抬手之后同一根还要能再点一次收掉（见 tapHit 里的「再点一次同一根」），
+     * 按下就清的话，那一路永远走不到。
+     */
+    const dropPin = () => {
+      /**
+       * 卡片和十字线一起收。
+       *
+       * 只清十字线是不够的：卡片是 React 画在 canvas 上面的一层，十字线没了它照样挂在那儿，
+       * 而且数字还是上一次点的那一根。拖图看历史时左上角一直挂着一个三个月前的价格，
+       * 看起来就是「读数坏了」。
+       */
+      setPinned(null);
+      setLegend(null);
+      try { chart.clearCrosshairPosition(); } catch { /* 图可能已经没了 */ }
+    };
+    host.addEventListener('pointercancel', dropPin, CAPTURE);
+    dropPinRef.current = dropPin;
+
+    /**
+     * 手机上没有 Esc；桌面按 Esc 取消钉住的读数，和右键菜单一个习惯。
+     * 键盘事件挂在 window 上：焦点不在 canvas 里也得管用。
+     */
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (menuRef.current) { setMenu(null); return; }
+      dropPin();
+    };
+    window.addEventListener('keydown', onKey);
 
     chartRef.current = chart;
     priceRef.current = price;
@@ -849,6 +1179,10 @@ export default function ChartPane({
       window.clearTimeout(releaseTimer);
       window.clearTimeout(lostTimer);
       host.removeEventListener('contextmenu', onContextMenu);
+      host.removeEventListener('mouseleave', onLeave);
+      host.removeEventListener('pointercancel', dropPin, true);
+      dropPinRef.current = () => {};
+      window.removeEventListener('keydown', onKey);
       // 摘监听时 capture 必须和挂的时候一致，否则摘不掉（会留着引用旧的 ref）
       host.removeEventListener('pointerdown', onDown, true);
       host.removeEventListener('pointermove', onMove, true);
@@ -857,6 +1191,14 @@ export default function ChartPane({
       window.removeEventListener('pointercancel', onUp, true);
       gestureRef.current = false;
       pendingViewRef.current = null;
+      /**
+       * 图要重建了（换币种 / 换周期）：读数跟着作废。
+       *
+       * 不清的话，换到别的周期之后左上角还挂着上一个周期的数字和形态，
+       * 而且已经没人能把它收掉了 —— 新图的手势监听还不认识这一格。
+       */
+      setPinned(null);
+      setLegend(null);
       markers.price.detach();
       markers.bar.detach();
       markers.line.detach();
@@ -915,11 +1257,51 @@ export default function ChartPane({
     // 依赖里带 storageKey：切周期会重建整张图，新图也得贴成当前这套
   }, [theme, storageKey]);
 
+  /**
+   * 钉住某一根时，十字线亮一档。
+   *
+   * 平时的十字线是给「鼠标正停在这儿」用的，压得很淡，免得挡住 K 线。手机上点一下之后
+   * 手指已经抬起来了，这条线是「刚才点的那一根」唯一的参照 —— 淡到看不见就等于没标记。
+   * 松手八秒后自动收掉（见下面那条 effect），桌面移开鼠标或开始拖图也收掉。
+   */
+  useEffect(() => {
+    const c = chartColors(theme);
+    const line = pinned ? c.crosshairTouch : c.crosshair;
+    chartRef.current?.applyOptions({
+      crosshair: {
+        vertLine: { color: line, labelBackgroundColor: c.crosshairLabel },
+        horzLine: { color: line, labelBackgroundColor: c.crosshairLabel },
+      },
+    });
+  }, [pinned, theme, storageKey]);
+
   useEffect(() => {
     chartRef.current?.applyOptions({
       layout: { fontSize: narrow ? MOBILE_CHART_FONT_SIZE : CHART_FONT_SIZE },
     });
   }, [narrow]);
+
+  /**
+   * 点按钉住的那一格，过一会儿自己收掉。
+   *
+   * 手机上点一下是想「看一眼这根的数字」，不是想把它固定在图上。留着不动的后果很具体：
+   * 过一会儿人已经看别处了，左上角还挂着一根很久以前的 K 线读数，和顶上的现价对不上。
+   *
+   * 计时从**最后一次钉住**开始：连着点了几根，最后一根读完再走。
+   * 开始拖图、滚轮、按 Esc 都会立刻收掉（见建图那段里的 dropPin），不等满这一段时间。
+   */
+  useEffect(() => {
+    if (!pinned) return;
+    const timer = window.setTimeout(() => {
+      // 卡片和十字线一起收：只收十字线的话，数字还挂在那儿，和「自己消失」是两回事
+      setPinned(null);
+      setLegend(null);
+      try {
+        chartRef.current?.clearCrosshairPosition();
+      } catch { /* 图可能已经没了：读数收掉就够了 */ }
+    }, TAP_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [pinned]);
 
   /**
    * 画法要在「图重建之后」重新贴一次。
@@ -1429,9 +1811,11 @@ export default function ChartPane({
    * 必须排在写 K 线那条 effect 后面：同一个 commit 里 effect 按声明顺序执行，
    * 先有 K 线再挂标记；反过来的话，新建的图会先收到一批「时间点还没数据」的标记。
    *
-   * 标记只表示「这根是哪一类形态」，不分看涨看跌 —— 实测 7 万根里没有一个形态在
-   * BH 校正后有正向方向增量（见 patterns.ts 文件头），红绿箭头等于替数据说了它没说的话。
-   * 颜色用中性色，方向和各周期的历史胜率交给角标和图下列表。
+   * 标记画成箭头：看涨类绿色尖朝上、看跌类红色尖朝下 —— 那是**教科书**的说法。
+   *
+   * 要说清楚的部分：7 万根实测里没有一个形态在 BH 校正后有正向方向增量（见 patterns.ts 文件头）。
+   * 所以箭头只负责「这根出现过哪一类形态、书上怎么归类」，实测胜率和基准照旧跟在读数卡片和
+   * 图下列表里。箭头和 K 线实体同色系，是为了让整页只有一个「涨」和一个「跌」，不是为了说它会涨。
    */
   useEffect(() => {
     const plugins = markersRef.current;
@@ -1449,25 +1833,39 @@ export default function ChartPane({
     }
     const targetTag = target === plugins.bar ? 'b' : target === plugins.line ? 'l' : 'p';
     const sig = [
-      theme, storageKey, targetTag, shownHits.length,
+      theme, storageKey, targetTag, shownHits.length, narrow ? 'n' : 'w',
       shownHits[0]?.time ?? 0, shownHits[shownHits.length - 1]?.time ?? 0, hash,
     ].join('|');
     if (sig === markerSigRef.current) return;
     markerSigRef.current = sig;
+    /**
+     * 手机上的箭头要画大一点。
+     *
+     * 库画形状的直径是 min(max(barSpacing, 12), 30) 再乘一个系数，`size` 是在这个数上再乘一次；
+     * size 压到 0.6 时，5px 间距下只剩 7px 左右 —— 对着屏幕点，十次里点中不了几次。
+     * 手机上给 1：直径落在 13~18px，和手指的落点对得上，一排箭头也不至于糊成一条。
+     */
+    const markerSize = narrow ? 1 : 0.6;
+    /**
+     * 方向跟着形态的教科书语义走：bull 画 arrowUp（绿），bear 画 arrowDown（红）。
+     *
+     * 形状本身也带方向，不只靠颜色 —— 红绿色盲看到的是「朝上」和「朝下」，
+     * 两种都认得出来；只有颜色的话，他们看到的两个箭头一模一样。
+     */
     const list: SeriesMarker<Time>[] = shownHits.map((h) => ({
       time: h.time as UTCTimestamp,
-      // 位置也只按「有形态」来，不按方向。中性色放在 K 线下方，不和进出场箭头抢注意力
+      // 画在 K 线下方：不和实体抢地方，一根挨一根时也读得出「这一段连着几个形态」
       position: 'belowBar',
-      shape: 'circle',
-      color: c.patternMark,
-      size: 0.6,
+      shape: h.direction === 'bull' ? 'arrowUp' : 'arrowDown',
+      color: h.direction === 'bull' ? c.patternBull : c.patternBear,
+      size: markerSize,
     }));
     // 另外两套清空：切回 K 线时不能留下上一次的箭头
     for (const p of [plugins.price, plugins.bar, plugins.line]) if (p !== target) p.setMarkers([]);
     target.setMarkers(list);
     // storageKey 也是依赖：切周期会重建图表，新图要把同一批箭头重新挂上；
-    // 画法（drawMode）决定了该挂在哪条序列上
-  }, [shownHits, theme, storageKey, drawMode, candleStyle]);
+    // 画法（drawMode）决定了该挂在哪条序列上；narrow 决定箭头画多大
+  }, [shownHits, theme, storageKey, drawMode, candleStyle, narrow]);
 
   // ---- 视口记忆；往回拖到底时向上要一页更早的 K 线 ----
   useEffect(() => {
@@ -1632,6 +2030,75 @@ export default function ChartPane({
     };
   });
 
+  /**
+   * 从读数卡片上直接取价：把菜单开在钉住的那根 K 线上。
+   *
+   * 手机上没有右键，而「拿到这个价去下单」是看盘最常做的下一步。菜单位置按这一根
+   * 在画布上的坐标算（不是按手指），所以点卡片和右键点到同一根，结果完全一样；
+   * 桌面上打开的还是贴鼠标的小浮层，手机上换成底部那张卡片（见 sheet）。
+   */
+  const openMenuAt = useCallback((time: number, price: number) => {
+    const chart = chartRef.current;
+    if (!chart || !(price > 0)) return;
+    const step = roundRef.current > 0 ? roundRef.current : 0;
+    const snapped = step > 0 ? Math.round(price / step) * step : price;
+    let x = 60;
+    let y = 60;
+    try {
+      const coord = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
+      const py = priceRef.current?.priceToCoordinate(snapped) ?? null;
+      if (coord !== null) x = Math.max(0, coord);
+      if (py !== null) y = Math.max(0, py);
+    } catch { /* 这根已经滑出视口：菜单开在左上角也比不开强 */ }
+    setMenu({ x, y, price: snapped, time });
+  }, []);
+
+  /** 形态列表里点一条：把视口挪到那一根上，再像点图一样钉住它 */
+  const pickPattern = useCallback((time: number) => {
+    const chart = chartRef.current;
+    const price = priceRef.current;
+    if (!chart || !price) return;
+    const bar = barsRef.current.find((b) => b.time === time);
+    if (!bar) return;
+    try {
+      /**
+       * 「看不看得见」按坐标判，不按 timeToCoordinate 是否为 null 判。
+       *
+       * 那个接口只要这段时间在数据里就会给出坐标，哪怕它落在可视区外面 ——
+       * 于是「列表里点一条很久以前的形态」时视口一动不动。
+       * 更麻烦的是下一步：setCrosshairPosition 会把越界的下标**钳到可视区边缘**，
+       * 十字线停在别的一根上，读数立刻被判成「换了一根」，钉住状态当场被清掉 ——
+       * 表现就是「点了列表没定位、连读数也没了」。
+       */
+      const paneWidth = chart.timeScale().width();
+      const coord = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
+      const range = chart.timeScale().getVisibleLogicalRange();
+      const offscreen = coord === null || coord < 0 || coord > paneWidth;
+      if (offscreen && range) {
+        const width = Math.max(30, range.to - range.from);
+        const index = firstIndexAtOrAfter(barsRef.current, time);
+        chart.timeScale().setVisibleLogicalRange({
+          from: index - width / 2,
+          to: index + width / 2,
+        });
+      }
+      syncingCrosshairRef.current = true;
+      chart.setCrosshairPosition(bar.close, time as UTCTimestamp, price);
+    } catch { /* 图还没准备好 */ }
+    setLegend({
+      o: bar.open, h: bar.high, l: bar.low, c: bar.close,
+      v: bar.turnover ?? bar.volume,
+      turnover: bar.turnover != null,
+      t: bar.time,
+      pattern: patternMapRef.current.get(time) ?? null,
+    });
+    // 列表里点的那条就是形态，读数卡片直接展开形态那一段
+    setPinned({ t: bar.time });
+    // 这一次点击没落在 canvas 上，图的「手指还按着」标记不会自己松开：
+    // 不松的话，之后来新 K 线时视口一直不跟随（手势期间不写视口，见 placeView）
+    settleRef.current?.();
+  }, []);
+
   // 仓没了就把「确认平掉」收掉，别让人对着已经不在的数字点确认
   useEffect(() => {
     if (closing && !positions.some((x) => x.direction === closing)) setClosing(null);
@@ -1675,8 +2142,8 @@ export default function ChartPane({
         <button
           className={`tool-btn ${showPatterns ? 'on' : ''}`}
           title={showPatterns
-            ? '正在标形态：紫色圆点表示这根出现了经典形态，十字线停上去看是哪一种、实测胜率多少。点一下关掉'
-            : '在 K 线上标出识别到的经典形态（只标位置，不主张方向）'}
+            ? '正在标形态：绿色↑ 表示教科书看涨的形态，红色↓ 表示看跌。点一下箭头（或那根 K 线）就出形态名和实测胜率，再点一下关掉'
+            : '在 K 线上标出识别到的经典形态（箭头是教科书的说法，实测胜率在读数和图下列表里）'}
           onClick={() => pickPatterns(!showPatterns)}
         >
           形态
@@ -1730,19 +2197,29 @@ export default function ChartPane({
         {!research && <span className="dim" style={{ fontSize: 10.5 }}>画线自动存本地</span>}
       </div>
 
-      <div className="chart-wrap">
+      {/* has-readout 是给样式用的：有读数时持仓摘要要往下让，否则两块都贴左上角 */}
+      <div className={'chart-wrap' + (legend || pinned ? ' has-readout' : '')}>
         <div className="chart-host" ref={hostRef} />
         {/* 价格和右侧轴、档位带、持仓卡用同一个口径：冷门币跳到 0.00001 时 toFixed 不会写出两个数 */}
-        {legend && (
-          <div className="chart-badge">
-            <span>O {legend.o == null ? '—' : fmtPrice(legend.o, priceRound)}</span>
-            <span className="up">H {legend.h == null ? '—' : fmtPrice(legend.h, priceRound)}</span>
-            <span className="down">L {legend.l == null ? '—' : fmtPrice(legend.l, priceRound)}</span>
-            <span>C {fmtPrice(legend.c, priceRound)}</span>
-            <span>V {fmtVolume(legend.v)}{legend.turnover ? ' USDT' : ''}</span>
+        {(legend || (research && pinned)) && (
+          /*
+           * 研究台没有下单面板，但「哪一根、什么形态」照样要看 —— 所以读数整块照给，
+           * 只把下面那两枚取价按钮藏起来（onPickPrice 在那里本来就是空函数）。
+           */
+          <div className={'chart-badge' + (narrow ? ' narrow' : '') + (pinned ? ' pinned' : '')}>
+            {!legend && <div className="cb-ohlc dim">这一根已经不在图上了 · 点一下别处</div>}
+            {legend && <>
+            <div className="cb-ohlc">
+              <span>O {legend.o == null ? '—' : fmtPrice(legend.o, priceRound)}</span>
+              <span className="up">H {legend.h == null ? '—' : fmtPrice(legend.h, priceRound)}</span>
+              <span className="down">L {legend.l == null ? '—' : fmtPrice(legend.l, priceRound)}</span>
+              <span>C {fmtPrice(legend.c, priceRound)}</span>
+            </div>
+            <div className="cb-vol">
+              V {fmtVolume(legend.v)}{legend.turnover ? ' USDT' : ''} · <span className="dim">{fmtTime(legend.t)}</span>
+            </div>
             {legend.pattern && (
-              <>
-                <span className="badge-sep" aria-hidden="true" />
+              <div className="cb-pattern">
                 <span className={`badge-pattern ${legend.pattern.direction}`}>
                   {legend.pattern.name}
                   {/* 方向写成「教科书语义」，紧跟着实测数字：否则「看涨」两个字会被当成结论 */}
@@ -1755,24 +2232,58 @@ export default function ChartPane({
                       </span>
                     : <span className="badge-stat">暂无统计</span>}
                 </span>
-              </>
+              </div>
             )}
+            {/*
+              点一下就能做的事，右键之外再给一条明路。
+              手机上「长按呼出」本来就是这里要拆掉的东西，按钮是它的替代品：
+              读数已经钉在某根上了，取这一根的价格去下单是同一件事的下一步。
+            */}
+            {pinned && !research && (
+              <div className="cb-acts">
+                <button
+                  type="button"
+                  className="cb-act"
+                  onClick={() => { pickRef.current(legend.c, 'limit'); setPinned(null); }}
+                >
+                  用这个价限价
+                </button>
+                <button
+                  type="button"
+                  className="cb-act"
+                  onClick={() => { openMenuAt(legend.t, legend.c); }}
+                >
+                  更多价格
+                </button>
+              </div>
+            )}
+            </>
+            }
           </div>
         )}
-        {historyEnd && atEdge && (
-          <div className="chart-edge">
-            {historyEndHint ?? '已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早'}
-          </div>
-        )}
-        {sparse && flatShare >= SPARSE_SHARE && (
-          <div className="chart-sparse">
-            该合约成交稀疏 · 可视 {sparse.count} 根里 {sparse.flat} 根没有成交
-            {drawMode === 'line' ? '（折线只连收盘价）' : '（灰色为无成交 K 线）'}
-          </div>
-        )}
-        {stale && (
-          <div className="chart-stale">
-            持仓数据停更 {Math.round(stale.ageMs / 1000)} 秒 · 图上的均价是旧快照
+        {/*
+          左下角这几句排成一列。
+          以前「持仓停更」在右上、「成交稀疏」在左下、「历史到头」在它上面一格 —— 三个绝对位置，
+          手机上一屏只放得下一条，停更那一条还正好盖住顶上的读数角标。
+        */}
+        {(stale || (historyEnd && atEdge) || (sparse && flatShare >= SPARSE_SHARE)) && (
+          <div className="chart-hints">
+            {stale && (
+              <div className="chart-hint warn">
+                持仓数据停更 {Math.round(stale.ageMs / 1000)} 秒 · 图上的均价是旧快照
+              </div>
+            )}
+            {historyEnd && atEdge && (
+              <div className="chart-hint">
+                {historyEndHint ?? '已到交易所能给的最早一根（每个周期约一万根） · 换更大周期看更早'}
+              </div>
+            )}
+            {sparse && flatShare >= SPARSE_SHARE && (
+              <div className="chart-hint">
+                该合约成交稀疏 · 可视 {sparse.count} 根里 {sparse.flat} 根没有成交
+                {drawMode === 'line' ? '（折线只连收盘价）' : '（灰色为无成交 K 线）'}
+              </div>
+            )}
           </div>
         )}
         {positionViews.length > 0 && (
@@ -1844,8 +2355,12 @@ export default function ChartPane({
             onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
           >
             <div
-              className="price-menu"
-              style={{
+              /*
+               * 手机上是一张底部卡片：左右贴边、贴着屏幕下方，手指够得着，也不会被自己的手挡住。
+               * 桌面还是贴着鼠标的小浮层 —— 位置由 JS 算，两套排版在这里分开，不和 CSS 媒体查询打架。
+               */
+              className={'price-menu' + (sheet ? ' sheet' : '')}
+              style={sheet ? undefined : {
                 left: Math.min(menu.x, Math.max(0, (hostRef.current?.clientWidth ?? 400) - 200)),
                 top: Math.min(menu.y, Math.max(0, (hostRef.current?.clientHeight ?? 300) - 250)),
               }}
@@ -1853,20 +2368,20 @@ export default function ChartPane({
             >
               <div className="pm-head">
                 <span className="pm-price">{fmtPrice(menu.price, priceRound)}</span>
-                {menu.time !== null && <span className="dim">{fmtDate(menu.time)}</span>}
+                {menu.time !== null && <span className="dim">{fmtTime(menu.time)}</span>}
               </div>
               {([
-                ['limit', '作为限价', !hasPosition ? '' : ''],
-                ['stop', '作为止损价', ''],
-                ['target', '作为止盈价', ''],
-              ] as const).map(([what, label]) => (
+                ['limit', '作为限价', '下单面板'],
+                ['stop', '作为止损价', '下单面板'],
+                ['target', '作为止盈价', '下单面板'],
+              ] as const).map(([what, label, hint]) => (
                 <button
                   key={what}
                   className="pm-item"
                   onClick={() => { pickRef.current(menu.price, what as PricePick); setMenu(null); }}
                 >
                   <span>{label}</span>
-                  <span className="pm-hint">{what === 'limit' ? '下单面板' : what === 'stop' ? '下单面板' : '下单面板'}</span>
+                  <span className="pm-hint">{hint}</span>
                 </button>
               ))}
               <div className="pm-sep" />
@@ -1878,22 +2393,27 @@ export default function ChartPane({
                   key={what}
                   className="pm-item"
                   disabled={!hasPosition}
-                  title={hasPosition ? '立即改这张仓的止损/止盈（会撤掉原来那张触发单）' : '这个合约上还没有持仓'
-                  }
+                  title={hasPosition ? '立即改这张仓的止损/止盈（会撤掉原来那张触发单）' : '这个合约上还没有持仓'}
                   onClick={() => { pickRef.current(menu.price, what as PricePick); setMenu(null); }}
                 >
                   <span>{label}</span>
                   <span className="pm-hint">{hasPosition ? '直接改仓' : '没有持仓'}</span>
                 </button>
               ))}
-              <div className="pm-foot">右键取价 · 点空白处关掉</div>
+              <div className="pm-foot">
+                {sheet ? '点上面任意一项取出这个价 · 点空白处关掉' : '右键取价 · 点空白处关掉'}
+              </div>
             </div>
           </div>
         )}
         {loading && <div className="loading">加载中…</div>}
       </div>
 
-      {showPatterns && <PatternsStrip hits={shownHits} />}
+      {/*
+        形态列表：图上那个箭头不好瞄的时候，从这里点一条 —— 点一下就把视口挪到那一根、
+        把十字线摆上去、读数卡片展开形态。手机上这条比「点箭头」容易得多。
+      */}
+      {showPatterns && <PatternsStrip hits={shownHits} onPick={pickPattern} />}
     </>
   );
 }

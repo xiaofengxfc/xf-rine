@@ -135,8 +135,23 @@ export interface ChartColors {
   target: string;
   /** 挂着没成交的限价单 */
   pending: string;
-  /** 形态标记。刻意不用涨跌色：形态只标位置，不主张方向（见 patterns.ts 文件头） */
-  patternMark: string;
+  /**
+   * 形态标记：看涨用绿色、看跌用红色，画在 K 线下方。
+   *
+   * 以前这里是中性紫点 —— 理由写在 patterns.ts 文件头：7 万根实测里没有一个形态在 BH 校正后有
+   * 正向方向增量。改成带方向的箭头是按产品要求来的，那个理由仍然有效，所以箭头只是把
+   * 「教科书怎么说」画出来，实测胜率和基准照样跟在读数卡片、列表里，不把它当信号。
+   * 这两色刻意和 K 线实体用同一个 up/down：同一个「涨」在整页里只该有一种绿。
+   */
+  patternBull: string;
+  patternBear: string;
+  /**
+   * 手指按在图上时的十字线。
+   *
+   * 桌面那条 0.36 的灰线在 400px 宽的屏上几乎看不出来，而手机上没有光标可用，
+   * 这条线是「现在读的是哪一根」的唯一提示 —— 按下去那会儿要看得清，抬手再淡回去。
+   */
+  crosshairTouch: string;
 }
 
 const CHART: Record<Theme, ChartColors> = {
@@ -162,7 +177,9 @@ const CHART: Record<Theme, ChartColors> = {
     stop: 'rgba(255,95,109,0.82)',
     target: 'rgba(46,211,160,0.82)',
     pending: '#a885ff',
-    patternMark: 'rgba(168,133,255,0.62)',
+    patternBull: 'rgba(46,211,160,0.9)',
+    patternBear: 'rgba(255,95,109,0.9)',
+    crosshairTouch: 'rgba(186,198,216,0.9)',
   },
   light: {
     background: '#ffffff',
@@ -186,7 +203,9 @@ const CHART: Record<Theme, ChartColors> = {
     stop: 'rgba(217,45,75,0.85)',
     target: 'rgba(14,143,98,0.85)',
     pending: '#7c3aed',
-    patternMark: 'rgba(124,58,237,0.55)',
+    patternBull: 'rgba(14,143,98,0.9)',
+    patternBear: 'rgba(217,45,75,0.9)',
+    crosshairTouch: 'rgba(43,53,70,0.88)',
   },
 };
 

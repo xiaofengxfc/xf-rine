@@ -42,6 +42,15 @@ export function useDeskNavigation({ settingsOpen, closeSettings }: Options) {
 
   const setView = useCallback((next: View) => {
     setViewState(next);
+    /**
+     * 换一页就回到顶部。
+     *
+     * 手机上 body 是整页滚动容器，切页时浏览器会沿用上一页的滚动位置：
+     * 打开研究台先看到的是「半截顶栏 + 一大片空白」，页签贴在屏幕上方三分之一处。
+     * 这一条和 main.tsx 里的 scrollRestoration 一起，保证换页从第一屏开始。
+     */
+    window.scrollTo({ top: 0, behavior: 'auto' });
+    document.querySelectorAll<HTMLElement>('.research-main, .ai-main').forEach((el) => { el.scrollTop = 0; });
     if (next === 'research') setResearchMounted(true);
     if (next === 'ai') setAiMounted(true);
     if (next === 'quant') setQuantMounted(true);
