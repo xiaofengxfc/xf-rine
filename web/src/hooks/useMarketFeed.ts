@@ -57,12 +57,14 @@ type Toast = (kind: 'ok' | 'err', title: string, detail?: string) => void;
 
 interface Options {
   contract: string;
+  /** 完整品种身份（gate:perp:BTC_USDT）。没有时只按裸符号订阅 */
+  instrument?: string;
   interval: string;
   setContract: Dispatch<SetStateAction<string>>;
   onToast: Toast;
 }
 
-export function useMarketFeed({ contract, interval, setContract, onToast }: Options) {
+export function useMarketFeed({ contract, instrument, interval, setContract, onToast }: Options) {
   const [tickers, setTickers] = useState<Ticker[]>([]);
   const [market, setMarket] = useState<MarketSnap>(EMPTY_MARKET);
   const [wsAlive, setWsAlive] = useState(false);
@@ -333,7 +335,17 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
         setWsAlive(true);
         reconnectRef.current = 0;
         lastMsgAtRef.current = Date.now();
-        socket.send(JSON.stringify({ type: 'subscribe', contract, interval }));
+        /**
+         * 订阅同时带两种写法：contract 给老服务端兜底，
+         * instrument 给新服务端（它按身份订阅，换交易所时同名合约不会串）。
+         * 认不出来的身份不带，服务端会退回 contract。
+         */
+        socket.send(JSON.stringify({
+          type: 'subscribe',
+          contract,
+          interval,
+          ...(instrument ? { instrument } : {}),
+        }));
         void resyncTail();
       };
 
@@ -450,7 +462,8 @@ export function useMarketFeed({ contract, interval, setContract, onToast }: Opti
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [contract, interval, loadLevelsOnly, resyncTail]);
+    // instrument 进依赖：换交易所时同名合约是另一个品种，必须重新订阅
+  }, [contract, instrument, interval, loadLevelsOnly, resyncTail]);
 
   /**
    * 假死看门狗：连着但一帧不来，自己放掉重连。

@@ -32,6 +32,7 @@ import {
   type PaintedBar,
 } from '../lib/candles.ts';
 import { followRange, viewportRange, type ViewSpan } from '../lib/viewport.ts';
+import { chartStorageKeys, clearChartValue, readChartValue, writeChartValue } from '../lib/chartStorage.ts';
 import { bracketOf } from '../lib/protective.ts';
 import { pnlOf } from '../lib/position.ts';
 import { positionLiquidationPrice } from '../lib/liquidation.ts';
@@ -240,6 +241,13 @@ const TOOLS: { kind: DrawingKind; label: string; title: string }[] = [
 
 interface Props {
   contract: string;
+  /**
+   * 完整品种身份（gate:perp:BTC_USDT）。画线和视口按它存，
+   * 换交易所时同名合约不会互相覆盖。
+   *
+   * 可选：配置还没回来时没有它，退回只用裸符号的老键（见 lib/chartStorage.ts）。
+   */
+  instrument?: string;
   interval: string;
   bars: Bar[];
   zones: Zone[];
@@ -304,7 +312,7 @@ interface Props {
 export type PricePick = 'limit' | 'stop' | 'target' | 'posStop' | 'posTarget';
 
 export default function ChartPane({
-  contract, interval, bars, zones, positions, orders, account, priceOrders = [], multiplier, markPrice, priceRound,
+  contract, instrument, interval, bars, zones, positions, orders, account, priceOrders = [], multiplier, markPrice, priceRound,
   stale, resetKey, loading, onNeedOlder, historyEnd, historyEndHint, backfilling, onIntervalChange, onManualLevels,
   intervals = INTERVALS as unknown as string[],
   canClose, onClosePosition, onPickPrice, hasPosition, research = false,
@@ -519,8 +527,15 @@ export default function ChartPane({
    * 研究台里拖一下，日内台下次打开就停在那一段；反过来也一样。
    */
   const scope = research ? 'research:' : '';
-  const storageKey = `xf-rine:drawings:${scope}${contract}:${interval}`;
-  const viewKey = `xf-rine:view:${scope}${contract}:${interval}`;
+  /**
+   * 键里带品种身份，老键（只有裸符号）作为迁移来源。
+   * 身份还没拿到时 keys.key 就等于老键，行为和改造前完全一致。
+   */
+  const drawingKeys = chartStorageKeys('drawings', { scope, contract, interval, instrument });
+  const viewKeys = chartStorageKeys('view', { scope, contract, interval, instrument });
+  /** 依赖数组里用这一对：身份变了就该重建图表、换一份画线 */
+  const storageKey = drawingKeys.key;
+  const viewKey = viewKeys.key;
 
   /** 画法偏好。默认自动：视口里平价线过半就改画折线 */
   const [mode, setMode] = useState<ChartMode>(readMode);
@@ -1029,7 +1044,7 @@ export default function ChartPane({
     const persist = () => {
       window.clearTimeout(saveTimer);
       saveTimer = window.setTimeout(() => {
-        try { localStorage.setItem(storageKey, dm.exportJSON()); } catch { /* 配额满了就算了 */ }
+        writeChartValue(drawingKeys, dm.exportJSON());
         collect();
       }, 250);
     };
@@ -1525,7 +1540,7 @@ export default function ChartPane({
        */
       let restored = false;
       try {
-        const saved = JSON.parse(localStorage.getItem(viewKey) ?? 'null') as {
+        const saved = JSON.parse(readChartValue(viewKeys) ?? 'null') as {
           fromTime?: number;
           toTime?: number;
           margin?: number;
@@ -1768,7 +1783,8 @@ export default function ChartPane({
         lastTimeRef.current = null;
         fullLoad();
         try {
-          const saved = localStorage.getItem(storageKey);
+          // 新键没有时回退到老键，并把老键的画线迁过来（见 lib/chartStorage.ts）
+          const saved = readChartValue(drawingKeys);
           if (saved) dm.importJSON(saved);
         } catch { /* 数据坏了就当没有 */ }
         /**
@@ -2019,7 +2035,7 @@ export default function ChartPane({
           saved.pastFrom = r.from;
           saved.pastTo = r.to;
         }
-        try { localStorage.setItem(viewKey, JSON.stringify(saved)); } catch { /* 存不了就算了 */ }
+        writeChartValue(viewKeys, JSON.stringify(saved));
         // 提示跟着可视范围走：缩到有成交的那一段，那句「成交稀疏」就该自己消失
         refreshSparse();
         // 缩放/平移之后价格轴变了：平价线要按新的像素当量重画一次
@@ -2295,7 +2311,8 @@ export default function ChartPane({
             if (!dm) return;
             if (!window.confirm('清空这张图上所有手动画线？')) return;
             dm.clear();
-            try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+            // 新老键一起清，否则下次读又会把旧画线迁回来
+            clearChartValue(drawingKeys);
             onManualLevels([]);
           }}
         >

@@ -962,7 +962,11 @@ pnpm check:all                        # 25 项：server 纯逻辑、web 纯函�
 pnpm check:all -- --list              # 看看都收了哪些
 pnpm check:all -- --only units        # 只跑名字里带 units 的
 pnpm check:all -- --group web         # 只跑某一组
+pnpm check:all -- --network           # 连上要真实交易所的那几项（默认跳过）
 ```
+
+默认只跑离线项：要拨交易所的那几条（行情换路、代理切换）网络一变结果就变，
+放进 CI 等于把「绿不绿」交给外网。`--network` 单独跑它们。
 
 本机有 Python 时会顺带跑 sidecar 那一项，没有就跳过。`pnpm check:ci` 等于 `typecheck` + `check:all`，
 和 GitHub Actions 里跑的是同一套。

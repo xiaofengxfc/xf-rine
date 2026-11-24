@@ -39,6 +39,7 @@ import {
 } from './lib/update.ts';
 import { attachPhoneUpdate, discardPendingPackage, isPhoneUpdate } from './lib/appUpdate.ts';
 import { isNative } from './lib/endpoint.ts';
+import { instrumentKey } from './lib/instrument.ts';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
 
@@ -132,6 +133,14 @@ export default function App() {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'err' ? 9000 : 5000);
   }, []);
 
+  /**
+   * 当前品种的完整身份。配置还没回来时是 undefined ——
+   * 此时各消费方都退回裸符号的老行为，不会拼出一个半截的身份。
+   */
+  const instrument = config
+    ? instrumentKey({ venue: config.exchange, market: 'perp', symbol: contract })
+    : undefined;
+
   const {
     tickers,
     market,
@@ -141,7 +150,7 @@ export default function App() {
     backfilling,
     needOlder,
     resyncTail,
-  } = useMarketFeed({ contract, interval, setContract, onToast: push });
+  } = useMarketFeed({ contract, instrument, interval, setContract, onToast: push });
   const marketKey = `${contract}:${interval}`;
   const fresh = market.key === marketKey;
   const info = fresh ? market.info : null;
@@ -630,6 +639,7 @@ export default function App() {
         <main className="center">
           <ChartPane
             contract={contract}
+            instrument={instrument}
             interval={interval}
             bars={bars}
             // 历史位一起交给图：这次没算出来但还留着的那几条，画淡一点

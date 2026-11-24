@@ -35,8 +35,12 @@ const CHECKS = [
   { group: 'server', name: 'quant', file: 'server/scripts/check-quant.ts' },
   // 起一个本地假模型服务，全程回环
   { group: 'server', name: 'ai', file: 'server/scripts/check-ai.ts', timeoutMs: 180_000 },
-  // 只绑 127.0.0.1 的若干端口，慢一些
-  { group: 'server', name: 'ws-failover', file: 'server/scripts/check-ws-failover.ts', timeoutMs: 180_000 },
+  /**
+   * 要连真实交易所：它会起几个真实的服务端进程去拨 Bitget，
+   * 验证「代理不通时换直连」这类路径。网络一变结果就变，所以不算离线项，
+   * 默认不跑（--network 才跑）。CI 里跑它等于把绿不绿交给外网。
+   */
+  { group: 'server', name: 'ws-failover', file: 'server/scripts/check-ws-failover.ts', timeoutMs: 180_000, network: true },
 
   // ---- web：纯函数与图表几何，不碰 DOM、不碰接口 ----
   { group: 'web', name: 'units', file: 'web/scripts/check-units.ts' },
@@ -45,6 +49,7 @@ const CHECKS = [
   { group: 'web', name: 'level-lines', file: 'web/scripts/check-level-lines.ts' },
   { group: 'web', name: 'chart-price-lines', file: 'web/scripts/check-chart-price-lines.ts' },
   { group: 'web', name: 'chart-tap', file: 'web/scripts/check-chart-tap.ts' },
+  { group: 'web', name: 'chart-storage', file: 'web/scripts/check-chart-storage.ts' },
   { group: 'web', name: 'position-pnl', file: 'web/scripts/check-position-pnl.ts' },
   { group: 'web', name: 'protection', file: 'web/scripts/check-protection.ts' },
   { group: 'web', name: 'update-flow', file: 'web/scripts/check-update-flow.ts' },
@@ -65,6 +70,8 @@ const args = process.argv.slice(2);
 const only = valueOf('--only');
 const groupFilter = valueOf('--group');
 const listOnly = args.includes('--list');
+/** 需要真实外网的项默认跳过，--network 才跑 */
+const withNetwork = args.includes('--network');
 
 function valueOf(flag) {
   const i = args.indexOf(flag);
@@ -134,6 +141,8 @@ async function main() {
   let selected = CHECKS;
   if (groupFilter) selected = selected.filter((c) => c.group === groupFilter);
   if (only) selected = selected.filter((c) => c.name.includes(only) || c.file.includes(only));
+  const skippedNetwork = selected.filter((c) => c.network && !withNetwork);
+  if (!withNetwork) selected = selected.filter((c) => !c.network);
 
   if (listOnly) {
     for (const c of selected) console.log(c.group.padEnd(8) + c.name.padEnd(18) + c.file);
@@ -147,6 +156,11 @@ async function main() {
 
   const python = findPython();
   console.log('体检脚本 ' + selected.length + ' 项，离线运行' + (python ? '' : '（本机没有 python，sidecar 项会跳过）'));
+  if (skippedNetwork.length) {
+    // 说清楚跳了什么，免得「全绿」被读成「连外网那条也过了」
+    console.log('跳过 ' + skippedNetwork.length + ' 项要连真实交易所的：'
+      + skippedNetwork.map((c) => c.name).join('、') + '（要跑加 --network）');
+  }
   console.log('');
 
   const failed = [];
