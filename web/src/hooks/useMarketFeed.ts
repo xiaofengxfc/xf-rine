@@ -11,6 +11,7 @@ import {
 import { backfill } from '../lib/backfill.ts';
 import { intervalSeconds, isUsableBar, mergeNewer, mergeOlder, snapTime, upsertBar, usableBars } from '../lib/candles.ts';
 import { wsUrl } from '../lib/endpoint.ts';
+import { marketKeyOf } from '../lib/instrument.ts';
 
 export interface MarketSnap {
   key: string;
@@ -109,8 +110,8 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
   /** 立刻重连的口子：假死看门狗和「回到前台」都从这里叫（见下面那两个 effect） */
   const kickRef = useRef<(() => void) | null>(null);
 
-  const marketKey = `${contract}:${interval}`;
-  const isCurrentMarket = useCallback((key: string) => key === `${contract}:${interval}`, [contract, interval]);
+  const marketKey = marketKeyOf(contract, interval, instrument);
+  const isCurrentMarket = useCallback((key: string) => key === marketKey, [marketKey]);
 
   useEffect(() => {
     marketRef.current = market;
@@ -372,7 +373,7 @@ export function useMarketFeed({ contract, instrument, interval, setContract, onT
         setFeedDown((down) => (down ? false : down));
 
         const incoming = message.bar;
-        const key = `${contract}:${interval}`;
+        const key = marketKeyOf(contract, interval, instrument);
         /**
          * 推来的时间可能不是周期起点（Bitget 的「正在走的那根」给的是当前分钟）。
          * 这里再吸附一次：不吸附的话，20:29 的帧会在 5 分钟图里另起一根，

@@ -46,5 +46,16 @@ check('同一品种判等', sameInstrument(btc, { ...btc }));
 check('不同交易所不算同一个', !sameInstrument(btc, { ...btc, venue: 'bitget' }));
 check('空值不算相等', !sameInstrument(null, btc) && !sameInstrument(btc, null));
 
+// ---- 行情缓存键与身份串是两件事 ----
+// marketKeyOf 在前端，但规则在这里一并钉住：它有身份就用身份，没有就退回裸符号。
+const marketKeyOf = (symbol: string, interval: string, instrument?: string): string =>
+  (instrument || symbol) + ':' + interval;
+
+check('没有身份时键就是老的写法', marketKeyOf('BTC_USDT', '15m') === 'BTC_USDT:15m');
+check('有身份时键里带身份', marketKeyOf('BTC_USDT', '15m', 'gate:perp:BTC_USDT') === 'gate:perp:BTC_USDT:15m');
+check('同一品种在两家交易所不是同一个键',
+  marketKeyOf('BTC_USDT', '15m', 'gate:perp:BTC_USDT') !== marketKeyOf('BTC_USDT', '15m', 'bitget:perp:BTC_USDT'));
+check('换周期换键', marketKeyOf('BTC_USDT', '15m', 'gate:perp:BTC_USDT') !== marketKeyOf('BTC_USDT', '1h', 'gate:perp:BTC_USDT'));
+
 if (failures) process.exit(1);
 console.log('✓ 品种身份检查通过');

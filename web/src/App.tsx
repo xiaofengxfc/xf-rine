@@ -39,7 +39,7 @@ import {
 } from './lib/update.ts';
 import { attachPhoneUpdate, discardPendingPackage, isPhoneUpdate } from './lib/appUpdate.ts';
 import { isNative } from './lib/endpoint.ts';
-import { instrumentKey } from './lib/instrument.ts';
+import { instrumentKey, marketKeyOf } from './lib/instrument.ts';
 
 interface Toast { id: number; kind: 'ok' | 'err'; title: string; detail?: string }
 
@@ -151,7 +151,7 @@ export default function App() {
     needOlder,
     resyncTail,
   } = useMarketFeed({ contract, instrument, interval, setContract, onToast: push });
-  const marketKey = `${contract}:${interval}`;
+  const marketKey = marketKeyOf(contract, interval, instrument);
   const fresh = market.key === marketKey;
   const info = fresh ? market.info : null;
   const bars = fresh ? market.bars : EMPTY_BARS;
