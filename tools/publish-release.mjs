@@ -40,24 +40,48 @@ const api = 'https://api.github.com/repos/' + repo;
 
 async function main() {
   const notes = readFileSync(notesFile, 'utf8');
-  const create = await fetch(api + '/releases', {
-    method: 'POST',
-    headers: { ...auth, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      tag_name: tag,
-      target_commitish: 'main',
-      name: tag,
-      body: notes,
-      draft: false,
-      prerelease: false,
-    }),
-  });
-  const release = await create.json();
-  if (!create.ok) {
-    console.error('建 release 失败 HTTP ' + create.status + '：' + JSON.stringify(release).slice(0, 400));
-    process.exit(1);
+  /**
+   * 同一个 tag 的 release 可能已经建过（先发了 Windows 包，再补 Android）。
+   * 那就复用，只补传缺的文件 —— 再 POST 一次 /releases 会被 GitHub 拒（422），
+   * 而且真建出两个同名 release 反而更糟。
+   */
+  const existing = await fetch(api + '/releases/tags/' + encodeURIComponent(tag), { headers: auth });
+  let release = null;
+  if (existing.ok) {
+    release = await existing.json();
+    console.log('复用已有 release id=' + release.id + ' tag=' + release.tag_name);
+    const have = new Set((release.assets ?? []).map((a) => a.name));
+    const missing = files.filter((f) => !have.has(basename(f)));
+    if (missing.length === 0) {
+      console.log('要传的文件都已存在，什么都不用做');
+      console.log(release.html_url);
+      return;
+    }
+    if (missing.length !== files.length) {
+      console.log('已有：' + [...have].join(', ') + '；补传：' + missing.map((f) => basename(f)).join(', '));
+      files.length = 0;
+      files.push(...missing);
+    }
+  } else {
+    const create = await fetch(api + '/releases', {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: tag,
+        target_commitish: 'main',
+        name: tag,
+        body: notes,
+        draft: false,
+        prerelease: false,
+      }),
+    });
+    release = await create.json();
+    if (!create.ok) {
+      console.error('建 release 失败 HTTP ' + create.status + '：' + JSON.stringify(release).slice(0, 400));
+      process.exit(1);
+    }
+    console.log('release id=' + release.id + ' tag=' + release.tag_name);
   }
-  console.log('release id=' + release.id + ' tag=' + release.tag_name);
   console.log(release.html_url);
 
   for (const file of files) {
