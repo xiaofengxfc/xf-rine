@@ -285,12 +285,20 @@ export function mountQuant(router: Router, deps: {
   router.post('/quant/strategies/:id/run', wrap(async (req: Request, res: Response) => {
     requireLocal(req, '记录回测结论');
     const body = bodyOf(req.body);
-    // 去空白：手填时代留下的尾随空格会让 URL 变成 ...%20，交易所直接当不存在
-    const contract = String(body.contract ?? 'BTC_USDT').trim().toUpperCase();
-    const interval = String(body.interval ?? '1h').trim();
-    const kind = body.kind === 'prompt' ? 'prompt' : 'rule';
-    const spec = body.spec as StrategySpec | undefined;
-    const prompt = String(body.prompt ?? '').trim();
+    /**
+     * 策略内容默认从策略库读，请求体只作覆盖。
+     *
+     * URL 里已经有策略 id 了，再让调用方把 spec 原样传回来是多余的：
+     * 传漏了就是一个「没有策略内容」的 400，而页面点「跑」的时候本来就没带它。
+     * 实测踩到的就是这个 —— 策略明明在库里，却报「没有策略内容」。
+     */
+    const stored = getStrategy(String(req.params.id));
+    const contract = String(body.contract ?? stored?.contract ?? 'BTC_USDT').trim().toUpperCase();
+    const interval = String(body.interval ?? stored?.interval ?? '1h').trim();
+    const kindRaw = body.kind ?? stored?.kind;
+    const kind = kindRaw === 'prompt' ? 'prompt' : 'rule';
+    const spec = (body.spec ?? (kind === 'rule' ? stored?.spec : undefined)) as StrategySpec | undefined;
+    const prompt = String(body.prompt ?? stored?.prompt ?? '').trim();
 
     const series = await getSeries(contract, interval, MAX_BARS);
     const meta = await contractMeta(contract).catch(() => ({ multiplier: 0.0001, takerFee: 0.0005 }));
