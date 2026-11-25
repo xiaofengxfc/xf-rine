@@ -58,6 +58,7 @@ const CHECKS = [
   { group: 'web', name: 'liquidation', file: 'web/scripts/check-liquidation.ts' },
   { group: 'web', name: 'pattern-index', file: 'web/scripts/check-pattern-index.ts' },
   { group: 'web', name: 'patterns', file: 'web/scripts/check-patterns.ts', timeoutMs: 180_000 },
+  { group: 'web', name: 'patterns-context', file: 'web/scripts/check-pattern-context.ts', timeoutMs: 120_000 },
 
   // ---- sidecar：HTTP 契约，pipeline 被打了桩，不需要 numpy ----
   { group: 'sidecar', name: 'http-api', file: 'sidecar/scripts/check_http_api.py', lang: 'python' },

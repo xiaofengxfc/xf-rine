@@ -275,6 +275,49 @@ pnpm pack:sidecar  # 只打引擎（产物在 sidecar/dist/xfrine-sidecar/）
 逐年对比之后是 7 年里只有 3 年跑赢「同期随便做多」，均值靠前 10 笔撑起 62%，
 中位数只有均值的六分之一。
 
+### 又试了三条新信息，还是不行
+
+价格语境之外，按同一套折外口径试了三类新信息：真实关键位（sidecar 的 V3Fusion）、
+资金费/持仓/清算（Gate）、订单流（Binance taker buy 占比）。16 个币（8 开发 + 8 留出）、
+4h/1d，每个条件格子都配「同条件、无形态」的基准。没有一条过线：
+
+| 条件（4h） | 方向增量 | 20 根超额 | 2 ATR 止损+时间净（基准） |
+|---|---|---|---|
+| 真实关键位：看涨@支撑 | −0.2pp | +0.03 ATR | −0.12（−0.08） |
+| 资金费：高资金+做空 | −1.3pp | +0.06 ATR | +0.04（+0.07） |
+| 订单流：taker 确认 | −0.2pp | −0.01 ATR | −0.03（+0.02） |
+
+1d 上也没有：真实引擎的看涨@支撑 20 根超额 −0.17 ATR，资金费「低资金+做多」−0.09，
+订单流确认 −0.04。
+
+关键位代理一度看起来最好：4h「看涨形态 + 20 根低点 0.5 ATR 内」，
+每条命中 20 根超额 +0.37 ATR，成本翻倍仍正，8 个留出币 +0.45。
+但那是**重叠命中**的算法：同一段行情里几个形态各算一笔。
+按同币一次只持一笔、下一根开盘成交、2 ATR 止损、持 20 根重跑，
+766 笔净 +0.006 ATR/笔，中位 −1.32，2025 和 2026 都是负的。
+真实引擎的关键位反而没有增量（+0.03 ATR）——20 根低点是短期区间低点，不是引擎的多重关键位。
+
+结论：这三条都不接进方向判断；形态仍只标位置，读数卡继续给实测胜率和基准。
+
+复现（数据默认落在 `.scratch/pattern-context/cache/`）：
+
+```bash
+pnpm fetch:patterns-context       # Gate K 线、资金费、合约统计；Binance taker buy
+pnpm levels:timeline              # sidecar V3Fusion 关键位时间线（需要 Python）
+pnpm stats:patterns-context -- --feature levels
+pnpm stats:patterns-context -- --feature levels-engine
+pnpm stats:patterns-context -- --feature funding
+pnpm stats:patterns-context -- --feature flow
+pnpm stats:patterns-context -- --feature strategy
+pnpm check:patterns-context       # 离线自检，已接进 check:all
+```
+
+只想跑小样本：加 `--symbols BTC_USDT,ETH_USDT --intervals 4h`。`levels:timeline` 优先用
+`sidecar/.venv` 里的 Python；没有 venv 才退回 `python`。关键位默认每 50 根重算一次，
+最多滞后 49 根；要压这个滞后就传 `--every 25`。
+Binance 直连不通时，`fetch:patterns-context -- --skip-binance` 只拉 Gate；已有
+`.scratch/pattern-context/cache/binance` 的话 `--feature flow` 仍可跑。
+
 ### 统计怎么重新生成
 
 ```bash
