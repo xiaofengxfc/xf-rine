@@ -15,8 +15,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { loadDir, atrSeries, ATR_PERIOD, windows } from './pattern-core.ts';
 import { buildDataset, aggregate, line, HEADER, COST, tradeAt, type Bar, type Hit } from './pattern-context-core.ts';
 import {
-  levelProxyState, engineState, loadEngineTimelines, fundingState, flowState,
-  levelGroup, fundingGroup, flowGroup,
+  levelProxyState, engineState, loadEngineTimelines, fundingState, flowState, oiState,
+  levelGroup, fundingGroup, flowGroup, liqGroup, oiGroup, type OiMode,
 } from './pattern-context-features.ts';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -28,7 +28,7 @@ const DEV = new Set(['BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'DOGE_USDT', 'XRP_USDT'
 const rel = (p: string): string => (isAbsolute(p) ? p : resolve(ROOT, p));
 
 interface Options {
-  feature: 'levels' | 'levels-engine' | 'funding' | 'flow' | 'strategy';
+  feature: 'levels' | 'levels-engine' | 'funding' | 'flow' | 'oi' | 'strategy';
   symbols: string[];
   intervals: string[];
   bars: number;
@@ -38,6 +38,7 @@ interface Options {
   levelsDir: string;
   lookback: number;
   near: number;
+  oiMode: OiMode;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -52,6 +53,7 @@ function parseArgs(argv: string[]): Options {
     levelsDir: ROOT + '.scratch/pattern-context/cache/levels',
     lookback: 20,
     near: 0.5,
+    oiMode: 'liq',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
@@ -59,7 +61,7 @@ function parseArgs(argv: string[]): Options {
     const next = () => argv[++i] ?? '';
     if (a === '--feature') {
       const v = next();
-      if (!['levels', 'levels-engine', 'funding', 'flow', 'strategy'].includes(v)) throw new Error('--feature 只能是 levels|levels-engine|funding|flow|strategy');
+      if (!['levels', 'levels-engine', 'funding', 'flow', 'oi', 'strategy'].includes(v)) throw new Error('--feature 只能是 levels|levels-engine|funding|flow|oi|strategy');
       opt.feature = v as Options['feature'];
     } else if (a === '--symbols') opt.symbols = next().split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--intervals') opt.intervals = next().split(',').map((s) => s.trim()).filter(Boolean);
@@ -70,7 +72,11 @@ function parseArgs(argv: string[]): Options {
     else if (a === '--levels-dir') opt.levelsDir = rel(next());
     else if (a === '--lookback') opt.lookback = Math.max(5, Number(next()) || 20);
     else if (a === '--near') opt.near = Math.max(0.05, Number(next()) || 0.5);
-    else throw new Error('不认识的参数：' + a);
+    else if (a === '--oi-mode') {
+      const v = next();
+      if (v !== 'liq' && v !== 'oi') throw new Error('--oi-mode 只能是 liq 或 oi');
+      opt.oiMode = v;
+    } else throw new Error('不认识的参数：' + a);
   }
   return opt;
 }
@@ -206,6 +212,21 @@ function main(): void {
     groups = ['高资金+做空', '低资金+做多', '高资金+做多', '低资金+做空', '资金中性'];
     mainGroups = ['高资金+做空', '低资金+做多', '资金中性'];
     featureName = '资金费 90 天分位（' + f.ready + ' 个币）';
+  } else if (opt.feature === 'oi') {
+    const f = oiState(opt.gateDir, opt.symbols, opt.intervals, opt.oiMode);
+    if (f.ready === 0) throw new Error('没有合约统计：' + opt.gateDir + '。先跑 pnpm fetch:patterns-context');
+    stateOf = f.stateOf;
+    if (opt.oiMode === 'liq') {
+      groupOf = liqGroup;
+      groups = ['清算反向', '清算顺势', '清算中性'];
+      mainGroups = groups;
+      featureName = '清算失衡（' + f.ready + ' 条序列）';
+    } else {
+      groupOf = oiGroup;
+      groups = ['OI放大', 'OI收缩', 'OI中性'];
+      mainGroups = groups;
+      featureName = 'OI 3 根变化 90 根分位（' + f.ready + ' 条序列）';
+    }
   } else {
     const f = flowState(opt.binanceDir, opt.symbols, opt.intervals);
     if (f.ready === 0) throw new Error('没有 Binance taker buy 数据：' + opt.binanceDir + '。先跑 pnpm fetch:patterns-context');

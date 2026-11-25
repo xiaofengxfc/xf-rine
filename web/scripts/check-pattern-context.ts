@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import {
   barrierAt, aggregate, clusterZ, tradeAt, type Bar, type BaseAgg, type Hit, type StateCtx,
 } from './pattern-context-core.ts';
-import { levelProxyState, loadEngineTimelines, engineState, fundingState, flowState } from './pattern-context-features.ts';
+import { levelProxyState, loadEngineTimelines, engineState, fundingState, flowState, oiState } from './pattern-context-features.ts';
 
 const bar = (o: number, h: number, l: number, c: number, t = 0): Bar => ({ time: t, open: o, high: h, low: l, close: c, volume: 1 });
 const ctxOf = (bars: Bar[], i: number, atr: number[], sym = 'BTC_USDT', iv = '4h'): StateCtx => ({
@@ -206,6 +206,38 @@ ok('订单流：最后一根 taker buy 占比在 50 根最高档是 T_high', () 
     const bars = [bar(100, 100, 100, 100, 59 * 14400)];
     const f = flowState(dir, ['BTC_USDT'], ['4h']);
     eq(f.stateOf(ctxOf(bars, 0, [1])), 'T_high', 'T_high');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 持仓 / 清算 ----------
+ok('清算失衡：多头被大量清算时是 L_long', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xf-pc-'));
+  try {
+    const rows = [];
+    for (let j = 0; j < 40; j += 1) {
+      rows.push({ t: j * 14400, open_interest: 1000 * Math.pow(1.01, j), long_liq_size: 900, short_liq_size: 100 });
+    }
+    writeFileSync(join(dir, 'BTC_USDT_stats_4h.json'), JSON.stringify(rows));
+    const bars = [bar(100, 100, 100, 100, 39 * 14400)];
+    const f = oiState(dir, ['BTC_USDT'], ['4h'], 'liq');
+    eq(f.stateOf(ctxOf(bars, 0, [1])), 'L_long', 'L_long');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+ok('OI：持续放大且落在 90 根最高档是 OI_up', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xf-pc-'));
+  try {
+    const rows = [];
+    for (let j = 0; j < 200; j += 1) {
+      rows.push({ t: j * 14400, open_interest: 1000 * Math.pow(1.01, j), long_liq_size: 10, short_liq_size: 10 });
+    }
+    writeFileSync(join(dir, 'BTC_USDT_stats_4h.json'), JSON.stringify(rows));
+    const bars = [bar(100, 100, 100, 100, 199 * 14400)];
+    const f = oiState(dir, ['BTC_USDT'], ['4h'], 'oi');
+    eq(f.stateOf(ctxOf(bars, 0, [1])), 'OI_up', 'OI_up');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

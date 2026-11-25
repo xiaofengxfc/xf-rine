@@ -204,3 +204,104 @@ export function flowGroup(h: Pick<Hit, 'state' | 'dir'>): string {
   if (h.state === 'T_low') return h.dir < 0 ? '流量确认' : '流量背离';
   return '流量中性';
 }
+
+
+// ---------- 持仓 / 清算 ----------
+
+type StatRec = { t: number; oi: number; longLiq: number; shortLiq: number };
+
+export type OiMode = 'liq' | 'oi';
+
+/**
+ * 清算失衡 / OI 变化分档。
+ *
+ * liq：最后一根 stats 的 (long_liq - short_liq) / (long_liq + short_liq)。
+ *      多头被大量清算（imb 高）之后，看涨形态做多 = 清算反向；反过来 = 清算顺势。
+ * oi：open_interest / 3 根前 - 1，落在过去 90 根的前 10% = OI放大，后 10% = OI收缩。
+ *      两种都只当分层，不单独算方向假设之外的东西。
+ */
+export function oiState(
+  gateDir: string, symbols: string[], intervals: string[], mode: OiMode = 'liq', lookback = 3,
+): { stateOf: StateFn; ready: number } {
+  type Book = { times: number[]; state: (string | null)[]; maxStale: number };
+  const book = new Map<string, Book>();
+
+  for (const iv of intervals) {
+    const stale = iv === '1d' ? 5 * 86400 : 2 * 86400;
+    for (const sym of symbols) {
+      const raw = readJson<any[]>(join(gateDir, sym + '_stats_' + iv + '.json'));
+      if (!raw) continue;
+      const arr: StatRec[] = raw
+        .map((x) => ({
+          t: Number(x.t ?? x.time),
+          oi: Number(x.open_interest),
+          longLiq: Number(x.long_liq_size),
+          shortLiq: Number(x.short_liq_size),
+        }))
+        .filter((x) => Number.isFinite(x.t) && x.t > 0)
+        .sort((a, b) => a.t - b.t);
+      if (arr.length < 30) continue;
+      const times = arr.map((x) => x.t);
+      const state: (string | null)[] = [];
+
+      if (mode === 'liq') {
+        for (const r of arr) {
+          const total = r.longLiq + r.shortLiq;
+          if (!(total > 0)) { state.push('L_mid'); continue; }
+          const imb = (r.longLiq - r.shortLiq) / total;
+          state.push(imb >= 0.5 ? 'L_long' : imb <= -0.5 ? 'L_short' : 'L_mid');
+        }
+      } else {
+        const chg: number[] = arr.map(() => NaN);
+        for (let j = lookback; j < arr.length; j += 1) {
+          const prev = arr[j - lookback]!.oi;
+          const cur = arr[j]!.oi;
+          if (prev > 0 && cur > 0) chg[j] = cur / prev - 1;
+        }
+        for (let j = 0; j < arr.length; j += 1) {
+          const c = chg[j];
+          if (!Number.isFinite(c)) { state.push(null); continue; }
+          const vals: number[] = [];
+          for (let k = Math.max(0, j - 90 + 1); k <= j; k += 1) {
+            const v = chg[k];
+            if (Number.isFinite(v)) vals.push(v!);
+          }
+          if (vals.length < 30) { state.push(null); continue; }
+          let cnt = 0;
+          for (const v of vals) if (v <= c!) cnt += 1;
+          const p = cnt / vals.length;
+          state.push(p >= 0.9 ? 'OI_up' : p <= 0.1 ? 'OI_down' : 'OI_mid');
+        }
+      }
+      book.set(sym + '|' + iv, { times, state, maxStale: stale });
+    }
+  }
+
+  const stateOf: StateFn = (ctx) => {
+    const b = book.get(ctx.sym + '|' + ctx.iv);
+    if (!b) return null;
+    const t = ctx.bars[ctx.i]!.time;
+    let lo = 0;
+    let hi = b.times.length - 1;
+    let best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (b.times[mid]! <= t) { best = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    if (best < 0 || t - b.times[best]! > b.maxStale) return null;
+    return b.state[best] ?? null;
+  };
+  return { stateOf, ready: book.size };
+}
+
+export function liqGroup(h: Pick<Hit, 'state' | 'dir'>): string {
+  if (h.state === 'L_long') return h.dir > 0 ? '清算反向' : '清算顺势';
+  if (h.state === 'L_short') return h.dir < 0 ? '清算反向' : '清算顺势';
+  return '清算中性';
+}
+
+export function oiGroup(h: Pick<Hit, 'state'>): string {
+  if (h.state === 'OI_up') return 'OI放大';
+  if (h.state === 'OI_down') return 'OI收缩';
+  return 'OI中性';
+}

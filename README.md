@@ -285,10 +285,12 @@ pnpm pack:sidecar  # 只打引擎（产物在 sidecar/dist/xfrine-sidecar/）
 |---|---|---|---|
 | 真实关键位：看涨@支撑 | −0.2pp | +0.03 ATR | −0.12（−0.08） |
 | 资金费：高资金+做空 | −1.3pp | +0.06 ATR | +0.04（+0.07） |
+| 清算：反向（多杀多后做多） | −0.9pp | +0.05 ATR | −0.11（−0.10） |
+| OI：放大 | −0.9pp | +0.05 ATR | −0.08（−0.10） |
 | 订单流：taker 确认 | −0.2pp | −0.01 ATR | −0.03（+0.02） |
 
 1d 上也没有：真实引擎的看涨@支撑 20 根超额 −0.17 ATR，资金费「低资金+做多」−0.09，
-订单流确认 −0.04。
+清算反向 −0.20，OI放大 −0.01，订单流确认 −0.04。
 
 关键位代理一度看起来最好：4h「看涨形态 + 20 根低点 0.5 ATR 内」，
 每条命中 20 根超额 +0.37 ATR，成本翻倍仍正，8 个留出币 +0.45。
@@ -307,6 +309,8 @@ pnpm levels:timeline              # sidecar V3Fusion 关键位时间线（需要
 pnpm stats:patterns-context -- --feature levels
 pnpm stats:patterns-context -- --feature levels-engine
 pnpm stats:patterns-context -- --feature funding
+pnpm stats:patterns-context -- --feature oi
+pnpm stats:patterns-context -- --feature oi --oi-mode oi
 pnpm stats:patterns-context -- --feature flow
 pnpm stats:patterns-context -- --feature strategy
 pnpm check:patterns-context       # 离线自检，已接进 check:all
@@ -1054,7 +1058,7 @@ web/             React + Vite + lightweight-charts
 不需要交易所、不需要密钥、不需要 Python 数值环境的那批，一条命令跑完（CI 跑的就是这一条）：
 
 ```bash
-pnpm check:all                        # 25 项：server 纯逻辑、web 纯函数、sidecar HTTP 契约
+pnpm check:all                        # 29 项：server 纯逻辑、web 纯函数、sidecar HTTP 契约
 pnpm check:all -- --list              # 看看都收了哪些
 pnpm check:all -- --only units        # 只跑名字里带 units 的
 pnpm check:all -- --group web         # 只跑某一组
