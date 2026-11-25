@@ -822,6 +822,44 @@ export default function ChartPane({
     chart.priceScale('vol').applyOptions({ visible: false, scaleMargins: { top: VOLUME_TOP, bottom: 0 } });
 
     /**
+     * 光标此刻在屏幕上的位置。
+     *
+     * 十字线事件只说明「这一刻没有十字线」，不说光标去了哪儿 —— 而这里偏偏要分开两件事：
+     * 光标真的划出了图，还是只是从 K 线区挪到了图上浮着的那一层（读数角标里的取价按钮、
+     * 持仓摘要里的「市价平」）。那两个按钮都是 pointer-events: auto 的一小块，盖在 canvas 上，
+     * 光标挪上去的瞬间库就认为十字线该收了，于是发一帧没有位置的读数。
+     */
+    let pointerX = Number.NaN;
+    let pointerY = Number.NaN;
+    const trackPointer = (event: Event) => {
+      const p = event as PointerEvent;
+      pointerX = p.clientX;
+      pointerY = p.clientY;
+    };
+    // 不止 move：光标跨到浮层上的那一刻，浏览器先派 out/over 这一对，库的十字线清理
+    // 也正是被那一对触发的 —— 只听 move 的话，清理发生时读到的还是上一帧的坐标，
+    // 那一次判断会答「光标在 K 线区」，于是白抖一帧。
+    const POINTER_EVENTS = ['pointermove', 'pointerover', 'pointerout'];
+    for (const type of POINTER_EVENTS) window.addEventListener(type, trackPointer, { passive: true });
+
+    /**
+     * 光标正停在图上自己浮着的那一层吗（读数角标、持仓摘要）。
+     *
+     * 照单收掉读数的后果是一帧一次的抽搐：读数一收，这两块就往上下让位
+     * （.chart-wrap.has-readout 那条），而按钮正好被让开、光标落回 K 线区，读数又回来、
+     * 两块又让回去 —— 一秒钟三十次。结果不只是上下抖：「市价平」永远点不中，
+     * 那一下会落到图上，把读数钉在一根毫不相干的 K 线上。
+     *
+     * 所以「收读数」只在光标真离开这一层的时候做。读数角标里那两个按钮（用这个价限价 /
+     * 更多价格）是同一个坑：收掉读数会连角标一起收掉，光标底下那块当场换成了图。
+     */
+    const pointerOverOverlay = () => {
+      if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return false;
+      const hit = document.elementFromPoint(pointerX, pointerY);
+      return Boolean(hit && hit.closest('.chart-pos, .chart-badge'));
+    };
+
+    /**
      * 十字线停在哪根，读数就换成哪根。两种来源共用这一条：
      *
      *   · 鼠标/手指在图上移动 —— 库自己发出来的十字线事件；
@@ -834,7 +872,8 @@ export default function ChartPane({
     const readout = (param: MouseEventParams<Time>) => {
       const hold = pinnedRef.current;
       if (!param.time || !param.point) {
-        setLegend(null);
+        // 光标可能只是挪到了图上浮着的那一层：那不算离开，读数留着，别让位
+        if (!pointerOverOverlay()) setLegend(null);
         return;
       }
       const data = param.seriesData as Map<unknown, unknown>;
@@ -869,7 +908,10 @@ export default function ChartPane({
        */
       const raw = volumeBar && volumeBar.time === time ? volumeBar : null;
       // 折线模式下没有开高低，只剩收盘价：图上别显示一排「undefined」
-      if (!raw && !d && !frame) { setLegend(null); return; }
+      if (!raw && !d && !frame) {
+        if (!pointerOverOverlay()) setLegend(null);
+        return;
+      }
       setLegend({
         o: raw ? raw.open : d ? d.open : null,
         h: raw ? raw.high : d ? d.high : null,
@@ -1274,6 +1316,7 @@ export default function ChartPane({
       window.clearTimeout(lostTimer);
       host.removeEventListener('contextmenu', onContextMenu);
       host.removeEventListener('mouseleave', onLeave);
+      for (const type of POINTER_EVENTS) window.removeEventListener(type, trackPointer);
       host.removeEventListener('pointercancel', dropPin, true);
       dropPinRef.current = () => {};
       window.removeEventListener('keydown', onKey);
