@@ -23,6 +23,7 @@
     "stats:patterns": "pnpm -F server exec tsx ../web/scripts/pattern-stats.ts",
     "stats:patterns-context": "pnpm -F server exec tsx ../web/scripts/pattern-context.ts",
     "fetch:patterns-context": "pnpm -F server exec tsx ../web/scripts/fetch-pattern-context.ts",
+    "fetch:agg-trades": "node web/scripts/run-fetch-agg.mjs",
     "levels:timeline": "node web/scripts/run-levels-timeline.mjs",
     "check:viewport": "pnpm -F server exec tsx ../web/scripts/check-viewport.ts",
     "check:errors": "pnpm -F server exec tsx scripts/check-errors.ts",

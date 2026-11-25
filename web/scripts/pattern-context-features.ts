@@ -305,3 +305,61 @@ export function oiGroup(h: Pick<Hit, 'state'>): string {
   if (h.state === 'OI_down') return 'OI收缩';
   return 'OI中性';
 }
+
+
+// ---------- 逐笔大单 ----------
+
+type AggRec = {
+  t: number; buy: number; sell: number; largeBuy: number; largeSell: number;
+  lateBuy: number; lateSell: number; trades: number; largeTrades: number;
+};
+
+export type AggMode = 'large' | 'late';
+
+/**
+ * 逐笔大单失衡。large：整根 4h 里 ≥ $50k 的成交；late：最后一小时的主动买卖。
+ *
+ * 阈值用「本币过去 90 根的 20/80 分位」，不用固定 0.3：BTC/ETH 的大单买卖
+ * 常年接近平衡，固定阈值会让 98% 的根都落进中性（实测 1,016 条命中里只剩 14 条）。
+ */
+export function aggState(
+  aggDir: string, symbols: string[], intervals: string[], mode: AggMode = 'large',
+): { stateOf: StateFn; ready: number } {
+  const book = new Map<string, Map<number, string>>();
+  for (const iv of intervals) {
+    for (const sym of symbols) {
+      const raw = readJson<AggRec[]>(join(aggDir, sym + '_' + iv + '.json'));
+      if (!raw) continue;
+      const arr = raw.map((r) => ({ t: Number(r.t), buy: mode === 'large' ? r.largeBuy : r.lateBuy, sell: mode === 'large' ? r.largeSell : r.lateSell }))
+        .filter((r) => Number.isFinite(r.t))
+        .sort((a, b) => a.t - b.t);
+      const imb = arr.map((r) => {
+        const total = r.buy + r.sell;
+        return total > 0 ? (r.buy - r.sell) / total : 0;
+      });
+      const map = new Map<number, string>();
+      for (let j = 0; j < arr.length; j += 1) {
+        if (j < 30) { map.set(arr[j]!.t, 'A_mid'); continue; }
+        const vals: number[] = [];
+        for (let k = Math.max(0, j - 90 + 1); k <= j; k += 1) vals.push(imb[k]!);
+        let cnt = 0;
+        for (const v of vals) if (v <= imb[j]!) cnt += 1;
+        const p = cnt / vals.length;
+        map.set(arr[j]!.t, p >= 0.8 ? 'A_buy' : p <= 0.2 ? 'A_sell' : 'A_mid');
+      }
+      book.set(sym + '|' + iv, map);
+    }
+  }
+  const stateOf: StateFn = (ctx) => {
+    const map = book.get(ctx.sym + '|' + ctx.iv);
+    if (!map) return null;
+    return map.get(ctx.bars[ctx.i]!.time) ?? null;
+  };
+  return { stateOf, ready: book.size };
+}
+
+export function aggGroup(h: Pick<Hit, 'state' | 'dir'>): string {
+  if (h.state === 'A_buy') return h.dir > 0 ? '大单确认' : '大单背离';
+  if (h.state === 'A_sell') return h.dir < 0 ? '大单确认' : '大单背离';
+  return '大单中性';
+}

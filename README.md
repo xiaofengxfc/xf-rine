@@ -301,10 +301,29 @@ pnpm pack:sidecar  # 只打引擎（产物在 sidecar/dist/xfrine-sidecar/）
 
 结论：这三条都不接进方向判断；形态仍只标位置，读数卡继续给实测胜率和基准。
 
+### 逐笔大单：形态没跑赢纯流量
+
+2025 Q1、4h，用 Binance Vision 的逐笔 aggTrades：大单是 ≥$50k 成交的主动买卖失衡，
+尾盘是最后一小时的主动买卖。同一套流量分位下，形态+流量和纯流量对比：
+
+| 口径 | 开发组 3 根增量 / 20 根超额 | 第二组 3 根增量 / 20 根超额 |
+|---|---|---|
+| 大单确认 | +2.3pp / −0.36 ATR | +4.9pp / −0.07 ATR |
+| 尾盘确认 | +1.7pp / +0.38 ATR | −9.1pp / −0.32 ATR |
+
+第二组是 AVAX/LINK/ADA/DOT，其中 LINK/ADA 在形态开发组里也出现过，严格留出只有 AVAX/DOT。
+按同币不重叠、下一根开盘、2 ATR 止损、持 20 根再算，开发组纯流量还有
++0.41 / +0.37 ATR/笔，第二组只剩 +0.05 / +0.06；形态+流量是 −0.13 / −0.07。
+严格留出的 AVAX/DOT：大单形态 −0.006、纯流量 +0.184；尾盘 −0.277、+0.088；
+纯流量只是略正，中位为负，样本 60/59 笔，不构成信号。
+
+结论：逐笔大单/尾盘没有给形态方向增量；纯流量也没有稳定复现。
+
 复现（数据默认落在 `.scratch/pattern-context/cache/`）：
 
 ```bash
 pnpm fetch:patterns-context       # Gate K 线、资金费、合约统计；Binance taker buy
+pnpm fetch:agg-trades -- --start 2025-01-01 --end 2025-03-31   # 逐笔大单（可选，4.6GB/四币）
 pnpm levels:timeline              # sidecar V3Fusion 关键位时间线（需要 Python）
 pnpm stats:patterns-context -- --feature levels
 pnpm stats:patterns-context -- --feature levels-engine
@@ -312,6 +331,10 @@ pnpm stats:patterns-context -- --feature funding
 pnpm stats:patterns-context -- --feature oi
 pnpm stats:patterns-context -- --feature oi --oi-mode oi
 pnpm stats:patterns-context -- --feature flow
+pnpm stats:patterns-context -- --feature agg
+pnpm stats:patterns-context -- --feature agg --agg-mode late
+pnpm stats:patterns-context -- --feature agg --strategy
+pnpm stats:patterns-context -- --feature agg --agg-mode late --strategy
 pnpm stats:patterns-context -- --feature strategy
 pnpm check:patterns-context       # 离线自检，已接进 check:all
 ```
@@ -321,6 +344,7 @@ pnpm check:patterns-context       # 离线自检，已接进 check:all
 最多滞后 49 根；要压这个滞后就传 `--every 25`。
 Binance 直连不通时，`fetch:patterns-context -- --skip-binance` 只拉 Gate；已有
 `.scratch/pattern-context/cache/binance` 的话 `--feature flow` 仍可跑。
+`fetch:agg-trades` 走 data.binance.vision，边下边聚合，聚完删 ZIP；2025 Q1 四个币约 4.6GB。
 
 ### 统计怎么重新生成
 

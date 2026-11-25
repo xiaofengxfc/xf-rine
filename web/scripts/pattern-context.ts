@@ -13,10 +13,10 @@
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, resolve } from 'node:path';
 import { loadDir, atrSeries, ATR_PERIOD, windows } from './pattern-core.ts';
-import { buildDataset, aggregate, line, HEADER, COST, tradeAt, type Bar, type Hit } from './pattern-context-core.ts';
+import { buildDataset, aggregate, line, HEADER, COST, tradeAt, type Bar, type Hit, type StateFn } from './pattern-context-core.ts';
 import {
-  levelProxyState, engineState, loadEngineTimelines, fundingState, flowState, oiState,
-  levelGroup, fundingGroup, flowGroup, liqGroup, oiGroup, type OiMode,
+  levelProxyState, engineState, loadEngineTimelines, fundingState, flowState, oiState, aggState,
+  levelGroup, fundingGroup, flowGroup, liqGroup, oiGroup, aggGroup, type OiMode, type AggMode,
 } from './pattern-context-features.ts';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -28,7 +28,7 @@ const DEV = new Set(['BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'DOGE_USDT', 'XRP_USDT'
 const rel = (p: string): string => (isAbsolute(p) ? p : resolve(ROOT, p));
 
 interface Options {
-  feature: 'levels' | 'levels-engine' | 'funding' | 'flow' | 'oi' | 'strategy';
+  feature: 'levels' | 'levels-engine' | 'funding' | 'flow' | 'oi' | 'agg' | 'strategy';
   symbols: string[];
   intervals: string[];
   bars: number;
@@ -39,6 +39,9 @@ interface Options {
   lookback: number;
   near: number;
   oiMode: OiMode;
+  aggDir: string;
+  aggMode: AggMode;
+  strategy: boolean;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -54,6 +57,9 @@ function parseArgs(argv: string[]): Options {
     lookback: 20,
     near: 0.5,
     oiMode: 'liq',
+    aggDir: ROOT + '.scratch/pattern-context/cache/agg',
+    aggMode: 'large',
+    strategy: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
@@ -61,7 +67,7 @@ function parseArgs(argv: string[]): Options {
     const next = () => argv[++i] ?? '';
     if (a === '--feature') {
       const v = next();
-      if (!['levels', 'levels-engine', 'funding', 'flow', 'oi', 'strategy'].includes(v)) throw new Error('--feature 只能是 levels|levels-engine|funding|flow|oi|strategy');
+      if (!['levels', 'levels-engine', 'funding', 'flow', 'oi', 'agg', 'strategy'].includes(v)) throw new Error('--feature 只能是 levels|levels-engine|funding|flow|oi|agg|strategy');
       opt.feature = v as Options['feature'];
     } else if (a === '--symbols') opt.symbols = next().split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--intervals') opt.intervals = next().split(',').map((s) => s.trim()).filter(Boolean);
@@ -76,7 +82,13 @@ function parseArgs(argv: string[]): Options {
       const v = next();
       if (v !== 'liq' && v !== 'oi') throw new Error('--oi-mode 只能是 liq 或 oi');
       opt.oiMode = v;
-    } else throw new Error('不认识的参数：' + a);
+    } else if (a === '--agg-dir') opt.aggDir = rel(next());
+    else if (a === '--agg-mode') {
+      const v = next();
+      if (v !== 'large' && v !== 'late') throw new Error('--agg-mode 只能是 large 或 late');
+      opt.aggMode = v;
+    } else if (a === '--strategy') opt.strategy = true;
+    else throw new Error('不认识的参数：' + a);
   }
   return opt;
 }
@@ -176,6 +188,70 @@ function reportStrategy(opt: Options, ds: ReturnType<typeof buildDataset>): void
   for (const side of ['dev', 'holdout'] as const) summarize(side, baseTrades.filter((t) => (side === 'dev') === DEV.has(t.sym)));
 }
 
+
+/** 逐笔成交级：形态+流量确认 vs 纯流量，同币不重叠 */
+function reportAggStrategy(opt: Options, ds: ReturnType<typeof buildDataset>, stateOf: StateFn): void {
+  const target = ds.hits.filter((h) => aggGroup(h) === '大单确认');
+  const barsMap = new Map<string, Bar[]>();
+  const atrMap = new Map<string, number[]>();
+  for (const sym of opt.symbols) {
+    const b = loadDir(opt.barsDir, sym, '4h', opt.bars) as Bar[];
+    barsMap.set(sym, b);
+    atrMap.set(sym, atrSeries(b, ATR_PERIOD));
+  }
+
+  const trades: Trade[] = [];
+  const bySym = new Map<string, Hit[]>();
+  for (const h of target) {
+    const list = bySym.get(h.sym) ?? [];
+    list.push(h);
+    bySym.set(h.sym, list);
+  }
+  for (const [sym, list] of bySym) {
+    const bars = barsMap.get(sym);
+    const atr = atrMap.get(sym);
+    if (!bars || !atr) continue;
+    const seen = new Set<number>();
+    const uniq = list.sort((a, b) => a.idx - b.idx).filter((h) => (seen.has(h.idx) ? false : (seen.add(h.idx), true)));
+    let nextFree = -1;
+    for (const h of uniq) {
+      if (h.idx < nextFree) continue;
+      const r = tradeAt(bars, atr, h.idx, h.dir);
+      if (!r) continue;
+      trades.push({ sym, year: new Date(bars[h.idx]!.time * 1000).getUTCFullYear(), pnl: r.pnl });
+      nextFree = r.exit;
+    }
+  }
+  console.log('\n逐笔：形态 + 流量确认（同币不重叠）');
+  console.log('组\t笔数\t净ATR/笔\t胜率%\t中位');
+  summarize('全部', trades);
+  for (const side of ['dev', 'holdout'] as const) summarize(side, trades.filter((t) => (side === 'dev') === DEV.has(t.sym)));
+
+  const baseTrades: Trade[] = [];
+  for (const sym of opt.symbols) {
+    const bars = barsMap.get(sym);
+    const atr = atrMap.get(sym);
+    if (!bars || !atr) continue;
+    const w = windows(bars.length, 3);
+    if (!w.length) continue;
+    let nextFree = -1;
+    for (let i = w[0]!.trainEnd; i < w[w.length - 1]!.testEnd; i += 1) {
+      if (i < nextFree) continue;
+      const state = stateOf({ bars, i, atr, atrPct: [], volT: [], iv: '4h', sym });
+      const dir: 1 | -1 | 0 = state === 'A_buy' ? 1 : state === 'A_sell' ? -1 : 0;
+      if (!dir) continue;
+      const r = tradeAt(bars, atr, i, dir);
+      if (!r) continue;
+      baseTrades.push({ sym, year: new Date(bars[i]!.time * 1000).getUTCFullYear(), pnl: r.pnl });
+      nextFree = r.exit;
+    }
+  }
+  console.log('\n逐笔：纯流量（不带形态，同币不重叠）');
+  console.log('组\t笔数\t净ATR/笔\t胜率%\t中位');
+  summarize('全部', baseTrades);
+  for (const side of ['dev', 'holdout'] as const) summarize(side, baseTrades.filter((t) => (side === 'dev') === DEV.has(t.sym)));
+}
+
 function main(): void {
   const opt = parseArgs(process.argv.slice(2));
   // 成交级只跑一个周期；把 1d 也带上会把两个周期的命中混进同一张成交表
@@ -212,6 +288,14 @@ function main(): void {
     groups = ['高资金+做空', '低资金+做多', '高资金+做多', '低资金+做空', '资金中性'];
     mainGroups = ['高资金+做空', '低资金+做多', '资金中性'];
     featureName = '资金费 90 天分位（' + f.ready + ' 个币）';
+  } else if (opt.feature === 'agg') {
+    const f = aggState(opt.aggDir, opt.symbols, opt.intervals, opt.aggMode);
+    if (f.ready === 0) throw new Error('没有逐笔聚合数据：' + opt.aggDir + '。先跑 python sidecar/scripts/fetch_agg_trades.py');
+    stateOf = f.stateOf;
+    groupOf = aggGroup;
+    groups = ['大单确认', '大单背离', '大单中性'];
+    mainGroups = groups;
+    featureName = (opt.aggMode === 'large' ? '逐笔大单' : '逐笔尾盘') + '（' + f.ready + ' 条序列）';
   } else if (opt.feature === 'oi') {
     const f = oiState(opt.gateDir, opt.symbols, opt.intervals, opt.oiMode);
     if (f.ready === 0) throw new Error('没有合约统计：' + opt.gateDir + '。先跑 pnpm fetch:patterns-context');
@@ -242,6 +326,9 @@ function main(): void {
   console.log('序列 ' + ds.stats.series + ' 条，命中 ' + ds.stats.keptHits + ' / ' + ds.stats.rawHits + '，阈值 ' + opt.near + ' ATR');
   reportGroups(groups, groupOf, ds, mainGroups);
   if (opt.feature === 'strategy') reportStrategy(opt, ds);
+  else if (opt.strategy && opt.feature === 'levels') reportStrategy(opt, ds);
+  else if (opt.strategy && opt.feature === 'agg') reportAggStrategy(opt, ds, stateOf as StateFn);
+  else if (opt.strategy) throw new Error('--strategy 只支持 levels / agg');
 }
 
 main();
